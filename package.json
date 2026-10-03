@@ -12,6 +12,8 @@
     "test:e2e": "node tests/e2e.cjs"
   },
   "dependencies": {
+    "locus-harness": "github:boccchi2993/locus-harness#347eed99a415dc080b97d46d8a4271ceb19c5142",
+    "locus-runtime": "github:boccchi2993/locus-runtime#2435a57ff7a66db3db88aa98a88d404c75133483",
     "vue": "^3.5.13"
   },
   "devDependencies": {
