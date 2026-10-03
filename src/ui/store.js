@@ -14,73 +14,85 @@
 //
 //  M1a (repository split): the TASK lifecycle (admission, task
 //  controller, prepare→run→settle ordering, pre-run cancellation,
-//  storage-mutation quiesce) moved to the Harness module
-//  src/harness/task-runner.js; protocol-replay session preparation and
-//  the durable persistence context moved to
-//  src/harness/provider-session.js. This store now provides the
-//  PRODUCT side: conversation identity, UI projection, persistence
-//  storage access, VFS/Python preparation, model configuration and
-//  test/demo hooks — wired through the two harness modules' ports.
-//  Classic-script globals this file still reads are concentrated in
-//  the adapter blocks below (marked M1b/M2 elimination points in
-//  docs/REPOSITORY-SPLIT-INVENTORY.md).
+//  storage-mutation quiesce) lives in the Harness (task-runner port);
+//  protocol-replay session preparation and the durable persistence
+//  context live in the Harness (provider-session port). This store
+//  provides the PRODUCT side: conversation identity, UI projection,
+//  persistence storage access, VFS/Python preparation, model
+//  configuration and test/demo hooks — wired through the two ports.
 //
-//  Runtime globals (AgentSession, Model, callModel, executeTool,
-//  LocalDirectoryWorkspace, ensureWorkspacePermission, createPythonRuntime,
-//  Telemetry, LocusProjector, VirtualWorkspace, SHELL_COMMANDS) come from
-//  the classic scripts loaded by index.html before this module — same as
-//  the old ui.js wiring. M1b (repository split): the python interpreter is
-//  an INSTANCE created and owned here (no page-global PythonRuntime); task
-//  preparation, session reset and shell execution all use that one
-//  instance.
+//  M3c (three-repo switch): every core symbol enters through the TWO
+//  PUBLIC TRANSFER LAYERS — src/product/runtime-api.js (Agent A) and
+//  src/product/harness-api.js (Agent B) — and every Product-owned
+//  module arrives as an explicit ESM import. No classic global read is
+//  left in this file: no Model singleton, no __LOCUS_*_CORE__ table,
+//  no script load order, no hidden lexical chain. The model
+//  configuration is Product state below (the deleted legacy Model
+//  singleton's replacement); the transport seam is an explicit Product
+//  port (setProductModelTransport).
 // ============================================================
 
 import { reactive, computed } from 'vue';
-// M2b (repository split): the PUBLIC HARNESS entry — the agent session,
-// approval semantics, the model client factory and the image gate all
-// resolve through it (the declared __LOCUS_HARNESS_CORE__ table on this
-// page; self-assembly on a standalone host).
+// M3c: the RUNTIME core — only through the public transfer layer (A).
+// The worker-asset namespace is aliased: the store's e2e seam accessor
+// `runtimeWorkerAssets()` (below) keeps its established name.
+import {
+  createRuntime, createWorkspace,
+  LocalDirectoryWorkspace, OPFSWorkspace, ensureWorkspacePermission,
+  runtimeWorkerAssets as runtimeWorkerAssetBundle,
+} from '../product/runtime-api.js';
+// M3c: the HARNESS core — only through the public transfer layer (B).
 import {
   createAgentSession, createApprovalController, createModelClient, historyBudgetBytes,
   createModelCapabilityRegistry, createImageInputGate, runImageInputProbe,
   classifyImageProviderError, imageInputUnavailableNotice,
-} from '../harness/index.js';
-import { createTaskRunner, isPersistenceFailure } from '../harness/task-runner.js';
-import { createProviderSessions } from '../harness/provider-session.js';
+  harnessCapabilities,
+  createTaskRunner, isPersistenceFailure,
+  createProviderSessions,
+  getProviderAdapter, createProviderIdentity, createCredentialIdentity, projectNormalizedHistory,
+  CapabilityManager, SkillSourceStore, CAPABILITY_CATALOG, PLUGIN_CATALOG, SKILL_CATALOG, MCP_CATALOG,
+} from '../product/harness-api.js';
+// M3c: Product-owned modules as explicit ESM imports (A converted
+// tools/mutation-policy; B converted the rest — top-level symbol names
+// preserved by the conversion contract).
+import { executeTool, AGENT_TOOL_DEFINITIONS } from '../tools.js';
+import { LocusMutationPolicy } from '../mutation-policy.js';
+import { AttachmentStore, imageContentPart, textContentPart } from '../attachments.js';
+import { PersistenceServiceInstance, LOCUS_HOME_SKELETON } from '../persistence.js';
+import { SkillInstanceStorage, SkillInstanceWorkspace, productTaskVfsMounts } from '../extensions.js';
+import { ConversationHistoryWorkspace } from '../conversation-history-workspace.js';
 // M2b (repository split): the Product prompt inputs — behavior notes and
 // the descriptionPort adapter over the runtime's PUBLIC describeCommands().
 import { locusEnvironmentNotes, productDescriptionPort } from './product-prompt.js';
-// M2a (repository split): the PUBLIC runtime entry. The product chain
-// (prepare / execute / reset / dispose) goes through it — no page-global
-// runtime, no second interpreter, no worker sources read from this page.
-import { createRuntime } from '../runtime/index.js';
-import { PY_WORKER_SOURCE, GREP_WORKER_SOURCE } from '../runtime/worker-assets.js';
+// M3c: the presentation projector — the store imports it explicitly
+// (the classic global read is gone with the classic script tag).
+import { LocusProjector } from './projector.js';
 // M2c (repository split): the PUBLIC capability declarations + the Product
 // compatibility check. The Product owns the decision (contract §5); the
 // cores only declare.
-import { harnessCapabilities } from '../harness/index.js';
 import {
   checkCoreCompatibility, CompatibilityError, PRODUCT_CORE_REQUIREMENTS,
 } from '../product/core-compatibility.js';
 import { createLocusToolPort } from '../product/tool-adapter.js';
 
-/* global Model, executeTool, AGENT_TOOL_DEFINITIONS,
-   LocalDirectoryWorkspace, ensureWorkspacePermission, LocusMutationPolicy,
-   Telemetry, LocusProjector, VirtualWorkspace, SHELL_COMMANDS, LOCUS_HOME_SKELETON,
-   CapabilityManager, CAPABILITY_CATALOG, PLUGIN_CATALOG, SKILL_CATALOG, MCP_CATALOG,
-   SkillSourceStore, SkillInstanceStorage, SkillInstanceWorkspace,
-   PersistenceServiceInstance, OPFSWorkspace, ConversationHistoryWorkspace,
-   getProviderAdapter, projectNormalizedHistory */
+// The runtime worker assets this build carries (the REAL runtime
+// worker-assets public entry, through the transfer layer). Read once:
+// the product execution chain passes the sources through
+// createRuntime({ workerAssets }); the e2e seam accessor below
+// re-exposes the same values.
+const PY_WORKER_SOURCE = runtimeWorkerAssetBundle.PY_WORKER_SOURCE;
+const GREP_WORKER_SOURCE = runtimeWorkerAssetBundle.GREP_WORKER_SOURCE;
 
 // ONE persistent VFS for the whole page lifetime. All static mounts
-// (home/tmp/upload/download/bin/usrbin) are wired inside the constructor;
-// /mnt/workspace is added/replaced by mountFolder(). The command list is
-// injected lazily so this module never depends on script load order. M2a:
-// the durable home skeleton is PRODUCT input passed explicitly — the
-// generic VFS no longer reads a product global.
-const vfs = new VirtualWorkspace({
-  listCommands: () => Object.keys(SHELL_COMMANDS),
-  homeSkeleton: typeof LOCUS_HOME_SKELETON !== 'undefined' ? LOCUS_HOME_SKELETON.slice() : undefined,
+// (home/tmp/upload/download/bin/usrbin) are wired inside the factory;
+// /mnt/workspace is added/replaced by mountFolder(). M3c: built through
+// the runtime's PUBLIC createWorkspace — its default command list IS the
+// runtime's own shell registry (the equivalent of the old
+// VirtualWorkspace + SHELL_COMMANDS global pair; runtime
+// EXTRACTION-PLAN §1b). The durable home skeleton is PRODUCT input
+// passed explicitly (M2a).
+const vfs = createWorkspace({
+  homeSkeleton: Array.isArray(LOCUS_HOME_SKELETON) ? LOCUS_HOME_SKELETON.slice() : undefined,
 });
 export { vfs };
 
@@ -91,26 +103,24 @@ export { vfs };
 // No capability persistence — a reload resets enabled-state; the
 // materialized instances stay durable and a re-enable reuses them.
 // Tests/e2e inject synthetic catalogs through injectCapabilityCatalogs();
-// production code never does.
-const capabilityManager = typeof CapabilityManager === 'function'
-  ? new CapabilityManager({
-      catalogs: {
-        capabilities: CAPABILITY_CATALOG,
-        plugins: PLUGIN_CATALOG,
-        skills: SKILL_CATALOG,
-        mcps: MCP_CATALOG,
-      },
-      sources: typeof SkillSourceStore === 'function' ? new SkillSourceStore() : undefined,
-      instances: typeof SkillInstanceStorage === 'function'
-        ? new SkillInstanceStorage({
-            resolveHome: () => {
-              const r = vfs.resolveMount('/home/locus');
-              return r ? r.provider : null;
-            },
-          })
-        : undefined,
-    })
-  : null;
+// production code never does. M3c: the manager class and the catalogs
+// come from the harness transfer layer; the durable skill-instance
+// storage is the Product adapter (src/extensions.js) — plain imports.
+const capabilityManager = new CapabilityManager({
+  catalogs: {
+    capabilities: CAPABILITY_CATALOG,
+    plugins: PLUGIN_CATALOG,
+    skills: SKILL_CATALOG,
+    mcps: MCP_CATALOG,
+  },
+  sources: new SkillSourceStore(),
+  instances: new SkillInstanceStorage({
+    resolveHome: () => {
+      const r = vfs.resolveMount('/home/locus');
+      return r ? r.provider : null;
+    },
+  }),
+});
 export { capabilityManager };
 
 function syncCapabilityProjection() {
@@ -228,6 +238,8 @@ function ensureRuntimeSession() {
 // Task-path resolution: the seam wins; otherwise ONE createRuntime
 // assembly, memoized. A host without a workable runtime core resolves to
 // null — every bash/python attempt then fails loudly at the tool boundary.
+// M3c: the worker sources are the REAL runtime worker-assets public entry
+// (through the transfer layer namespace), never a page DOM read.
 function whenRuntimeSession() {
   if (runtimeSessionResolved !== undefined) return Promise.resolve(runtimeSessionResolved);
   if (resolveSessionFromHooks()) return Promise.resolve(runtimeSessionResolved);
@@ -329,15 +341,16 @@ export function runtimeWorkerAssets() {
 // With no python plugins (null key) this returns the runtime to core-only.
 // ---------- product mutation policy (M1b, repository split) ----------
 // The Locus skill-identity protection is PRODUCT policy, not runtime:
-// LocusMutationPolicy (src/mutation-policy.js) owns the /home/locus/.skills
-// rules; the generic runtime only consumes the operation-aware port
-// (checkMove / checkRemove / isPolicyRefusal) via the execution context.
-// EVERY bash execution carries it — a missing policy implementation fails
-// LOUDLY here instead of silently running shell mutations unprotected.
+// LocusMutationPolicy (src/mutation-policy.js, an explicit import since
+// M3c) owns the /home/locus/.skills rules; the generic runtime only
+// consumes the operation-aware port (checkMove / checkRemove /
+// isPolicyRefusal) via the execution context. EVERY bash execution
+// carries it — a missing policy implementation fails LOUDLY here instead
+// of silently running shell mutations unprotected.
 let mutationPolicyResolved = null;
 function taskMutationPolicy() {
   if (mutationPolicyResolved) return mutationPolicyResolved;
-  if (typeof LocusMutationPolicy === 'undefined' || typeof LocusMutationPolicy.create !== 'function') {
+  if (!LocusMutationPolicy || typeof LocusMutationPolicy.create !== 'function') {
     throw new Error('Locus mutation policy unavailable; refusing to run shell commands without the skill-protection policy');
   }
   mutationPolicyResolved = LocusMutationPolicy.create();
@@ -494,28 +507,49 @@ export const isViewingLive = computed(() =>
 
 // ---------- runtime wiring ----------
 
-// ---------- model client through the HARNESS entry (M2b) ----------
-// The Product owns the user's settings (applySettings maintains the Model
-// fields); the Harness owns the protocol. The client is built through the
-// entry factory with the config CAPTURED at request start: a mid-request
-// settings change can never alter this request's endpoint, credentials,
-// dialect or transport. No client shares the mutable Model singleton —
-// each request reads it once, here.
+// ---------- model client through the HARNESS transfer layer (M2b/M3c) ----
+// The Product owns the user's settings; the Harness owns the protocol.
+// M3c: the legacy page-global `Model` singleton was DELETED with the
+// classic core — its product-visible role is this plain Product-owned
+// state object: `applySettings()` is the ONLY writer, every request
+// captures from it at client creation (a mid-request settings change can
+// never alter this request's endpoint, credentials, dialect or
+// transport). The transport seam is an EXPLICIT Product port
+// (setProductModelTransport — the ?e2e=1&wire=1 fake installs through
+// it; production never sets it, so requests use the real fetch).
+const productModel = {
+  apiKey: '',
+  apiBase: DEFAULTS.apiBase,
+  model: DEFAULTS.model,
+  proxy: '',
+  dialect: DEFAULTS.dialect,
+  transport: null,
+};
+
+// Explicit Product configuration port: install a transport for the NEXT
+// captured requests (test/e2e only — a non-function clears the seam).
+// The harness captures transport/relay per request entry, so a mid-run
+// swap never reshapes an in-flight request.
+export function setProductModelTransport(transport) {
+  productModel.transport = typeof transport === 'function' ? transport : null;
+}
+
 function productModelConfig() {
   return {
-    apiKey: Model.apiKey,
-    apiBase: Model.apiBase,
-    model: Model.model,
-    proxy: Model.proxy,
-    dialect: Model.dialect,
+    apiKey: productModel.apiKey,
+    apiBase: productModel.apiBase,
+    model: productModel.model,
+    proxy: productModel.proxy,
+    dialect: productModel.dialect,
   };
 }
 
 function productModelTransportOpts() {
   return {
-    transport: typeof Model.transport === 'function' ? Model.transport : undefined,
+    transport: typeof productModel.transport === 'function' ? productModel.transport : undefined,
     // Product-page hosting: the same-origin /proxy relay exists only on a
-    // hosted (non-file://) deployment.
+    // hosted (non-file://) deployment. Explicit Product configuration —
+    // the harness captures the decision at each request entry.
     relayEligible: () => (typeof window !== 'undefined' && !!window.location
       && String(window.location.protocol) !== 'file:'),
   };
@@ -523,7 +557,7 @@ function productModelTransportOpts() {
 
 function productModelClient(body, opts) {
   return createModelClient({ config: productModelConfig(), ...productModelTransportOpts() })
-    .call(Object.assign({ model: Model.model }, body), opts);
+    .call(Object.assign({ model: productModel.model }, body), opts);
 }
 
 function wiredModelClient(body, opts) {
@@ -531,7 +565,7 @@ function wiredModelClient(body, opts) {
   const invoke = () => (h && typeof h.modelClient === 'function')
     ? h.modelClient(body, opts)
     : createModelClient({ config: productModelConfig(), ...productModelTransportOpts() })
-      .call(Object.assign({ model: Model.model }, body), opts);
+      .call(Object.assign({ model: productModel.model }, body), opts);
   return invoke().catch(async (e) => {
     // Authoritative provider rejection of IMAGE input (docs/IMAGE-INPUT.md):
     // ONLY an explicit model-level capability rejection (classifier kind
@@ -581,8 +615,12 @@ function productNetworkAuthorization() {
 // resolution, the Locus mutation policy and the authorization adapter. The
 // task's context carries { filesystem, signal }; everything Product-side
 // closes over here, never travels through the Harness.
+// M3c: the tool registry and the execution path are the Product modules
+// imported above (no typeof guards — module linkage guarantees them);
+// the hooks seam stays the ?e2e=1 injection point in front of the REAL
+// executor.
 const productToolPort = createLocusToolPort({
-  definitions: () => (typeof AGENT_TOOL_DEFINITIONS !== 'undefined' ? AGENT_TOOL_DEFINITIONS.slice() : []),
+  definitions: () => AGENT_TOOL_DEFINITIONS.slice(),
   execute: (name, input, workspace, o) => {
     const h = hooks();
     if (h && typeof h.toolExecutor === 'function') return h.toolExecutor(name, input, workspace, o);
@@ -623,7 +661,7 @@ const STORAGE_MUTATION_TIMEOUT_MS = 10000;
 function reportPersistenceIssue(error, message) {
   const detail = error && error.message ? error.message : String(error || 'unknown persistence error');
   store.storageNotice = (message || 'Durable storage failed') + ': ' + detail;
-  if (typeof PersistenceServiceInstance !== 'undefined'
+  if (PersistenceServiceInstance
       && typeof PersistenceServiceInstance.notePersistenceError === 'function') {
     PersistenceServiceInstance.notePersistenceError(error, message || 'persistence');
   }
@@ -633,7 +671,7 @@ function reportPersistenceIssue(error, message) {
 // fix): ONE classification table shared by the Product and the runner.
 
 function persistConversation(conv) {
-  if (!conv || typeof PersistenceServiceInstance === 'undefined') return Promise.resolve();
+  if (!conv || !PersistenceServiceInstance) return Promise.resolve();
   const options = arguments[1] || {};
   return PersistenceServiceInstance.saveConversation(Object.assign({}, conv, {
     // Private counters are useful for deterministic ordering after reload;
@@ -667,17 +705,16 @@ function providerConfig() {
 }
 
 // ---------- harness provider sessions (M1a) ----------
-// The replay/session-preparation logic lives in
-// src/harness/provider-session.js. This adapter is the Product's ONLY
-// place that maps classic-script persistence/adapter globals onto that
-// module's ports (M1b/M2 elimination point: inject the service instance
-// instead of reading the global here). Built LAZILY on first use — the
-// globals may be installed by the host page (or a test) after this
-// module loads, exactly like the old call-time typeof checks.
+// The replay/session-preparation logic lives in the HARNESS
+// (provider-session port, through the transfer layer since M3c). This
+// adapter is the Product's ONLY place that maps the Product persistence
+// service and the model-adapter identities onto that port. Built LAZILY
+// on first use (the service may be replaced by a test before then —
+// resolved per call, never captured at import time).
 let providerSessionsInstance = null;
 function providerSessionsAdapter() {
   if (providerSessionsInstance) return providerSessionsInstance;
-  if (typeof PersistenceServiceInstance === 'undefined' || typeof getProviderAdapter !== 'function') return null;
+  if (!PersistenceServiceInstance) return null;
   providerSessionsInstance = createProviderSessions({
     persistence: {
       get: (name, key) => PersistenceServiceInstance.get(name, key),
@@ -695,8 +732,9 @@ function providerSessionsAdapter() {
     createProviderIdentity: createProviderIdentity,
     projectHistory: (messages, dialect) => projectNormalizedHistory(messages, dialect),
     // Review round F3: the replay validators are Harness semantics — the
-    // defaults in createProviderSessions (src/harness/replay-validation.js)
-    // apply; the Product provides only storage/config/projection adapters.
+    // defaults in createProviderSessions (the harness replay-validation
+    // module, through the transfer layer) apply; the Product provides
+    // only storage/config/projection adapters.
     durableId: durableId,
     now: () => new Date().toISOString(),
   });
@@ -733,7 +771,7 @@ function handleRuntimeEvent(event) {
       if (event.reason === 'persistence_error') conv.persistenceState = 'degraded';
     }
     persistConversation(conv);
-    if (typeof PersistenceServiceInstance !== 'undefined') {
+    if (PersistenceServiceInstance) {
       PersistenceServiceInstance.appendPresentationEvent(conv.id, conv.presentationSequence, event)
         .catch((e) => reportPersistenceIssue(e, 'Presentation event could not be saved'));
     }
@@ -861,19 +899,15 @@ export function cancelApproval(requestId) {
 }
 
 // ---------- image feedback wiring (docs/IMAGE-INPUT.md) ----------
-// AttachmentStore + ModelCapabilityRegistry are lazy: Node test harnesses
-// and minimal deployments load store.js without the image modules and
-// simply get a text-only runtime. In the app both modules are loaded by
-// index.html before this file executes.
+// AttachmentStore + ModelCapabilityRegistry are lazy: the instances build
+// on first use. M3c: AttachmentStore is the Product module imported
+// above; the registry class resolves through the HARNESS transfer layer,
+// and its persistence dependency is REQUIRED (no global fallback).
 let attachmentStoreInstance = null;
 let capabilityRegistryInstance = null;
 
 function ensureImageStores() {
-  // M2b: the registry class resolves through the HARNESS entry and its
-  // persistence dependency is REQUIRED (no global fallback); the
-  // AttachmentStore stays Product (attachment storage implementation).
-  if (typeof AttachmentStore === 'undefined') return null;
-  if (typeof PersistenceServiceInstance === 'undefined') return null;
+  if (!PersistenceServiceInstance) return null;
   if (!attachmentStoreInstance) {
     attachmentStoreInstance = new AttachmentStore({ persistence: PersistenceServiceInstance });
   }
@@ -887,7 +921,7 @@ export function getAttachmentStore() { return ensureImageStores() ? attachmentSt
 export function getCapabilityRegistry() { return ensureImageStores() ? capabilityRegistryInstance : null; }
 
 function imageInputIdentity() {
-  if (typeof getProviderAdapter !== 'function' || typeof createProviderIdentity !== 'function') return null;
+  if (!getProviderAdapter || !createProviderIdentity) return null;
   try {
     return createProviderIdentity(providerConfig());
   } catch (e) {
@@ -984,7 +1018,7 @@ export function applySettings() {
     });
   } catch (e) {
     store.settings.apiKey = '';
-    Model.apiKey = '';
+    productModel.apiKey = '';
     store.storageNotice = 'Invalid custom endpoint; no remembered credential was loaded.';
   }
   // The key currently in memory belongs to the previously applied
@@ -995,25 +1029,25 @@ export function applySettings() {
       && store.settings.apiKey.trim() === appliedApiKey) {
     store.settings.apiKey = '';
   }
-  Model.apiKey = store.settings.apiKey.trim();
-  Model.apiBase = nextApiBase;
-  Model.model = store.settings.model.trim() || DEFAULTS.model;
-  Model.proxy = store.settings.proxy.trim();
-  Model.dialect = nextDialect;
+  productModel.apiKey = store.settings.apiKey.trim();
+  productModel.apiBase = nextApiBase;
+  productModel.model = store.settings.model.trim() || DEFAULTS.model;
+  productModel.proxy = store.settings.proxy.trim();
+  productModel.dialect = nextDialect;
   appliedCredentialIdentity = nextIdentity;
-  appliedApiKey = Model.apiKey;
+  appliedApiKey = productModel.apiKey;
   return !!nextIdentity;
 }
 
 export async function persistSettingsIfNeeded() {
-  if (typeof PersistenceServiceInstance === 'undefined') return;
+  if (!PersistenceServiceInstance) return;
   applySettings();
   const config = providerConfig();
   if (store.settings.remember && !store.settings.apiKey) {
     const saved = await PersistenceServiceInstance.loadRememberedApiKey(config);
     if (saved) {
       store.settings.apiKey = saved;
-      Model.apiKey = saved;
+      productModel.apiKey = saved;
       appliedApiKey = saved;
     }
   }
@@ -1028,11 +1062,13 @@ export async function testConnection() {
   store.settingsTesting = true;
   store.settingsResult = null;
   try {
-    // M2b: the connection check goes through the HARNESS entry client
-    // (verify always tests the user-configured model, captured now).
+    // M2b/M3c: the connection check goes through the harness transfer
+    // layer's createModelClient — `.verify()` is the client's OWN method
+    // (always tests the user-configured model, captured now); the legacy
+    // standalone verifyConnection wrapper was deleted upstream.
     await createModelClient({ config: productModelConfig(), ...productModelTransportOpts() }).verify();
     await persistSettingsIfNeeded();
-    store.settingsResult = { ok: true, message: 'Connected — ' + Model.model + ' via ' + Model.dialect + ' dialect.' };
+    store.settingsResult = { ok: true, message: 'Connected — ' + productModel.model + ' via ' + productModel.dialect + ' dialect.' };
   } catch (e) {
     store.settingsResult = { ok: false, message: 'Connection failed: ' + (e && e.message ? e.message : String(e)) };
   } finally {
@@ -1155,8 +1191,7 @@ async function buildImageUserContent(input, taskCompat) {
   // This reuses the PersistenceService's own OPFS state (no per-submit
   // probe); the warning is a presentation event only and never enters
   // provider-visible history (frames / normalized messages / replay).
-  if (typeof PersistenceServiceInstance !== 'undefined'
-      && PersistenceServiceInstance && PersistenceServiceInstance.opfsAvailable === false) {
+  if (PersistenceServiceInstance && PersistenceServiceInstance.opfsAvailable === false) {
     warn('Image attachment storage is memory-only in this browser session; the attached image will not survive a page reload.');
   }
   return { parts, blocked: false };
@@ -1430,7 +1465,7 @@ async function prepareTask(task) {
     if (preRunStopped()) return stopReady();
     const taskVfs = vfs.fork();
     if (compositionActive && taskEnvironment) {
-      if (taskEnvironment.skills.length && typeof SkillInstanceWorkspace === 'function') {
+      if (taskEnvironment.skills.length) {
         // Task-bound approval-guarded view of /home/locus/.skills: every
         // skill mutation of this task (shell redirects, rm, curl -o,
         // python write-backs) suspends on a confirmation here. The signal
@@ -1565,7 +1600,7 @@ async function mountExternalHandle(handle, persistHandle) {
   store.workspaceName = provider.name;
   store.workspacePermission = 'granted';
   store.workspaceHandleAvailable = true;
-  if (persistHandle && typeof PersistenceServiceInstance !== 'undefined') {
+  if (persistHandle && PersistenceServiceInstance) {
     try {
       await PersistenceServiceInstance.saveWorkspaceHandle(handle);
     } catch (e) {
@@ -1580,7 +1615,7 @@ async function mountExternalHandle(handle, persistHandle) {
 }
 
 async function mountDurableStorage() {
-  if (typeof PersistenceServiceInstance === 'undefined') return;
+  if (!PersistenceServiceInstance) return;
   try {
     await PersistenceServiceInstance.ensureHomeSkeleton();
     const homeDir = await PersistenceServiceInstance.opfsDirectory(['home', 'locus'], true);
@@ -1598,7 +1633,7 @@ async function mountDurableStorage() {
 }
 
 async function restoreWorkspaceHandle() {
-  if (typeof PersistenceServiceInstance === 'undefined') return;
+  if (!PersistenceServiceInstance) return;
   const handle = await PersistenceServiceInstance.loadWorkspaceHandle();
   if (!handle) return;
   store.workspaceHandleAvailable = true;
@@ -1622,7 +1657,7 @@ async function restoreWorkspaceHandle() {
 }
 
 export async function reconnectWorkspace() {
-  if (typeof PersistenceServiceInstance === 'undefined') return;
+  if (!PersistenceServiceInstance) return;
   const handle = await PersistenceServiceInstance.loadWorkspaceHandle();
   if (!handle) return mountFolder();
   try {
@@ -1871,12 +1906,12 @@ export function openTerminal() {
 // ---------- storage controls ----------
 
 export async function refreshStorageStatus() {
-  if (typeof PersistenceServiceInstance === 'undefined') return;
+  if (!PersistenceServiceInstance) return;
   store.storageStatus = await PersistenceServiceInstance.storageStatus();
 }
 
 export async function keepDataOnThisDevice() {
-  if (typeof PersistenceServiceInstance === 'undefined') return false;
+  if (!PersistenceServiceInstance) return false;
   const granted = await PersistenceServiceInstance.requestPersistentStorage();
   await refreshStorageStatus();
   return granted;
@@ -1884,7 +1919,7 @@ export async function keepDataOnThisDevice() {
 
 export async function clearConversations() {
   return withStorageMutation(async () => {
-    if (typeof PersistenceServiceInstance !== 'undefined') await PersistenceServiceInstance.clearConversations();
+    if (PersistenceServiceInstance) await PersistenceServiceInstance.clearConversations();
     store.conversations = [];
     session.reset();
     startConversation();
@@ -1893,7 +1928,7 @@ export async function clearConversations() {
 
 export async function clearHome() {
   return withStorageMutation(async () => {
-    if (typeof PersistenceServiceInstance !== 'undefined') await PersistenceServiceInstance.clearHome();
+    if (PersistenceServiceInstance) await PersistenceServiceInstance.clearHome();
     // PersistenceService owns the durable backend; VFS owns the provider
     // currently mounted at /home/locus. Once the durable clear resolves (or
     // reports memory-only mode), replace the live fallback with a fresh
@@ -1906,17 +1941,17 @@ export async function clearHome() {
 
 export async function clearPlugins() {
   return withStorageMutation(async () => {
-    if (typeof PersistenceServiceInstance !== 'undefined') await PersistenceServiceInstance.clearPlugins();
+    if (PersistenceServiceInstance) await PersistenceServiceInstance.clearPlugins();
     await mountDurableStorage();
   });
 }
 
 export async function forgetApiKeys() {
   return withStorageMutation(async () => {
-    if (typeof PersistenceServiceInstance !== 'undefined') await PersistenceServiceInstance.forgetApiKeys();
+    if (PersistenceServiceInstance) await PersistenceServiceInstance.forgetApiKeys();
     store.settings.apiKey = '';
     store.settings.remember = false;
-    Model.apiKey = '';
+    productModel.apiKey = '';
     appliedApiKey = '';
   });
 }
@@ -1936,7 +1971,7 @@ export async function resetAllData() {
     store.workspaceName = null;
     store.workspacePermission = 'none';
     store.workspaceHandleAvailable = false;
-    if (typeof PersistenceServiceInstance !== 'undefined') await PersistenceServiceInstance.reset();
+    if (PersistenceServiceInstance) await PersistenceServiceInstance.reset();
     if (typeof vfs.resetHome === 'function') vfs.resetHome();
     if (typeof vfs.resetEphemeral === 'function') vfs.resetEphemeral();
     store.attachments = [];
@@ -1961,7 +1996,7 @@ startConversation();
 refreshArtifacts(); // initial artifacts listing (fire-and-forget, self-guarded)
 
 async function bootPersistence() {
-  if (typeof PersistenceServiceInstance === 'undefined') return;
+  if (!PersistenceServiceInstance) return;
   await PersistenceServiceInstance.ready;
   try {
     const settings = await PersistenceServiceInstance.loadSettings();

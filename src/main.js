@@ -8,8 +8,8 @@
 //    ?e2e=1       expose window.__locus { store, actions, session, vfs },
 //                 honor window.__e2eReplies / __e2eToolExecutor fakes,
 //                 collect console errors into window.__e2eErrors
-//    ?e2e=1&wire=1 use the production callModel adapter/serializer/header
-//                 path with a deterministic in-page transport queue
+//    ?e2e=1&wire=1 use the production model client (adapter/serializer/
+//                 headers) with a deterministic in-page transport queue
 //    ?demo=task   scripted fake model + tool, auto-mount an OPFS demo
 //                 folder and run one demo task (screenshot fixture)
 //    ?demo=plus   open the composer "+" menu after mount
@@ -22,9 +22,11 @@
 import { createApp, nextTick } from 'vue';
 import App from './App.vue';
 import * as ui from './ui/store.js';
-// M2c review round 2: the real harness declaration resolver, exposed to the
-// browser gates below (the same entry the Product compatibility check reads).
-import { harnessCapabilities } from './harness/index.js';
+// M3c: the harness declaration resolver comes through the PUBLIC transfer
+// layer (the same entry the Product compatibility check reads); the tool
+// executor is the Product tool module's explicit export.
+import { harnessCapabilities } from './product/harness-api.js';
+import { executeTool } from './tools.js';
 import './ui/theme.css';
 
 const params = new URLSearchParams(window.location.search);
@@ -58,7 +60,7 @@ if (e2eMode) {
     toolExecutor: (tool, input, ws, opts) => {
       // null → delegate to the REAL tool layer (telemetry, workspace authority)
       if (typeof window.__e2eToolExecutor === 'function') return window.__e2eToolExecutor(tool, input, ws, opts);
-      return executeTool(tool, input, ws, opts); // eslint-disable-line no-undef
+      return executeTool(tool, input, ws, opts);
     },
     pickDirectory: async () => {
       const root = await navigator.storage.getDirectory();
@@ -73,11 +75,14 @@ if (e2eMode) {
       return Promise.resolve(normalizeEnvelope(next));
     };
   } else {
-    // Keep the transport fake below the real model boundary. callModel still
-    // selects the adapter, builds provider-native JSON and auth headers; only
-    // the final network hop is deterministic for browser integration tests.
+    // Keep the transport fake below the real model boundary: the store's
+    // createModelClient still selects the adapter, builds provider-native
+    // JSON and auth headers; only the final network hop is deterministic
+    // for browser integration tests. M3c: the fake installs through the
+    // EXPLICIT Product transport port (the deleted legacy Model singleton
+    // no longer exists); the harness captures the transport per request.
     window.__locusWire = { calls: [], responses: [] };
-    Model.transport = async (url, init) => {
+    ui.setProductModelTransport(async (url, init) => {
       const wire = window.__locusWire;
       const headers = {};
       for (const [key, value] of Object.entries(init.headers || {})) headers[key] = value;
@@ -89,9 +94,14 @@ if (e2eMode) {
       return new Response(JSON.stringify(response), {
         status: 200, headers: { 'content-type': 'application/json' },
       });
-    };
+    });
   }
   window.__LOCUS_HOOKS__ = hooks;
+  // Established e2e seam (e2e-grep / e2e-network / e2e-capabilities drive
+  // the real shell stack through it): the REAL production executor, same
+  // function the store's ToolPort closes over — an observation surface,
+  // never an assembly dependency.
+  window.executeTool = executeTool;
 }
 
 // ---------- demo hooks (screenshot fixtures; deterministic, offline) ----------

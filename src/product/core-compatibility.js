@@ -13,9 +13,9 @@
 //  and this module never resolves, imports or probes a core itself. The
 //  cores cannot depend back on this module.
 //
-//  Semantics (M2c contract):
+//  Semantics (M2c contract; M3c amendment — see the registry note below):
 //    1. supported versions + all required capabilities      → pass
-//    2. unsupported mandatory protocol/registry version     → reject
+//    2. unsupported mandatory protocol version              → reject
 //    3. missing required capability                         → reject
 //    4. invalid declaration shape                           → reject
 //    5. unknown EXTRA optional capabilities                 → never a rejection
@@ -24,6 +24,16 @@
 //       cancellation, persistence or execution-boundary guarantees
 //    7. no historical-version adaptation framework: only the ACTUAL
 //       protocol is supported; unknown mandatory versions are rejected.
+//
+//  M3c adaptation (locus-harness EXTRACTION-PLAN §6): the internal core
+//  registry the `registryVersion` field described was DELETED in the
+//  extraction, and the harness declaration no longer emits it. Keeping a
+//  requirement for it would reject every task against the real package,
+//  so `supportedRegistryVersions` is removed together with the result
+//  projections. This is NOT a silent version-semantics change: the public
+//  `contractVersion` (checked, unchanged at 1) and the port versions
+//  (checked, required) are the compatibility truth; a stray extra field
+//  on a declaration is ignored like any other unknown extra.
 //
 //  An absent or malformed required field is REPORTED (with required vs
 //  provided) — `undefined` never defaults to compatible.
@@ -90,9 +100,6 @@ export const PRODUCT_CORE_REQUIREMENTS = Object.freeze({
   }),
   harness: Object.freeze({
     supportedContractVersions: Object.freeze([1]),
-    // The DECLARED core registry's internal version — a different concept
-    // from the public protocol version above (contract §5).
-    supportedRegistryVersions: Object.freeze([1]),
     requiredPorts: Object.freeze({
       taskLifecycle: 1,
       toolPort: 1,
@@ -127,7 +134,7 @@ function fail(fields) {
   throw new CompatibilityError(fields);
 }
 
-// A supported-version check shared by both version concepts.
+// A supported-version check (the shared integer-version guard).
 function checkVersionSet(core, kind, provided, supported, label) {
   if (provided === undefined || provided === null) {
     fail({
@@ -222,12 +229,6 @@ export function checkCoreCompatibility(input) {
     harness: { contractVersion: o.harness.contractVersion },
     optional: { runtime: { missing: [] }, harness: { missing: [] } },
   };
-  if (typeof o.runtime.registryVersion === 'number') {
-    result.runtime.registryVersion = o.runtime.registryVersion;
-  }
-  if (typeof o.harness.registryVersion === 'number') {
-    result.harness.registryVersion = o.harness.registryVersion;
-  }
   collectOptionalMissing('runtime', o.runtime, req.runtime, result.optional.runtime.missing);
   collectOptionalMissing('harness', o.harness, req.harness, result.optional.harness.missing);
   return deepFreeze(result);
@@ -336,16 +337,6 @@ function checkHarness(decl, req) {
     });
   }
   checkVersionSet('harness', 'contractVersion', decl.contractVersion, req.supportedContractVersions, 'contractVersion');
-  if (req.supportedRegistryVersions) {
-    if (decl.registryVersion === undefined) {
-      fail({
-        code: 'capability_missing', core: 'harness', port: 'registryVersion',
-        required: 'one of ' + safeJson(req.supportedRegistryVersions), provided: '(absent)',
-        message: 'harness declaration does not state its registry version',
-      });
-    }
-    checkVersionSet('harness', 'registryVersion', decl.registryVersion, req.supportedRegistryVersions, 'registryVersion');
-  }
   const ports = decl.ports;
   if (!isPlainObject(ports)) {
     fail({
