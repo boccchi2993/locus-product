@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Locus — Browser Agent Runtime</title>
+</head>
+<body>
+<div id="app"></div>
+
+
+<!-- Runtime: framework-independent classic scripts (globals). Never bundled. -->
+<script src="./src/telemetry.js"></script>
+<script src="./src/persistence.js"></script>
+<script src="./src/model-adapters.js"></script>
+<script src="./src/model.js"></script>
+<script src="./src/workspace.js"></script>
+<script src="./src/vfs.js"></script>
+<!-- Product: the conversation history persistence view (a WorkspaceAdapter
+     shaped Product provider; moved out of workspace.js in M2a). -->
+<script src="./src/conversation-history-workspace.js"></script>
+<script src="./src/extension-composition.js"></script>
+<script src="./src/extensions.js"></script>
+<script src="./src/capability-package.js"></script>
+<script src="./src/attachments.js"></script>
+<script src="./src/capabilities.js"></script>
+<script src="./src/network.js"></script>
+<script src="./src/shell.js"></script>
+<script src="./src/tools.js"></script>
+<script src="./src/approval.js"></script>
+<script src="./src/agent.js"></script>
+<script src="./src/mutation-policy.js"></script>
+<script src="./src/ui/projector.js"></script>
+<script src="./src/ui/markdown.js"></script>
+
+<!-- Presentation: Vue 3 app (module, bundled by Vite). -->
+<script type="module" src="/src/main.js"></script>
+</body>
+</html>
