@@ -1,37 +1,23 @@
 // Vite config for the Locus presentation layer.
 //
-// The runtime (src/agent.js, src/model.js, …) stays framework-independent
-// plain scripts with file://-compatible globals — they are NOT bundled.
-// index.html loads them as classic scripts; in dev the Vite server serves
-// them in place, and the small plugin below copies them verbatim into the
-// build output so `dist/` keeps the same layout.
+// M3c (three-repo switch): the page is ONE ESM entry — main.js imports
+// the two cores through src/product/{runtime-api,harness-api}.js and the
+// Product modules explicitly; Vite bundles all of it. The old classic
+// Runtime/Harness scripts are NOT loaded and NOT copied anymore (the
+// in-repo duplicate cores stay on disk only until D deletes them).
+// Exactly two Product classic files remain page scripts (still copied
+// verbatim so `dist/` keeps the same layout): telemetry.js (Product
+// observability singleton; the panel reads window.Telemetry) and
+// ui/markdown.js (its caller Timeline.vue reads the LocusMarkdown global;
+// converting the pair is recorded for D in docs/M3C-C-HANDOFF.md).
 import { defineConfig } from 'vite';
 import vue from '@vitejs/plugin-vue';
 import { copyFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
-// Classic-script runtime files referenced by index.html (and by the
-// Node test suites, which eval these sources directly).
+// Remaining classic page scripts referenced by index.html.
 const RUNTIME_SCRIPTS = [
   'src/telemetry.js',
-  'src/persistence.js',
-  'src/model-adapters.js',
-  'src/model.js',
-  'src/workspace.js',
-  'src/vfs.js',
-  'src/conversation-history-workspace.js',
-  'src/extension-composition.js',
-  'src/extensions.js',
-  'src/capability-package.js',
-  'src/attachments.js',
-  'src/capabilities.js',
-  'src/network.js',
-  'src/shell.js',
-  'src/tools.js',
-  'src/approval.js',
-  'src/agent.js',
-  'src/mutation-policy.js',
-  'src/ui/projector.js',
   'src/ui/markdown.js',
 ];
 
