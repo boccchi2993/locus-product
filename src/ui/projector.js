@@ -7,8 +7,9 @@
 //    task_start → reasoning* → tool_call → tool_result → …
 //    → assistant_text → task_end   (+ warning / error at any point)
 //
-//  This file is a classic script (like the runtime under src/) so the
-//  Node suites can eval it directly — no bundler semantics here. It
+//  M3c (repository split): an ES module with the named export
+//  `LocusProjector` (the store imports it explicitly; no classic-script
+//  load order). Node suites import it the same way. It
 //  knows NOTHING about Vue, the DOM, providers or tool execution; it
 //  only shapes events into timeline items for whatever UI consumes
 //  them. Presentation state is a projection: it is NEVER serialized
@@ -159,3 +160,7 @@ var LocusProjector = (function () {
     projectEvent: projectEvent,
   };
 })();
+
+// M3c: the named ESM export — same symbol name the classic script
+// published; callers import it explicitly now.
+export { LocusProjector };
