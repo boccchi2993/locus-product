@@ -15,10 +15,11 @@
 //  §7 — "building a package is not installing it").
 //
 //  Layering:
-//    - depends only on workspace.js (WorkspaceAdapter,
-//      normalizeWorkspacePath) and extensions.js (the canonical
-//      runtime descriptor validators, sha256Hex, id pattern, the
-//      256 KiB skill contract). Input is an existing
+//    - depends only on the Runtime public provider surface
+//      (WorkspaceAdapter, normalizeWorkspacePath) and the Harness
+//      public surface (the canonical runtime descriptor validators,
+//      sha256Hex, the id pattern, the 256 KiB skill contract), through
+//      the two product API files. Input is an existing
 //      WorkspaceAdapter-compatible reader + a project root path;
 //      there is NO second filesystem abstraction, no File System
 //      Access API / OPFS / Node fs / fetch here.
@@ -44,14 +45,25 @@
 //      provider list() order or timestamps;
 //    - serializeLock() is canonical JSON (sorted keys, LF).
 //
-//  ZERO side effects: no writes, no network, no globals beyond the
-//  single frozen namespace below.
+//  ZERO side effects: no writes, no network, no globals.
 // ============================================================
-//  Loaded after vfs.js and extensions.js (index.html order:
-//  workspace.js -> vfs.js -> extensions.js -> capability-package.js).
-//  Must stay independent of Vue / store / AgentSession /
-//  ProviderAdapter / shell dispatch / persistence / DOM UI.
-// ============================================================
+//  M3c: real ES module. The descriptor validators, the identity
+//  pattern, the skill byte contract and sha256Hex are the ORIGINAL
+//  Harness definitions imported through src/product/harness-api.js —
+//  this module never re-implements runtime descriptor semantics.
+//  ============================================================
+
+// M3c: explicit imports replace the classic lexical chain.
+import { WorkspaceAdapter, normalizeWorkspacePath } from './product/runtime-api.js';
+import {
+  validateCapabilityDescriptor,
+  validatePluginDescriptor,
+  validateSkillDescriptor,
+  validateMcpDescriptor,
+  EXTENSION_ID_PATTERN,
+  SKILL_INSTANCE_MAX_BYTES,
+  sha256Hex,
+} from './product/harness-api.js';
 
 // ---------- package constants (the only magic numbers) ----------
 // v1 bounds exist so an authoring project cannot become a memory
@@ -509,7 +521,7 @@ async function scanComponentDir(workspace, root, dirName, diagnostics) {
 //
 // READ ONLY: list / stat / readBytes only. ZERO writes, no
 // installation, no catalog mutation, no trust decision.
-async function validateProject(opts) {
+export async function validateProject(opts) {
   const o = opts || {};
   assertWorkspace(o.workspace);
   const root = normalizeProjectRoot(o.root);
@@ -777,7 +789,7 @@ async function validateProject(opts) {
 // every external read hands out a COPY. The lock is deeply frozen
 // plain metadata: descriptors, sizes, hashes — never skill bodies,
 // never artifact bytes, never credentials, never timestamps.
-class CapabilityBundle {
+export class CapabilityBundle {
   constructor(lock, files) {
     if (!isPlainObject(lock)) {
       throw new Error('CapabilityBundle requires a lock object');
@@ -846,7 +858,7 @@ class CapabilityBundle {
 // validate result), then materializes the logical bundle: exact
 // bytes, exact sizes, exact SHA-256 over the exact bytes. Builder-
 // computed identity only — source manifests cannot supply hashes.
-async function buildProject(opts) {
+export async function buildProject(opts) {
   const o = opts || {};
   assertWorkspace(o.workspace);
   const root = normalizeProjectRoot(o.root);
@@ -991,7 +1003,7 @@ async function buildProject(opts) {
 // ---------- inspect ----------
 // inspectBundle(bundle) -> SAFE plain summary. No raw bytes, no
 // skill Markdown bodies, no source files. Zero side effects.
-function inspectBundle(bundle) {
+export function inspectBundle(bundle) {
   if (!(bundle instanceof CapabilityBundle)) {
     throw new Error('inspectBundle requires a CapabilityBundle');
   }
@@ -1032,8 +1044,10 @@ function inspectBundle(bundle) {
 }
 
 // ---------- namespace ----------
-// Exactly ONE global: everything else stays module-private.
-const LocusCapabilityPackage = Object.freeze({
+// The frozen namespace object stays for namespace-style consumers;
+// every outward symbol is ALSO a named export of this module. There
+// is no page-global publish anymore.
+export const LocusCapabilityPackage = Object.freeze({
   validateProject: validateProject,
   buildProject: buildProject,
   inspectBundle: inspectBundle,
@@ -1051,4 +1065,3 @@ const LocusCapabilityPackage = Object.freeze({
     SKILL_SOURCE_NAME: PACKAGE_SKILL_SOURCE_NAME,
   }),
 });
-globalThis.LocusCapabilityPackage = LocusCapabilityPackage;
