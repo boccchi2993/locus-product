@@ -2,24 +2,36 @@
 //  LOCUS BROWSER-LOCAL PERSISTENCE
 //
 //  IndexedDB is the canonical metadata/history store. OPFS is the durable
-//  byte store for the local machine (/home/locus and /mnt/plugins). This is
-//  deliberately a classic script so the framework-independent runtime and
-//  the Vue store share one substrate without reaching into browser storage
-//  APIs themselves.
+//  byte store for the local machine (/home/locus and /mnt/plugins).
+//  Product storage implementation: database, migrations, records and the
+//  data format live here; the replay-checkpoint SEMANTICS (the two
+//  validators) are Harness-owned and imported through the product
+//  harness API below — never a second copy of the algorithm.
 // ============================================================
 
-var PERSISTENCE_SCHEMA_VERSION = 3;
-var PERSISTENCE_DB_NAME = 'locus';
+// M3c: the replay validators come from the Harness public entry (they
+// were one-way delegates over the deleted __LOCUS_HARNESS_REPLAY_VALIDATION__
+// global table before the switch). `createCredentialIdentity` replaces the
+// typeof-guarded read of the classic lexical chain — the delegate-less,
+// single-implementation form of the same call.
+import {
+  validateReplayPrefix as harnessValidateReplayPrefix,
+  validateNormalizedPrefix as harnessValidateNormalizedPrefix,
+  createCredentialIdentity,
+} from './product/harness-api.js';
+
+export const PERSISTENCE_SCHEMA_VERSION = 3;
+export const PERSISTENCE_DB_NAME = 'locus';
 
 // One canonical home layout.  The VFS consumes the same value when it
 // creates its memory provider, while OPFS consumes it after mount/clear/reset.
-var LOCUS_HOME_SKELETON = [
+export const LOCUS_HOME_SKELETON = [
   '.skills',
   '.config/locus/mcp',
   '.cache/locus',
 ];
 
-var PERSISTENCE_STORES = [
+export const PERSISTENCE_STORES = [
   'conversations', 'presentationEvents', 'providerSessions',
   'providerFrames', 'normalizedMessages', 'settings', 'secrets',
   'workspaceHandles', 'meta', 'attachments', 'capabilities',
@@ -30,7 +42,7 @@ function persistenceUuid(prefix) {
   return (c ? crypto.randomUUID() : prefix + '-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2));
 }
 
-function persistenceClone(value) {
+export function persistenceClone(value) {
   if (typeof structuredClone === 'function') return structuredClone(value);
   // The supported browser path has structuredClone.  This fallback is only
   // for older test/runtime hosts; keep the same supported semantic types
@@ -168,41 +180,18 @@ function persistenceSafeString(value) {
   return typeof value === 'string' ? value : String(value == null ? '' : value);
 }
 
-function replayValidationError(code, message) {
-  var e = new Error(message);
-  e.name = 'ReplayValidationError';
-  e.code = code;
-  e.replayInvalid = true;
-  return e;
-}
+// Review round F3, closed at M3c: the durable-prefix validation ALGORITHMS
+// are Harness-owned (src/harness/replay-validation.js in the package; ONE
+// implementation). The old one-way delegates over the published
+// __LOCUS_HARNESS_REPLAY_VALIDATION__ global table are gone — this module
+// one-way re-exports the REAL entry validators under the same names for
+// existing consumers. No wrapper, no second copy of the algorithm.
+export {
+  validateReplayPrefix,
+  validateNormalizedPrefix,
+} from './product/harness-api.js';
 
-// Review round F3: the durable-prefix validation ALGORITHMS moved to the
-// Harness (src/harness/replay-validation.js — the ONE implementation;
-// re-exported by the public entry). These file-level names stay as
-// ONE-WAY compatibility delegates for classic-script callers only: they
-// resolve the single implementation through the harness-published table
-// and fail loudly when the harness module has not been evaluated — never
-// a silent success, never a second copy of the algorithm.
-function harnessReplayDelegate(name) {
-  var table = globalThis.__LOCUS_HARNESS_REPLAY_VALIDATION__;
-  if (!table || typeof table[name] !== 'function') {
-    throw replayValidationError('replay_validator_missing',
-      'replay validation is Harness code (src/harness/replay-validation.js);'
-      + ' the compatibility delegate found no implementation — load/import'
-      + ' the harness module first');
-  }
-  return table[name];
-}
-
-function validateReplayPrefix(session, frames, adapter) {
-  return harnessReplayDelegate('validateReplayPrefix')(session, frames, adapter);
-}
-
-function validateNormalizedPrefix(conversationId, rows) {
-  return harnessReplayDelegate('validateNormalizedPrefix')(conversationId, rows);
-}
-
-class PersistenceService {
+export class PersistenceService {
   constructor(opts) {
     this.name = (opts && opts.name) || PERSISTENCE_DB_NAME;
     this.version = PERSISTENCE_SCHEMA_VERSION;
@@ -442,14 +431,11 @@ class PersistenceService {
   }
 
   _credentialIdentity(config) {
+    // M3c: the Harness identity helper is a real import now (the classic
+    // typeof-guarded fallback branch is gone with the lexical chain).
+    // The null-config guard keeps its exact pre-switch failure.
     if (!config) throw persistenceSerializationError('credential destination identity is required');
-    if (typeof createCredentialIdentity === 'function') return createCredentialIdentity(config);
-    var endpoint = String(config.endpointIdentity || config.apiBase || '').trim();
-    if (!endpoint) throw persistenceSerializationError('credential endpoint identity is required');
-    return {
-      provider: String(config.provider || ''), adapterId: String(config.adapterId || ''),
-      dialect: String(config.dialect || ''), endpointIdentity: endpoint,
-    };
+    return createCredentialIdentity(config);
   }
 
   _credentialKey(identity) {
@@ -857,4 +843,6 @@ class PersistenceService {
 }
 
 var locusPersistence = new PersistenceService();
-var PersistenceServiceInstance = locusPersistence;
+// The canonical page instance. Classic consumers read this as a page
+// global today; ESM consumers import the same name from this module.
+export var PersistenceServiceInstance = locusPersistence;

@@ -4,8 +4,14 @@
 //  this is a Product persistence view shaped as a WorkspaceAdapter,
 //  not a Runtime filesystem primitive.) Mounted by the product store
 //  at /home/locus/history over PersistenceServiceInstance.
+//
+//  M3c: real ES module. The provider base class and the one path
+//  algorithm come from the Runtime public surface through the
+//  product runtime API (src/product/runtime-api.js).
 // ============================================================
-class ConversationHistoryWorkspace extends WorkspaceAdapter {
+import { WorkspaceAdapter, normalizeWorkspacePath } from './product/runtime-api.js';
+
+export class ConversationHistoryWorkspace extends WorkspaceAdapter {
   constructor(service) { super(); this.service = service; this.name = 'history'; }
 
   _parts(path) {

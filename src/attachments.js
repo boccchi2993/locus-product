@@ -25,14 +25,20 @@
 //  OCR, captioning, arbitrary file types, provider upload APIs.
 // ============================================================
 
+// M3c: real ES module. The canonical persistence instance is an explicit
+// import (the classic typeof-guarded lexical-chain read is gone); the
+// opts.persistence injection keeps priority, so test doubles for the
+// STORAGE PORT stay fully supported.
+import { PersistenceServiceInstance } from './persistence.js';
+
 // v1 allowlist. Detection NEVER trusts the declared type alone: the
 // magic bytes must confirm it (docs/IMAGE-INPUT.md, "MIME policy").
-var IMAGE_MIME_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
+export var IMAGE_MIME_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
 
 // Durable snapshot limit per image. This bounds storage only — the
 // per-request wire budget is enforced separately against
 // HISTORY_BUDGET_BYTES (agent.js) using exact base64 arithmetic.
-var MAX_IMAGE_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+export var MAX_IMAGE_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 
 var IMAGE_MAGIC = [
   { mime: 'image/png', test: function (b) {
@@ -65,7 +71,7 @@ function sniffImageMime(bytes) {
 // Declared type (File.type) + magic bytes must AGREE. A lie in either
 // direction fails loudly — bytes are never silently relabeled and an
 // arbitrary blob is never sent to the provider as image/png.
-function resolveImageMime(declaredType, bytes) {
+export function resolveImageMime(declaredType, bytes) {
   var declared = String(declaredType || '').toLowerCase().trim();
   var actual = sniffImageMime(bytes);
   if (!actual) {
@@ -97,7 +103,7 @@ function base64WireBytes(size) {
 // Reasons are a closed set so UI/debug surfaces can distinguish the
 // failure modes without ever seeing the payload (the error carries
 // EXPECTED metadata only — never the actual bytes or their base64).
-function attachmentIntegrityError(reason, record) {
+export function attachmentIntegrityError(reason, record) {
   var e = new Error('attachment integrity check failed (' + reason + '): ' + (record && record.id || '(unknown)'));
   e.name = 'AttachmentIntegrityError';
   e.code = 'attachment_integrity_error';
@@ -108,7 +114,7 @@ function attachmentIntegrityError(reason, record) {
   return e;
 }
 
-function isAttachmentIntegrityError(e) {
+export function isAttachmentIntegrityError(e) {
   return !!e && (e.name === 'AttachmentIntegrityError' || e.code === 'attachment_integrity_error');
 }
 
@@ -119,7 +125,7 @@ function attachmentUuid() {
 
 // ---------- base64 helpers (chunked, browser + Node) ----------
 
-function uint8ToBase64(bytes) {
+export function uint8ToBase64(bytes) {
   if (typeof Buffer !== 'undefined' && Buffer.from) {
     return Buffer.from(bytes).toString('base64');
   }
@@ -148,11 +154,10 @@ function uint8ToBase64(bytes) {
 //    persist, log or telemetry the returned object.
 //  getRecord(attachmentId) / describe() — metadata only.
 // ------------------------------------------------------------
-class AttachmentStore {
+export class AttachmentStore {
   constructor(opts) {
     var o = opts || {};
-    this.persistence = o.persistence
-      || (typeof PersistenceServiceInstance !== 'undefined' ? PersistenceServiceInstance : null);
+    this.persistence = o.persistence || PersistenceServiceInstance;
     if (!this.persistence) throw new Error('AttachmentStore: no persistence backend available');
     this.maxImageBytes = o.maxImageBytes !== undefined && o.maxImageBytes !== null
       ? o.maxImageBytes : MAX_IMAGE_ATTACHMENT_BYTES;
@@ -343,7 +348,7 @@ class AttachmentStore {
 // A semantic user content part carrying an image attachment reference
 // (docs/IMAGE-INPUT.md, "Rich content"). attachmentId points into the
 // durable store; dataBase64 is deliberately absent from this shape.
-function imageContentPart(record) {
+export function imageContentPart(record) {
   return {
     type: 'image',
     attachmentId: record.id,
@@ -353,6 +358,6 @@ function imageContentPart(record) {
   };
 }
 
-function textContentPart(text) {
+export function textContentPart(text) {
   return { type: 'text', text: String(text == null ? '' : text) };
 }

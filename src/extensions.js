@@ -2,19 +2,54 @@
 //  EXTENSION PRODUCT ADAPTERS (extension layer — Product side, M2b split)
 //
 //  The composition CORE (validators, SkillSourceStore, CapabilityManager,
-//  production catalogs) lives in src/extension-composition.js (Harness
-//  side; loads BEFORE this file). This file keeps the PRODUCT adapter
-//  half of the old extensions.js:
+//  production catalogs) is Harness code, imported through the product
+//  harness API (src/product/harness-api.js). The Runtime provider base
+//  class, the path algorithm and the error factory come through the
+//  product runtime API (src/product/runtime-api.js). This file keeps the
+//  PRODUCT adapter half of the old extensions.js:
 //    - StaticFileWorkspace   — read-only Runtime VFS provider class
 //    - SkillInstanceStorage  — durable capability-private instance storage
 //    - SkillInstanceWorkspace— the task-bound approval-guarded VFS view
 //    - productTaskVfsMounts  — maps the manager's mount SPECS onto
 //                              StaticFileWorkspace providers
-//  It runs only inside the Locus product page: it extends WorkspaceAdapter
-//  (workspace.js, loaded earlier) and reads the composition constants
-//  through the classic lexical chain. It is NOT part of the Harness
-//  public entry (see tests/harness-boundary.test.cjs).
+//  It runs only inside the Locus product page and is NOT part of the
+//  Harness public entry (see the harness package's boundary suite).
 // ============================================================
+
+// M3c: real ES module — every cross-file symbol is an explicit import.
+import {
+  WorkspaceAdapter,
+  normalizeWorkspacePath,
+  vfsError,
+} from './product/runtime-api.js';
+import {
+  EXTENSION_ID_PATTERN,
+  skillInstancePath,
+  SKILL_INSTANCE_ROOT,
+  SKILL_INSTANCE_MARKER,
+  SKILL_INSTANCE_MAX_BYTES,
+  sha256Hex,
+} from './product/harness-api.js';
+
+// M3c adaptation (harness EXTRACTION-PLAN §3 caller table): the
+// approval-card diff bound is PRODUCT presentation policy with no
+// Harness consumer, so the constant moved here from the composition
+// core. Value and fail-closed semantics are unchanged: a diff (and a
+// diff+header detail) above this many characters refuses the mutation
+// with skill_mutation_too_large instead of showing an unreviewable card.
+const SKILL_DIFF_MAX_CHARS = 20000; // approval diffs above this fail closed
+
+// `vfsNotFound` / `vfsReadOnly` are one-line wrappers over the Runtime's
+// public `vfsError` factory that the runtime package does not export;
+// the two forms below are the exact same name+message errors (same
+// factory, same strings — no second implementation).
+function vfsNotFound(path) {
+  return vfsError('NotFoundError', 'no such file or directory: ' + path);
+}
+
+function vfsReadOnly(path) {
+  return vfsError('ReadOnlyError', 'read-only filesystem: ' + path);
+}
 
 // ---------- StaticFileWorkspace ----------
 // Read-only VFS provider over a fixed in-memory file tree (rel path ->
@@ -25,7 +60,7 @@
 // it is never agent-writable. (Skill guides used to be served here too —
 // they now live as mutable, capability-private instances under
 // /home/locus/.skills and there is deliberately NO second "skills" view.)
-class StaticFileWorkspace extends WorkspaceAdapter {
+export class StaticFileWorkspace extends WorkspaceAdapter {
   constructor(opts) {
     super();
     opts = opts || {};
@@ -111,7 +146,7 @@ class StaticFileWorkspace extends WorkspaceAdapter {
 // provider. This is the Harness side of the lifecycle (materialize /
 // marker / cleanup); agent-facing mutations go through the guarded
 // SkillInstanceWorkspace below, never through this class directly.
-class SkillInstanceStorage {
+export class SkillInstanceStorage {
   constructor(opts) {
     this._resolveHome = typeof (opts && opts.resolveHome) === 'function' ? opts.resolveHome : null;
   }
@@ -199,7 +234,7 @@ class SkillInstanceStorage {
 //      before-hash still matches — a changed file is a conflict, never a
 //      silently applied stale diff,
 //   7. only then perform the write/remove through SkillInstanceStorage.
-class SkillInstanceWorkspace extends WorkspaceAdapter {
+export class SkillInstanceWorkspace extends WorkspaceAdapter {
   constructor(opts) {
     super();
     this.name = (opts && opts.name) || 'skill-instances';
@@ -469,7 +504,7 @@ class SkillInstanceWorkspace extends WorkspaceAdapter {
 // authorities and file contents are exactly what taskVfsMounts used to
 // produce — only the construction site moved (composition core stays
 // VFS-class-free).
-function productTaskVfsMounts(manager, env) {
+export function productTaskVfsMounts(manager, env) {
   return manager.taskVfsMountSpecs(env).map((spec) => ({
     path: spec.path,
     provider: new StaticFileWorkspace({ name: spec.name, files: spec.files }),
