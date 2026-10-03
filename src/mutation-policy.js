@@ -39,6 +39,16 @@
 //  Refusal texts are BYTE-STABLE contract data (shell/skill-instances
 //  suites pin them) — keep them exactly as they were when they lived in
 //  shell.js.
+//
+//  M3c (repository split, agent A): this file is a real ES module. The
+//  one outward symbol keeps its name — callers rename imports, never
+//  symbols:
+//    export LocusMutationPolicy      (store.js taskMutationPolicy)
+//  Free-identifier audit: the file imports NOTHING — every symbol it
+//  references (SKILL_INSTANCE_SHELL_ROOT, SKILL_IDENTITY_BOUNDARY_MSG,
+//  underSkillInstances, LOCUS_MUTATION_POLICY) is local. There is no
+//  Runtime or Harness import and no ~/.skills policy knowledge leaves
+//  Product.
 // ============================================================
 
 const SKILL_INSTANCE_SHELL_ROOT = '/home/locus/.skills';
@@ -87,7 +97,7 @@ const LOCUS_MUTATION_POLICY = Object.freeze({
   },
 });
 
-const LocusMutationPolicy = {
+export const LocusMutationPolicy = {
   // Product factory: the frozen, stateless policy injected into every
   // bash execution (store.js wiredToolExecutor → opts.mutationPolicy).
   create() {
