@@ -11,9 +11,25 @@
 //  (OpenAI function tools, Anthropic input_schema); the system prompt
 //  derives its tool list from it. Never write a provider-specific
 //  schema here.
+//
+//  M3c (repository split, agent A): this file is a real ES module.
+//  Named exports preserve the outward symbol names exactly — callers
+//  rename imports, never symbols:
+//    export AGENT_TOOL_DEFINITIONS   (store.js ToolPort definitions)
+//    export executeTool              (store.js / main.js e2e seam)
+//  Free-identifier audit (M3C-PARALLEL-HANDOFF §4/§6 item 6): the file
+//  imports NOTHING. Its only non-local references are
+//    utf8ByteLength, Telemetry — the Product-owned copies published by
+//      src/telemetry.js (same global bindings the classic chain used;
+//      when D converts telemetry.js to ESM these become static imports
+//      of it — never a third copy), and
+//    performance — the platform global.
+//  Runtime execution goes ONLY through the injected
+//  opts.runtimeSession.execute (M2a): there is no runtime/shell import
+//  and no local fallback here.
 // ============================================================
 
-const AGENT_TOOL_DEFINITIONS = [
+export const AGENT_TOOL_DEFINITIONS = [
   {
     name: 'bash',
     description: 'Execute a command in the local browser Linux-like compatibility runtime. ' +
@@ -49,7 +65,7 @@ const AGENT_TOOL_NAMES = AGENT_TOOL_DEFINITIONS.map((t) => t.name);
 
 const TOOL_NOT_FOUND = (name) => 'unknown tool: ' + name + '. Available tools: ' + AGENT_TOOL_NAMES.join(', ');
 
-async function executeTool(name, input, workspace, opts) {
+export async function executeTool(name, input, workspace, opts) {
   const started = performance.now();
   const toolName = String(name || '').trim();
   let output = '';
