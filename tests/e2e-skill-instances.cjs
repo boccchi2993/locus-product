@@ -185,7 +185,7 @@ async function main() {
       + '}; "capturer installed"');
     await evaluate(cdp,
       'window.__locus.capabilityComposition.injectTestCatalog(' + JSON.stringify(SYNTH_CATALOGS) + ', ' + JSON.stringify(SYNTH_SOURCES) + ');'
-      + 'registerPluginRuntimeProvider("python", { prepare: async function () {'
+      + 'window.__locus.capabilityComposition.registerPluginRuntimeProvider("python", { prepare: async function () {'
       + '  return { files: { "locus_test_plugin.py": ' + JSON.stringify(SYNTH_PLUGIN_SRC) + ' }, imports: ["locus_test_plugin"] };'
       + '} }); "injected"');
 
@@ -414,13 +414,13 @@ async function main() {
     const t4 = await evaluate(cdp, '(async function () {'
       + ' var mgr = window.__locus.capabilityComposition.manager();'
       + ' var env = mgr.buildTaskEnvironment();'
-      + ' var approvals = new ApprovalController({});'
+      + ' var approvals = new window.__locus.capabilityComposition.ApprovalController({});'
       + ' var ac = new AbortController();'
       + ' var real = mgr.skillInstances;'
       + ' var armed = false;'
       + ' var slow = Object.assign(Object.create(Object.getPrototypeOf(real)), real);'
       + ' slow.readBytes = async function (rel) { var out = await real.readBytes(rel); if (armed) { armed = false; ac.abort(); } return out; };'
-      + ' var w = new SkillInstanceWorkspace({ storage: slow, context: { approvals: approvals, conversationId: "t4", taskGeneration: 0, getSignal: function () { return ac.signal; }, taskEnvironment: env } });'
+      + ' var w = new window.__locus.capabilityComposition.SkillInstanceWorkspace({ storage: slow, context: { approvals: approvals, conversationId: "t4", taskGeneration: 0, getSignal: function () { return ac.signal; }, taskEnvironment: env } });'
       + ' var p = w.write("cap-b/synthetic-skill.skill", "T4 lost race\\n");'
       + ' await new Promise(function (r) { setTimeout(r, 50); });'
       + ' armed = true;'
@@ -468,12 +468,22 @@ async function main() {
     check('R2d Re-add rematerializes the immutable default (customizations gone)',
       r2d === FIXTURE_SKILL, String(r2d).slice(0, 80));
 
-    // dist freshness assertion (classic scripts are copied, not bundled)
-    const distShell = await fs.readFile(path.join(ROOT, 'dist', 'src', 'shell.js'), 'utf8');
-    const distPolicy = await fs.readFile(path.join(ROOT, 'dist', 'src', 'mutation-policy.js'), 'utf8');
-    check('R3 built dist carries the current runtime (policy in dist/src, shell.js clean of product rules)',
-      distPolicy.includes('Skill instance paths are stable')
-        && !distShell.includes('Skill instance paths are stable'));
+    // dist freshness (M3c: everything is BUNDLED — no copied classics in
+    // dist/src anymore). The built page bundle carries the CURRENT product
+    // policy; the old copied-classic dist layout is gone. (The runtime
+    // shell's freedom from product rules is runtime-package coverage.)
+    const distAssets = path.join(ROOT, 'dist', 'assets');
+    const mainBundles = (await fs.readdir(distAssets)).filter((f) => f.startsWith('main-') && f.endsWith('.js'));
+    let policyInBundle = false;
+    for (const f of mainBundles) {
+      policyInBundle = policyInBundle
+        || (await fs.readFile(path.join(distAssets, f), 'utf8')).includes('Skill instance paths are stable');
+    }
+    let oldCopiedLayout = false;
+    try { await fs.access(path.join(ROOT, 'dist', 'src', 'shell.js')); oldCopiedLayout = true; } catch (e) { /* gone */ }
+    check('R3 built bundle carries the current product policy; the copied-classic dist layout is gone',
+      policyInBundle && !oldCopiedLayout,
+      JSON.stringify({ policyInBundle, oldCopiedLayout, bundles: mainBundles.length }));
     await evaluate(cdp, 'window.__locus.store.settingsOpen = false; "closed"');
   } catch (e) {
     console.error(e && e.stack || e);

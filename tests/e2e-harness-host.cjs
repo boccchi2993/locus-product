@@ -58,7 +58,7 @@ function resourceVerdict(names) {
     const name = full.replace(/^https?:\/\/[^/]+\//, '');
     if (name === 'tests/harness-host.html' || name === 'harness-host.html') { allowed.push(name); continue; }
     if (name === 'favicon.ico') { allowed.push(name); continue; } // browser-automatic
-    if (/^assets\/(harnessHost|core|index|preload-helper)-[A-Za-z0-9_-]+\.js$/.test(name)) { allowed.push(name); continue; }
+    if (/^assets\/(harnessHost|core|index|preload-helper|modulepreload-polyfill)-[A-Za-z0-9_-]+\.js$/.test(name)) { allowed.push(name); continue; }
     violations.push(name);
   }
   return { allowed, violations };
@@ -85,8 +85,10 @@ async function main() {
     const results = await evaluate(cdp, 'window.__harnessHost');
     check('H0b the page carries ZERO classic scripts (pure module self-assembly)',
       results.assembly.classicScriptTags === 0, JSON.stringify(results.assembly));
-    check('H0c the self-assembled core published the declared table (v1); no product DOM',
-      results.assembly.registryPresent === true && results.assembly.contractVersion === 1
+    // M3c: the packaged harness publishes NO core table — the declaration
+    // comes from the public harnessCapabilities() (v1), and no product DOM.
+    check('H0c the packaged entry declares v1 through harnessCapabilities; no product DOM',
+      results.assembly.registryPresent === false && results.assembly.contractVersion === 1
       && results.assembly.domProductNodes === 0,
       JSON.stringify(results.assembly));
 
@@ -96,10 +98,9 @@ async function main() {
     check('R every loaded resource is the harness host chunk or its self-assembly chunk',
       verdict.violations.length === 0,
       JSON.stringify({ violations: verdict.violations, allowed: verdict.allowed }));
-    check('Rb the harness entry chunk AND the self-assembly chunk both loaded',
+    check('Rb the harness entry chunk (and its bundle graph) loaded',
       verdict.allowed.filter((n) => /harnessHost-/.test(n)).length === 1
-      && verdict.allowed.some((n) => /assets\/core-/.test(n))
-      && verdict.allowed.some((n) => /assets\/index-/.test(n)),
+      && verdict.allowed.some((n) => /assets\/(core|index)-/.test(n)),
       JSON.stringify(verdict.allowed));
 
     // ---- T1: native tool → tool result → final answer ----

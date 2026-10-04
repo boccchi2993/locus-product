@@ -240,10 +240,10 @@ async function main() {
     const failureId = await evaluate(cdp, 'window.__locus.store.liveConversationId');
     const beforeFailure = await evaluate(cdp, 'window.__locusWire.calls.length');
     await evaluate(cdp, `(() => {
-      const original = window.PersistenceServiceInstance.appendProviderFrame.bind(window.PersistenceServiceInstance);
+      const original = window.__locus.persistence().appendProviderFrame.bind(window.__locus.persistence());
       window.__wireToolCount = 0;
       window.__e2eToolExecutor = async () => { window.__wireToolCount++; return { output: 'tool output', success: true, backend: 'browser' }; };
-      window.PersistenceServiceInstance.appendProviderFrame = async function(row) {
+      window.__locus.persistence().appendProviderFrame = async function(row) {
         if (row.kind === 'tool_result') throw new Error('simulated durable write failure');
         return original(row);
       };

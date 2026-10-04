@@ -102,7 +102,7 @@ async function main() {
       await waitForPresentationTaskStarts(first.cdp, firstConversationId, 'persist this conversation') === 1);
 
     await evaluate(first.cdp, `window.__locus.store.settings.apiKey = 'TEST_SECRET_123'; window.__locus.store.settings.remember = true; window.__locus.actions.persistSettingsIfNeeded()`);
-    await evaluate(first.cdp, `window.__locus.vfs.write('/home/locus/durable.txt', 'durable'); window.__locus.vfs.write('/tmp/ephemeral.txt', 'ephemeral'); window.PersistenceServiceInstance.writePlugin('test-plugin/plugin.json', '{"name":"test"}')`);
+    await evaluate(first.cdp, `window.__locus.vfs.write('/home/locus/durable.txt', 'durable'); window.__locus.vfs.write('/tmp/ephemeral.txt', 'ephemeral'); window.__locus.persistence().writePlugin('test-plugin/plugin.json', '{"name":"test"}')`);
     await waitForRuntimeCondition(first.cdp, `window.__locus.vfs.read('/home/locus/durable.txt').then(v => v === 'durable')`, { process: first.chrome, phase: 'persistence-first-files', timeoutMs: 10000 });
 
     const firstDb = await evaluate(first.cdp, `(() => new Promise((resolve, reject) => {
@@ -173,12 +173,12 @@ async function main() {
     // canonical skeleton before the memory-only fallback cases below.
     await evaluate(second.cdp, `window.__locus.vfs.write('/home/locus/opfs-clear-survivor.txt', 'durable')`);
     await evaluate(second.cdp, 'window.__locus.actions.clearHome()');
-    const opfsClearState = await evaluate(second.cdp, `(async () => ({ exists: await window.__locus.vfs.exists('/home/locus/opfs-clear-survivor.txt'), provider: window.__locus.vfs.resolveMount('/home/locus').provider.constructor.name, opfs: !!window.PersistenceServiceInstance.opfsRoot }))()`);
+    const opfsClearState = await evaluate(second.cdp, `(async () => ({ exists: await window.__locus.vfs.exists('/home/locus/opfs-clear-survivor.txt'), provider: window.__locus.vfs.resolveMount('/home/locus').provider.constructor.name, opfs: !!window.__locus.persistence().opfsRoot }))()`);
     check('C02-5 OPFS Clear still works', !opfsClearState.exists, JSON.stringify(opfsClearState));
     check('C02-5b OPFS Clear rebuilds skeleton', await evaluate(second.cdp, 'window.__locus.vfs.exists("/home/locus/.skills") && window.__locus.vfs.exists("/home/locus/.config/locus/mcp") && window.__locus.vfs.exists("/home/locus/.cache/locus")'));
 
     const clearFailure = await evaluate(second.cdp, `(async () => {
-      const service = window.PersistenceServiceInstance;
+      const service = window.__locus.persistence();
       const before = window.__locus.vfs.resolveMount('/home/locus').provider;
       await window.__locus.vfs.write('/home/locus/durable-clear-failure.txt', 'must remain');
       const original = service.clearHome;
@@ -201,20 +201,20 @@ async function main() {
     // when OPFS was unavailable at boot. Clear and Reset must replace that
     // provider even though PersistenceService correctly returns false.
     await evaluate(second.cdp, `(async () => {
-      const service = window.PersistenceServiceInstance;
+      const service = window.__locus.persistence();
       service.opfsRoot = null; service.opfsAvailable = false;
       window.__locus.vfs.resetHome();
       await window.__locus.vfs.write('/home/locus/memory-clear-survivor.txt', 'memory');
       await window.__locus.actions.clearHome();
     })()`);
-    const memoryClearState = await evaluate(second.cdp, `(async () => ({ exists: await window.__locus.vfs.exists('/home/locus/memory-clear-survivor.txt'), provider: window.__locus.vfs.resolveMount('/home/locus').provider.constructor.name, opfs: !!window.PersistenceServiceInstance.opfsRoot }))()`);
+    const memoryClearState = await evaluate(second.cdp, `(async () => ({ exists: await window.__locus.vfs.exists('/home/locus/memory-clear-survivor.txt'), provider: window.__locus.vfs.resolveMount('/home/locus').provider.constructor.name, opfs: !!window.__locus.persistence().opfsRoot }))()`);
     check('C02-1 memory home Clear removes files', !memoryClearState.exists, JSON.stringify(memoryClearState));
     check('C02-2 memory home Clear rebuilds skeleton', await evaluate(second.cdp, 'window.__locus.vfs.exists("/home/locus/.skills") && window.__locus.vfs.exists("/home/locus/.config/locus/mcp") && window.__locus.vfs.exists("/home/locus/.cache/locus")'));
     await evaluate(second.cdp, `(async () => {
       await window.__locus.vfs.write('/home/locus/memory-reset-survivor.txt', 'memory');
       await window.__locus.actions.resetAllData();
     })()`);
-    const memoryResetState = await evaluate(second.cdp, `(async () => ({ exists: await window.__locus.vfs.exists('/home/locus/memory-reset-survivor.txt'), provider: window.__locus.vfs.resolveMount('/home/locus').provider.constructor.name, opfs: !!window.PersistenceServiceInstance.opfsRoot }))()`);
+    const memoryResetState = await evaluate(second.cdp, `(async () => ({ exists: await window.__locus.vfs.exists('/home/locus/memory-reset-survivor.txt'), provider: window.__locus.vfs.resolveMount('/home/locus').provider.constructor.name, opfs: !!window.__locus.persistence().opfsRoot }))()`);
     check('C02-3 memory home Reset removes files', !memoryResetState.exists, JSON.stringify(memoryResetState));
     check('C02-4 memory home Reset rebuilds skeleton', await evaluate(second.cdp, 'window.__locus.vfs.exists("/home/locus/.skills") && window.__locus.vfs.exists("/home/locus/.config/locus/mcp") && window.__locus.vfs.exists("/home/locus/.cache/locus")'));
 

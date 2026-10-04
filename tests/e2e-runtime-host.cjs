@@ -68,8 +68,11 @@ async function main() {
     const asm = await evaluate(cdp, 'window.__host.assembly()');
     check('H0b the page carries ZERO classic scripts (pure module self-assembly)',
       asm.classicScriptTags === 0, JSON.stringify(asm));
-    check('H0c the self-assembled core published the registry and the command surface',
-      asm.registryPresent === true && asm.shellCommands > 0, JSON.stringify(asm));
+    // M3c: the extracted runtime publishes NO core registry table (the
+    // self-assembly era is gone) — the command surface is what the page
+    // imports and the session executes.
+    check('H0c zero classic scripts and the real command surface',
+      asm.registryPresent === false && asm.shellCommands > 0, JSON.stringify(asm));
 
     // ---- B1: cold load = zero CDN fetches ----
     check('B1 cold load performed ZERO Pyodide CDN fetches (lazy python)',

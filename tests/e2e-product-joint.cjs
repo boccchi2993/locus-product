@@ -145,21 +145,25 @@ async function main() {
 
     // ---------- J3: cancel (abort-aware parked transport) ----------
     await evaluate(cdp, `(() => {
-      const wireTransport = window.Model.transport;
+      // M3c: the wire fake is exposed on __locusWire.fn; the park wrapper
+      // reinstalls through the explicit transport port (the Model
+      // singleton is gone).
+      const wireTransport = window.__locusWire.fn;
       window.__jointRestoreTransport = wireTransport;
-      window.Model.transport = async (url, init) => {
+      window.__locus.actions.setProductModelTransport(async (url, init) => {
         window.__locusWire.calls.push({ url, body: JSON.parse(init.body || '{}') });
+        window.__locusWire.parkerInstalled = true;
         return new Promise((resolve, reject) => {
           const signal = init && init.signal;
           const onAbort = () => reject(Object.assign(new Error('The operation was aborted'), { name: 'AbortError' }));
           if (signal && signal.aborted) { onAbort(); return; }
           if (signal) signal.addEventListener('abort', onAbort, { once: true });
         });
-      };
+      });
     })(); window.__locus.actions.newTask(); (function () { window.__locus.actions.submit('joint J3: parked then cancelled'); return 'submitted'; })()`);
     const j3state = await evaluate(cdp, `({ busy: window.__locus.store.busy,
       calls: window.__locusWire.calls.length,
-      transportIsParker: String(window.Model.transport).includes('onAbort'),
+      transportIsParker: String(window.__locus.store.settingsTesting) !== 'never' && window.__locusWire.parkerInstalled === true,
       convs: window.__locus.store.conversations.map(c => c.title + ':' + c.status) })`);
     console.log('J3 pre-wait state: ' + JSON.stringify(j3state));
     await waitForRuntimeCondition(cdp, 'window.__locusWire.calls.length >= 5', {
@@ -180,7 +184,7 @@ async function main() {
     })()`);
     check('J3 the parked task cancelled through the REAL composer path', j3.status === 'cancelled' && j3.warning === true, JSON.stringify(j3));
     check('J3 the parked request stayed dispatched exactly once (no further calls)', j3.calls === 5, JSON.stringify(j3.calls));
-    await evaluate(cdp, 'window.Model.transport = window.__jointRestoreTransport;');
+    await evaluate(cdp, 'window.__locus.actions.setProductModelTransport(window.__jointRestoreTransport);');
 
     // ---------- J4: permission denial (zero fetch dispatch) ----------
     await evaluate(cdp, `(() => {
@@ -263,7 +267,7 @@ async function main() {
     const j7PngB64 = Buffer.from(J7_PNG).toString('base64');
     await evaluate(cdp, `window.__locus.actions.newTask()`);
     await evaluate(cdp, `(async () => {
-      const id = createProviderIdentity({ provider: 'openai', adapterId: 'openai-compatible', dialect: 'openai', apiBase: 'https://joint.invalid/v1', model: 'joint-model' });
+      const id = window.__locus.capabilities.createProviderIdentity({ provider: 'openai', adapterId: 'openai-compatible', dialect: 'openai', apiBase: 'https://joint.invalid/v1', model: 'joint-model' });
       await window.__locus.capabilities.registry().setUserDecision(id, 'supported');
       const bytes = Uint8Array.from(${literal([...J7_PNG])});
       window.__locus.actions.addUploadFiles([new File([bytes], 'joint-j7.png', { type: 'image/png' })]);

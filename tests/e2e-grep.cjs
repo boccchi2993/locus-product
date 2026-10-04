@@ -49,32 +49,12 @@ const PAGE_HELPERS = `
     },
     dangerous: () => window.__gwE2e.withHeartbeat(
       exec("grep '^(a+)+$' adversarial.txt")),
-    // TEST-ONLY instrumentation through the documented worker seam: wraps
-    // the REAL Blob-Worker construction to count create/terminate pairs.
-    // M2a: the source comes from the runtime assets (the product page no
-    // longer carries a #grep-worker-src element).
-    instrument: () => {
-      const src = window.__locus.runtimeAssets().grepWorkerSource;
-      GrepRegexRuntime._workerFactory = () => {
-        window.__gwE2e.created++;
-        const blob = new Blob([src], { type: 'text/javascript' });
-        const url = URL.createObjectURL(blob);
-        let w;
-        try { w = new Worker(url); } finally { URL.revokeObjectURL(url); }
-        const origTerm = w.terminate.bind(w);
-        w.terminate = () => {
-          if (!w.__terminated) { w.__terminated = true; window.__gwE2e.terminated++; }
-          return origTerm();
-        };
-        return w;
-      };
-    },
-    counts: () => ({ created: window.__gwE2e.created, terminated: window.__gwE2e.terminated }),
-    resetCounts: () => { window.__gwE2e.created = 0; window.__gwE2e.terminated = 0; },
-    restore: () => { GrepRegexRuntime._workerFactory = null; },
-    breakWorker: () => { GrepRegexRuntime._workerFactory = () => { throw new Error('e2e: workers disabled'); }; },
-    created: 0,
-    terminated: 0,
+    // M3c integration: the grep regex runtime is INTERNAL to the installed
+    // runtime package now (no page-global GrepRegexRuntime to instrument).
+    // The worker create/terminate lifecycle + worker-unavailable fail-closed
+    // checks (old G-E5 counts / G-E6 / G-E7) are covered by locus-runtime's
+    // own e2e-grep over its host page, which reaches the module internals
+    // legitimately. This product-page gate keeps the behavior checks.
   };
   return 'installed';
 })()
@@ -161,10 +141,7 @@ async function main() {
     check('G-E4 ordinary grep succeeds right after an invalid pattern',
       afterInvalid.success && afterInvalid.output === 'foo bar', JSON.stringify(afterInvalid));
 
-    // ---- instrumented (still REAL workers) lifecycle checks ----
-    await evaluate(cdp, `window.__gwE2e.instrument(); 'installed'`);
-
-    // ---- CASE E: cancellation beats the timeout, worker terminated ----
+    // ---- CASE E: cancellation beats the timeout ----
     const cancel = await evaluate(cdp, `(async () => {
       const ac = new AbortController();
       setTimeout(() => ac.abort(), 150);
@@ -175,39 +152,10 @@ async function main() {
       !cancel.success && cancel.output === 'bash: cancelled' && cancel.elapsed < TIMEOUT_MS,
       JSON.stringify(cancel));
     check('G-E5 heartbeat kept firing during the cancelled run', cancel.beats >= 1, 'beats=' + cancel.beats);
-    const cancelCounts = await evaluate(cdp, `window.__gwE2e.counts()`);
-    check('G-E5 cancel creates and terminates exactly one worker',
-      cancelCounts.created === 1 && cancelCounts.terminated === 1, JSON.stringify(cancelCounts));
-
-    // ---- timeout under instrumentation: one create/terminate pair ----
-    await evaluate(cdp, `window.__gwE2e.resetCounts(); 'reset'`);
-    const redos2 = await evaluate(cdp, `window.__gwE2e.dangerous()`);
-    const timeoutCounts = await evaluate(cdp, `window.__gwE2e.counts()`);
-    check('G-E6 catastrophic grep still times out under instrumentation',
-      !redos2.success && /regex evaluation timed out/.test(redos2.output) && redos2.beats >= 5,
-      JSON.stringify(redos2));
-    check('G-E6 timeout creates and terminates exactly one worker',
-      timeoutCounts.created === 1 && timeoutCounts.terminated === 1, JSON.stringify(timeoutCounts));
-
-    // ---- CASE F: worker unavailable — fail closed, NO main-thread fallback ----
-    const unavailable = await evaluate(cdp, `(async () => {
-      window.__gwE2e.breakWorker();
-      const t0 = Date.now();
-      try {
-        const r = await window.__gwE2e.exec('grep foo normal.txt');
-        return { output: r.output, success: r.success, elapsed: Date.now() - t0 };
-      } finally { window.__gwE2e.restore(); }
-    })()`);
-    check('G-E7 worker unavailable fails closed (never a main-thread answer)',
-      !unavailable.success && unavailable.output === 'grep: regex worker unavailable' && unavailable.output !== 'foo bar',
-      JSON.stringify(unavailable));
-    check('G-E7 fail-closed grep returns promptly instead of hanging',
-      unavailable.elapsed < 2000, 'elapsed=' + unavailable.elapsed + 'ms');
-    await evaluate(cdp, `window.__gwE2e.restore(); 'restored'`);
-    await evaluate(cdp, `window.__gwE2e.restore(); 'restored'`);
-    const restored = await evaluate(cdp, `window.__gwE2e.exec('grep foo normal.txt').then(r => ({ output: r.output, success: r.success }))`);
-    check('G-E7 ordinary grep recovers once workers are available again',
-      restored.success && restored.output === 'foo bar', JSON.stringify(restored));
+    // (G-E5's worker create/terminate counting, G-E6's instrumented timeout
+    // and G-E7's worker-unavailable fail-closed moved with the runtime
+    // package: locus-runtime tests/e2e-grep.cjs covers them over its host
+    // page, where the internal GrepRegexRuntime seam is reachable.)
 
     // ---- ordinary searches keep their semantics in the real browser ----
     const semantics = await evaluate(cdp, `(async () => {

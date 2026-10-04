@@ -26,6 +26,7 @@
 <script type="module">
 import {
   ensureHarnessCore, createAgentSession, createModelClient,
+  harnessCapabilities,
   createProviderSessions, getProviderAdapter, createProviderIdentity,
   projectNormalizedHistory, validateReplayPrefix,
 } from 'locus-harness';
@@ -96,12 +97,12 @@ const evTypes = (events) => events.map((e) => e.type).join(',');
 (async () => {
   const results = {};
 
-  // ---------- assembly: the entry self-assembles its own core ----------
-  const table = await ensureHarnessCore();
+  // ---------- assembly (M3c: the PACKAGED entry — no core table exists;
+  // the declaration comes from the public harnessCapabilities()) ----------
   results.assembly = {
     classicScriptTags: document.querySelectorAll('script[src]:not([type="module"])').length,
     registryPresent: !!window.__LOCUS_HARNESS_CORE__,
-    contractVersion: table && table.contractVersion,
+    contractVersion: harnessCapabilities() && harnessCapabilities().contractVersion,
     domProductNodes: document.querySelectorAll('#app, #sb-python, #py-worker-src, #grep-worker-src').length,
   };
 

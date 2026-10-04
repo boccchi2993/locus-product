@@ -25,8 +25,10 @@ import * as ui from './ui/store.js';
 // M3c: the harness declaration resolver comes through the PUBLIC transfer
 // layer (the same entry the Product compatibility check reads); the tool
 // executor is the Product tool module's explicit export.
-import { harnessCapabilities } from './product/harness-api.js';
+import { harnessCapabilities, registerPluginRuntimeProvider, ApprovalController, createProviderIdentity } from './product/harness-api.js';
+import { productTaskVfsMounts, SkillInstanceWorkspace } from './extensions.js';
 import { executeTool } from './tools.js';
+import { PersistenceServiceInstance } from './persistence.js';
 import './ui/theme.css';
 
 const params = new URLSearchParams(window.location.search);
@@ -82,7 +84,11 @@ if (e2eMode) {
     // EXPLICIT Product transport port (the deleted legacy Model singleton
     // no longer exists); the harness captures the transport per request.
     window.__locusWire = { calls: [], responses: [] };
-    ui.setProductModelTransport(async (url, init) => {
+    // M3c integration: the wire fake itself is exposed so e2e suites can
+    // WRAP it (capture/corrupt around the production fake) and reinstall
+    // through the same explicit transport port — the legacy
+    // `window.Model.transport` seam no longer exists.
+    const wireFake = async (url, init) => {
       const wire = window.__locusWire;
       const headers = {};
       for (const [key, value] of Object.entries(init.headers || {})) headers[key] = value;
@@ -94,7 +100,9 @@ if (e2eMode) {
       return new Response(JSON.stringify(response), {
         status: 200, headers: { 'content-type': 'application/json' },
       });
-    });
+    };
+    window.__locusWire.fn = wireFake;
+    ui.setProductModelTransport(wireFake);
   }
   window.__LOCUS_HOOKS__ = hooks;
   // Established e2e seam (e2e-grep / e2e-network / e2e-capabilities drive
@@ -156,6 +164,10 @@ if (e2eMode) {
   // ?e2e=1). Browser python e2e drives prepare/reset/worker-state through
   // it — the SAME object task preparation and shell execution use.
   window.__locus.pythonRuntime = () => ui.pythonRuntime();
+  // M3c integration seam: the canonical persistence singleton (plugin
+  // seeding / provider-frame interception in the persistence + wire e2e).
+  // Never exposed outside ?e2e=1; observation/seeding only.
+  window.__locus.persistence = () => PersistenceServiceInstance;
   // M2a seam: the runtime session (prepare/reset/status/execute) — the
   // public entry object the product chain drives.
   window.__locus.runtime = () => ui.runtimeSession();
@@ -203,6 +215,10 @@ if (e2eMode) {
   // bytes and no-base64-persisted assertions.
   window.__locus.capabilities = {
     registry: () => ui.getCapabilityRegistry(),
+    // M3c integration: identity construction is a harness entry export
+    // (the classic page global is gone); the image e2e seeds registry
+    // decisions with it. TEST-ONLY.
+    createProviderIdentity: (config) => createProviderIdentity(config),
     status: () => ui.refreshImageCapability(),
     forget: () => ui.recheckImageCapability(),
   };
@@ -214,6 +230,13 @@ if (e2eMode) {
   // The production catalog is empty; nothing here exists in a normal run.
   window.__locus.capabilityComposition = {
     manager: () => ui.capabilityManager,
+    // M3c integration: the composition-core page globals are gone — the
+    // adapters/classes the browser e2e drives come from their owning
+    // modules (harness entry / Product extensions adapter). TEST-ONLY.
+    registerPluginRuntimeProvider: (runtime, provider) => registerPluginRuntimeProvider(runtime, provider),
+    productTaskVfsMounts: (manager, env) => productTaskVfsMounts(manager, env),
+    ApprovalController,
+    SkillInstanceWorkspace,
     list: () => ui.capabilityList(),
     injectTestCatalog: (catalogs, sources) => ui.injectCapabilityCatalogs(catalogs, sources),
     enable: (id) => ui.enableCapability(id),

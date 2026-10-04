@@ -70,8 +70,10 @@ const PAGE_HELPERS = `
 
   if (!window.__imgWrapped) {
     window.__imgWrapped = true;
-    const base = Model.transport;
-    Model.transport = async (url, init) => {
+    // M3c: the wire fake is exposed on __locusWire.fn; wrap + reinstall
+    // through the explicit transport port (the Model singleton is gone).
+    const base = window.__locusWire.fn;
+    window.__locus.actions.setProductModelTransport(async (url, init) => {
       const body = JSON.parse(init.body || '{}');
       window.__img.calls.push({ url, body });
       if (isProbe(body)) {
@@ -97,7 +99,7 @@ const PAGE_HELPERS = `
       }
       void base;
       return new Response(JSON.stringify(next), { status: 200, headers: { 'content-type': 'application/json' } });
-    };
+    });
   }
 
   window.__img.configure = async (model, dialect) => {
@@ -211,7 +213,7 @@ async function main() {
     await evaluate(cdp, `window.__img.reset()`);
     await evaluate(cdp, `(async () => {
       await window.__img.configure('vision-model-a');
-      const id = createProviderIdentity({ provider: 'openai', adapterId: 'openai-compatible', dialect: 'openai', apiBase: ${JSON.stringify(BASE)}, model: 'vision-model-a' });
+      const id = window.__locus.capabilities.createProviderIdentity({ provider: 'openai', adapterId: 'openai-compatible', dialect: 'openai', apiBase: ${JSON.stringify(BASE)}, model: 'vision-model-a' });
       await window.__locus.capabilities.registry().setUserDecision(id, 'supported');
       await window.__locus.capabilities.status();
     })()`);
@@ -254,7 +256,7 @@ async function main() {
     check('I-E7 the sentinel base64 never leaks into frames/normalized/events/timeline', leakA === false);
     const durableA = await evaluate(cdp, `(async () => {
       const store = window.__locus.attachments.store();
-      const metas = await window.PersistenceServiceInstance.allAttachmentMetas();
+      const metas = await window.__locus.persistence().allAttachmentMetas();
       if (metas.length !== 1) return 'metas=' + metas.length;
       const bytes = await store.getBytes(metas[0].id);
       const expected = Uint8Array.from(atob(window.__img.pngB64), c => c.charCodeAt(0));
@@ -399,7 +401,7 @@ async function main() {
     await evaluate(cdp, `window.__img.reset()`);
     await evaluate(cdp, `(async () => {
       await window.__img.configure('vision-model-f');
-      const id = createProviderIdentity({ provider: 'openai', adapterId: 'openai-compatible', dialect: 'openai', apiBase: ${JSON.stringify(BASE)}, model: 'vision-model-f' });
+      const id = window.__locus.capabilities.createProviderIdentity({ provider: 'openai', adapterId: 'openai-compatible', dialect: 'openai', apiBase: ${JSON.stringify(BASE)}, model: 'vision-model-f' });
       await window.__locus.capabilities.registry().setUserDecision(id, 'supported');
     })()`);
     await evaluate(cdp, `window.__img.upload('shot-f.png')`);
@@ -426,7 +428,7 @@ async function main() {
       await window.__img.configure('vision-model-f');
       // resetAllData wiped the registry (control-plane exception: full wipe);
       // reseed the supported decision for this identity.
-      const id = createProviderIdentity({ provider: 'openai', adapterId: 'openai-compatible', dialect: 'openai', apiBase: ${JSON.stringify(BASE)}, model: 'vision-model-f' });
+      const id = window.__locus.capabilities.createProviderIdentity({ provider: 'openai', adapterId: 'openai-compatible', dialect: 'openai', apiBase: ${JSON.stringify(BASE)}, model: 'vision-model-f' });
       await window.__locus.capabilities.registry().setUserDecision(id, 'supported');
       window.__img.upload('shot-f2.png');
       window.__locusWire.responses.push(${literal({ choices: [{ message: { role: 'assistant', content: 'before restart' }, finish_reason: 'stop' }] })});
@@ -438,7 +440,7 @@ async function main() {
       return !!c && c.status === 'completed';
     })()`, 'case-g-seed', 15000);
     const attachmentBefore = await evaluate(cdp, `(async () => {
-      const metas = await window.PersistenceServiceInstance.allAttachmentMetas();
+      const metas = await window.__locus.persistence().allAttachmentMetas();
       return metas.length;
     })()`);
     const uploadExisted = await evaluate(cdp, `window.__locus.vfs.exists('/mnt/upload/shot-f2.png')`);
@@ -463,7 +465,7 @@ async function main() {
     check('I-E28 /mnt/upload is gone (ephemeral) but durable attachments remain',
       uploadExisted === true
         && (await evaluate(cdp, `window.__locus.vfs.exists('/mnt/upload/shot-f2.png')`)) === false
-        && (await evaluate(cdp, `window.PersistenceServiceInstance.allAttachmentMetas().then(m => m.length)`)) === attachmentBefore,
+        && (await evaluate(cdp, `window.__locus.persistence().allAttachmentMetas().then(m => m.length)`)) === attachmentBefore,
       'before=' + attachmentBefore);
     check('I-E29 the capability decision survives the restart (no re-ask)',
       (await evaluate(cdp, `window.__locus.capabilities.status().then(s => s.state + ':' + s.source)`)) === 'supported:user');
@@ -490,7 +492,7 @@ async function main() {
     await evaluate(cdp, `window.__img.reset()`);
     await evaluate(cdp, `(async () => {
       await window.__img.configure('vision-model-h');
-      const id = createProviderIdentity({ provider: 'openai', adapterId: 'openai-compatible', dialect: 'openai', apiBase: ${JSON.stringify(BASE)}, model: 'vision-model-h' });
+      const id = window.__locus.capabilities.createProviderIdentity({ provider: 'openai', adapterId: 'openai-compatible', dialect: 'openai', apiBase: ${JSON.stringify(BASE)}, model: 'vision-model-h' });
       await window.__locus.capabilities.registry().setUserDecision(id, 'supported');
     })()`);
     await evaluate(cdp, `window.__img.upload('shot-h.png')`);
@@ -502,7 +504,7 @@ async function main() {
       return !!c && c.status === 'completed';
     })()`, 'case-h-seed', 15000);
     const corruptResult = await evaluate(cdp, `(async () => {
-      const metas = await window.PersistenceServiceInstance.allAttachmentMetas();
+      const metas = await window.__locus.persistence().allAttachmentMetas();
       if (metas.length !== 1) return 'metas=' + metas.length;
       const sha = metas[0].storageKey;
       const root = await navigator.storage.getDirectory();
@@ -544,7 +546,7 @@ async function main() {
     await evaluate(cdp, `window.__img.reset()`);
     await evaluate(cdp, `(async () => {
       await window.__img.configure('vision-model-i');
-      const id = createProviderIdentity({ provider: 'openai', adapterId: 'openai-compatible', dialect: 'openai', apiBase: ${JSON.stringify(BASE)}, model: 'vision-model-i' });
+      const id = window.__locus.capabilities.createProviderIdentity({ provider: 'openai', adapterId: 'openai-compatible', dialect: 'openai', apiBase: ${JSON.stringify(BASE)}, model: 'vision-model-i' });
       await window.__locus.capabilities.registry().setUserDecision(id, 'supported');
     })()`);
     await evaluate(cdp, `window.__img.upload('shot-i.png')`);
@@ -565,7 +567,7 @@ async function main() {
     await evaluate(cdp, `window.__img.reset()`);
     await evaluate(cdp, `(async () => {
       await window.__img.configure('vision-model-i2');
-      const id = createProviderIdentity({ provider: 'openai', adapterId: 'openai-compatible', dialect: 'openai', apiBase: ${JSON.stringify(BASE)}, model: 'vision-model-i2' });
+      const id = window.__locus.capabilities.createProviderIdentity({ provider: 'openai', adapterId: 'openai-compatible', dialect: 'openai', apiBase: ${JSON.stringify(BASE)}, model: 'vision-model-i2' });
       await window.__locus.capabilities.registry().setUserDecision(id, 'supported');
     })()`);
     await evaluate(cdp, `window.__img.upload('shot-i2.png')`);
@@ -587,12 +589,12 @@ async function main() {
     await evaluate(cdp, `window.__img.reset()`);
     await evaluate(cdp, `(async () => {
       await window.__img.configure('vision-model-j');
-      const id = createProviderIdentity({ provider: 'openai', adapterId: 'openai-compatible', dialect: 'openai', apiBase: ${JSON.stringify(BASE)}, model: 'vision-model-j' });
+      const id = window.__locus.capabilities.createProviderIdentity({ provider: 'openai', adapterId: 'openai-compatible', dialect: 'openai', apiBase: ${JSON.stringify(BASE)}, model: 'vision-model-j' });
       await window.__locus.capabilities.registry().setUserDecision(id, 'supported');
       // Simulate OPFS unavailability at the persistence layer (the same
       // state a browser without OPFS reports). Memory Map takes over.
-      window.PersistenceServiceInstance.opfsRoot = null;
-      window.PersistenceServiceInstance.opfsAvailable = false;
+      window.__locus.persistence().opfsRoot = null;
+      window.__locus.persistence().opfsAvailable = false;
       return 'memory-only';
     })()`);
     await evaluate(cdp, `window.__img.upload('shot-j.png')`);
@@ -622,8 +624,8 @@ async function main() {
       historyJ === false, String(historyJ));
     // Restore OPFS for the remaining cases.
     await evaluate(cdp, `(async () => {
-      window.PersistenceServiceInstance.opfsRoot = await navigator.storage.getDirectory();
-      window.PersistenceServiceInstance.opfsAvailable = true;
+      window.__locus.persistence().opfsRoot = await navigator.storage.getDirectory();
+      window.__locus.persistence().opfsAvailable = true;
       return 'restored';
     })()`);
 
@@ -634,7 +636,7 @@ async function main() {
       const bytes = Uint8Array.from(atob(window.__img.pngB64), c => c.charCodeAt(0));
       const results = await Promise.all(Array.from({ length: 10 }, (_, i) =>
         store.ingestImage({ bytes, name: 'conc-' + i + '.png', declaredType: 'image/png' })));
-      const metas = await window.PersistenceServiceInstance.allAttachmentMetas();
+      const metas = await window.__locus.persistence().allAttachmentMetas();
       return {
         uniqueIds: Array.from(new Set(results.map((r) => r.id))).length,
         metas: metas.length,

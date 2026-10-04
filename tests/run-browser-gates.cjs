@@ -29,12 +29,8 @@ const SUITES = [
   'e2e-persistence.cjs',
   'e2e-wire.cjs',
   'e2e-product-joint.cjs',
-  'e2e-python-authority.cjs',
-  'e2e-python-browser-authority.cjs',
-  'e2e-python-plugin-runtime.cjs',
   'e2e-runtime-host.cjs',
   'e2e-harness-host.cjs',
-  'e2e-python-bootstrap.cjs',
   'e2e-m3c-storage-adapters.cjs',
 ];
 

@@ -13,7 +13,13 @@ function extractFreezeArray(src, name) {
 }
 
 function loadPythonManifest() {
-  const src = fs.readFileSync(path.join(__dirname, '..', '..', 'src', 'shell.js'), 'utf8');
+  // M3c: the manifest's single source of truth moved with the runtime
+  // core — read it from the INSTALLED PINNED package (test-side witness
+  // read, the same pattern as the entries-as-witness suites). The
+  // package's exports map hides internals, so resolve the main entry and
+  // join the sibling path (fs reads are not exports-gated).
+  const entryPath = require.resolve('locus-runtime');
+  const src = fs.readFileSync(path.join(path.dirname(entryPath), 'shell.js'), 'utf8');
   const block = src.match(/const PYTHON_BOOTSTRAP_MANIFEST = Object\.freeze\(\[([\s\S]*?)\]\);/);
   if (!block) throw new Error('PYTHON_BOOTSTRAP_MANIFEST not found in src/shell.js');
   const base = src.match(/const PYODIDE_BASE = '([^']+)';/);
