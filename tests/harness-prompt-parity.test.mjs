@@ -2,45 +2,41 @@
 // side of H11): the REAL harness prompt builder + the REAL product prompt
 // inputs + the REAL runtime shell description compose back to the product
 // prompt's key content; the product telemetry sink never breaks a tool
-// result. Run: node tests/harness-prompt-parity.test.mjs
-
+// result. (M3c integration: every input comes from the REAL installed
+// cores / Product ESM modules — the shell description is read through the
+// runtime session's PUBLIC describeCommands(), the same port the store
+// adapts; no eval'd duplicate sources.)
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
-// ---------- the classic runtime description source (shell.js) ----------
-// The description port's text is GENERATED from the runtime command
-// registry; the product page loads it as a classic script. Eval the
-// runtime files (telemetry/workspace/vfs/shell — the runtime core set)
-// to obtain the same shellSystemPromptSection.
-const shellM = eval(
-  readFileSync(join(root, 'src', 'telemetry.js'), 'utf8') + '\n' +
-  readFileSync(join(root, 'src', 'workspace.js'), 'utf8') + '\n' +
-  readFileSync(join(root, 'src', 'vfs.js'), 'utf8') + '\n' +
-  readFileSync(join(root, 'src', 'shell.js'), 'utf8') +
-  '\n;({ shellSystemPromptSection, AGENT_TOOL_DEFINITIONS_REF: (typeof AGENT_TOOL_DEFINITIONS !== "undefined" ? null : null) })'
-);
+globalThis.window = { location: { protocol: 'https:' } };
+globalThis.document = { getElementById: () => null, createElement: () => ({ style: {} }) };
 
-// ---------- the harness prompt builder + the product tool registry ----------
-const { ensureHarnessCore, buildSystemPrompt, toolRegistryDefinitions } =
-  await import('../src/harness/index.js');
-await ensureHarnessCore();
+// ---------- the harness prompt builder (through the transfer layer) ----------
+const { buildSystemPrompt } = await import('../src/product/harness-api.js');
 
-// The PRODUCT tool definitions come from the product tool layer (src/tools.js
-// — Product adapter; eval, not import — the harness never carries them).
-const toolM = eval(
-  readFileSync(join(root, 'src', 'tools.js'), 'utf8') +
-  '\n;({ AGENT_TOOL_DEFINITIONS, executeTool });'
-);
+// ---------- the product tool layer (real ES module) ----------
+const { AGENT_TOOL_DEFINITIONS, executeTool } = await import('../src/tools.js');
 
 // ---------- the product prompt inputs (pure module) ----------
 const { locusEnvironmentNotes } = await import('../src/ui/product-prompt.js');
 
-// The REAL shell text, adapted exactly like productDescriptionPort does
-// over RuntimeSession.describeCommands() (which delegates to this function).
-const descriptionText = shellM.shellSystemPromptSection();
+// ---------- the REAL runtime session (public describeCommands) ----------
+const runtimeApi = await import('../src/product/runtime-api.js');
+const host = await runtimeApi.createRuntime({
+  workerAssets: {
+    pyWorkerSource: runtimeApi.runtimeWorkerAssets.PY_WORKER_SOURCE,
+    grepWorkerSource: runtimeApi.runtimeWorkerAssets.GREP_WORKER_SOURCE,
+  },
+});
+const __session = host.createSession();
+
+// The REAL shell text, exactly what RuntimeSession.describeCommands()
+// publishes (the store's descriptionPort adapts this same method).
+const descriptionText = __session.describeCommands();
 
 let passed = 0, failed = 0;
 function check(name, cond, detail) {
@@ -48,7 +44,7 @@ function check(name, cond, detail) {
   else { failed++; console.log('FAIL ' + name + (detail !== undefined ? ' | ' + detail : '')); }
 }
 
-const TOOLS = toolM.AGENT_TOOL_DEFINITIONS.slice();
+const TOOLS = AGENT_TOOL_DEFINITIONS.slice();
 
 function productPrompt(workspace) {
   return buildSystemPrompt({
@@ -119,15 +115,15 @@ function productPrompt(workspace) {
   const sinkReject = { record: (r) => { sinks.push(r); return Promise.reject(new Error('sink async boom')); } };
   const sinkOk = { record: (r) => { sinks.push(r); } };
 
-  const r1 = await toolM.executeTool('nope', '', null, { telemetry: sinkThrow });
+  const r1 = await executeTool('nope', '', null, { telemetry: sinkThrow });
   check('H8 a throwing sink still returns the failed tool result',
     r1.success === false && r1.output.includes('unknown tool: nope'), JSON.stringify(r1));
 
-  const r2 = await toolM.executeTool('alsonope', '', null, { telemetry: sinkReject });
+  const r2 = await executeTool('alsonope', '', null, { telemetry: sinkReject });
   check('H8 a rejected-promise sink still returns the failed tool result',
     r2.success === false && r2.output.includes('unknown tool: alsonope'), JSON.stringify(r2));
 
-  await toolM.executeTool('thirdnope', '', null, { telemetry: sinkOk });
+  await executeTool('thirdnope', '', null, { telemetry: sinkOk });
   await new Promise((r) => setTimeout(r, 20));
   check('H8 exactly one record per execution (no double metering)',
     sinks.length === 3 && sinks.every((s) => s.tool && typeof s.duration_ms === 'number'),
@@ -140,7 +136,7 @@ function productPrompt(workspace) {
     && sinks[0].error !== null);
 
   // No sink → no delivery at all (no-op), still a valid result.
-  const r3 = await toolM.executeTool('nopenope', '', null, {});
+  const r3 = await executeTool('nopenope', '', null, {});
   check('H8 missing sink is a no-op and the tool result stands',
     r3.success === false, JSON.stringify(r3));
   process.off('unhandledRejection', onUnhandled);

@@ -28,7 +28,7 @@ import {
   ensureHarnessCore, createAgentSession, createModelClient,
   createProviderSessions, getProviderAdapter, createProviderIdentity,
   projectNormalizedHistory, validateReplayPrefix,
-} from '../src/harness/index.js';
+} from 'locus-harness';
 
 const errors = [];
 window.addEventListener('error', (e) => errors.push(String(e.message || e)));

@@ -14,23 +14,21 @@
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
-const { PY_WORKER_SOURCE } = require('./helpers/runtime.cjs');
 
 const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
 
-// ---- module under test (workspace.js + vfs.js are its base classes) ----
-const extSrc = ['src/workspace.js', 'src/vfs.js', 'src/extension-composition.js', 'src/extensions.js']
-  .map((f) => read(f)).join('\n;\n');
-const M = eval(extSrc + '\n;({ CapabilityManager, StaticFileWorkspace, SkillSourceStore,'
-  + ' SkillInstanceStorage, SkillInstanceWorkspace, validatePluginDescriptor,'
-  + ' validateSkillDescriptor, validateCapabilityDescriptor, validateCatalogSet, registerPluginRuntimeProvider,'
-  + ' unregisterPluginRuntimeProvider, pluginRuntimeProvider, CAPABILITY_CATALOG, PLUGIN_CATALOG,'
-  + ' SKILL_CATALOG, MCP_CATALOG, CAPABILITY_STATES, MCP_STATES, VirtualWorkspace, MemoryWorkspace,'
-  + ' SKILL_INSTANCE_ROOT, skillInstancePath, productTaskVfsMounts });');
+// ---- M3c integration: every symbol from the REAL modules (no eval) ----
+// Ownership split (documented in locus-harness
+// tests/capability-composition.test.mjs): the composition-core checks run
+// THERE over the real module; this suite keeps the PRODUCT adapter block
+// (F0-F12: productTaskVfsMounts over runtime workspaces + the
+// StaticFileWorkspace tree) and the WORKER install block (W0-W9 over the
+// runtime's real PY_WORKER_SOURCE).
+let runtimeApi = null, harnessApi = null, ext = null, toolsMod = null;   // imported in run()
 
-// agent.js for prompt tests (tools.js supplies the tool registry global)
-const A = eval(read('src/tools.js') + '\n' + read('src/agent.js')
-  + '\n;({ buildSystemPrompt, AgentSession, AGENT_TOOL_DEFINITIONS });');
+let M = null;   // alias surface, resolved in run()
+let A = null;
+let PY_WORKER_SOURCE = null;
 
 let passed = 0, failed = 0;
 // M2b (repository split): AgentSession consumes a ToolPort
@@ -149,308 +147,41 @@ function synthProvider() {
 }
 
 async function run() {
-  // ================= production catalogs =================
-  check('P1 production capability catalog is empty', M.CAPABILITY_CATALOG.length === 0);
-  check('P2 production plugin catalog is empty', M.PLUGIN_CATALOG.length === 0);
-  check('P3 production skill catalog is empty', M.SKILL_CATALOG.length === 0);
-  check('P4 production mcp catalog is empty', M.MCP_CATALOG.length === 0);
-  check('P5 production catalogs are frozen', Object.isFrozen(M.CAPABILITY_CATALOG) && Object.isFrozen(M.PLUGIN_CATALOG));
-  const prod = newManager({});
-  check('P6 empty production manager lists nothing', prod.listCapabilities().length === 0);
-  check('P7 empty environment has no python key', prod.buildTaskEnvironment().pythonExtensionKey === null);
-  check('P8 empty environment mounts nothing', M.productTaskVfsMounts(prod, prod.buildTaskEnvironment()).length === 0
-    && prod.taskVfsMountSpecs(prod.buildTaskEnvironment()).length === 0);
-  check('P9 state vocabularies', M.CAPABILITY_STATES.join(',') === 'disabled,needs-connection,ready,error'
-    && M.MCP_STATES.join(',') === 'connected,needs-connection,unavailable');
+  runtimeApi = await import('../src/product/runtime-api.js');
+  harnessApi = await import('../src/product/harness-api.js');
+  ext = await import('../src/extensions.js');
+  toolsMod = await import('../src/tools.js');
+  M = {
+    CapabilityManager: harnessApi.CapabilityManager,
+    SkillSourceStore: harnessApi.SkillSourceStore,
+    SkillInstanceStorage: ext.SkillInstanceStorage,
+    SkillInstanceWorkspace: ext.SkillInstanceWorkspace,
+    StaticFileWorkspace: ext.StaticFileWorkspace,
+    productTaskVfsMounts: ext.productTaskVfsMounts,
+    registerPluginRuntimeProvider: harnessApi.registerPluginRuntimeProvider,
+    MemoryWorkspace: Object.getPrototypeOf(runtimeApi.createMemoryWorkspace({})).constructor,
+  };
+  A = {
+    buildSystemPrompt: harnessApi.buildSystemPrompt,
+    AgentSession: harnessApi.AgentSession,
+    AGENT_TOOL_DEFINITIONS: toolsMod.AGENT_TOOL_DEFINITIONS,
+  };
+  PY_WORKER_SOURCE = runtimeApi.runtimeWorkerAssets.PY_WORKER_SOURCE;
 
-  // ================= descriptor validation =================
-  await throwsWith('V1 plugin authority other than none is rejected',
-    () => M.validatePluginDescriptor({ id: 'p', version: '1', runtime: 'python', authority: 'network', provides: { pythonImports: [] } }),
-    'authority');
-  await throwsWith('V2 plugin authority undefined is rejected',
-    () => M.validatePluginDescriptor({ id: 'p', version: '1', runtime: 'python' }),
-    'authority');
-  await throwsWith('V3 unsupported plugin runtime is rejected',
-    () => M.validatePluginDescriptor({ id: 'p', version: '1', runtime: 'java', authority: 'none' }),
-    'runtime');
-  await throwsWith('V4 python plugin without pythonImports is rejected',
-    () => M.validatePluginDescriptor({ id: 'p', version: '1', runtime: 'python', authority: 'none' }),
-    'pythonImports');
-  await throwsWith('V5 plugin with non-array provides entry is rejected',
-    () => M.validatePluginDescriptor({ id: 'p', version: '1', runtime: 'python', authority: 'none', provides: { pythonImports: 'x' } }),
-    'provides');
-  await throwsWith('V6 plugin with bad module name is rejected',
-    () => M.validatePluginDescriptor({ id: 'p', version: '1', runtime: 'python', authority: 'none', provides: { pythonImports: ['bad name'] } }),
-    'module name');
-  check('V7 valid plugin descriptor normalizes', (() => {
-    const p = M.validatePluginDescriptor({ id: 'p', version: '1', runtime: 'python', authority: 'none', provides: { pythonImports: ['m'] } });
-    return p.authority === 'none' && p.runtime === 'python' && p.displayName === 'p';
-  })());
-  // SkillDefinition = metadata ONLY. Inline source fields are rejected
-  // loudly (never silently ignored), and the old VFS path field is gone —
-  // instance paths are derived from capabilityId + skillId.
-  await throwsWith('V8 skill inline body is rejected',
-    () => M.validateSkillDescriptor({ id: 's', version: '1', description: 'd', body: 'b' }),
-    '"body" is not allowed');
-  await throwsWith('V9 skill inline content is rejected',
-    () => M.validateSkillDescriptor({ id: 's', version: '1', description: 'd', content: 'b' }),
-    '"content" is not allowed');
-  await throwsWith('V9b skill inline markdown is rejected',
-    () => M.validateSkillDescriptor({ id: 's', version: '1', description: 'd', markdown: 'b' }),
-    '"markdown" is not allowed');
-  await throwsWith('V9c skill inlineSource is rejected',
-    () => M.validateSkillDescriptor({ id: 's', version: '1', description: 'd', inlineSource: 'b' }),
-    '"inlineSource" is not allowed');
-  await throwsWith('V10 skill descriptor path field is rejected (instance paths are derived)',
-    () => M.validateSkillDescriptor({ id: 's', version: '1', description: 'd', path: '/usr/local/share/locus/skills/s/SKILL.md' }),
-    '"path" is not allowed');
-  check('V11 valid skill descriptor is metadata only', (() => {
-    const s = M.validateSkillDescriptor({ id: 's', version: '1', description: 'd', displayName: 'S' });
-    return JSON.stringify(Object.keys(s)) === JSON.stringify(['kind', 'id', 'version', 'displayName', 'description'])
-      && !('body' in s) && !('path' in s);
-  })());
-  check('V12 instance path contract is capability-private and derived',
-    M.skillInstancePath('a-cap', 'x') === '/home/locus/.skills/a-cap/x.skill'
-    && M.skillInstancePath('b-cap', 'x') === '/home/locus/.skills/b-cap/x.skill');
-  await throwsWith('V13 capability referencing unknown plugin fails catalog load',
-    () => M.validateCatalogSet({ capabilities: [{ id: 'c', version: '1', displayName: 'C', description: 'd', plugins: ['nope'] }] }),
-    'unknown plugin');
-  await throwsWith('V14 capability referencing unknown skill fails catalog load',
-    () => M.validateCatalogSet({ capabilities: [{ id: 'c', version: '1', displayName: 'C', description: 'd', skills: ['nope'] }] }),
-    'unknown skill');
-  await throwsWith('V15 duplicate plugin id fails catalog load',
-    () => M.validateCatalogSet({ plugins: [{ id: 'p', version: '1', runtime: 'python', authority: 'none', provides: { pythonImports: [] } }, { id: 'p', version: '2', runtime: 'python', authority: 'none', provides: { pythonImports: [] } }] }),
-    'duplicate plugin id');
-  await throwsWith('V16 duplicate capability id fails catalog load',
-    () => M.validateCatalogSet({ capabilities: [{ id: 'c', version: '1', displayName: 'C', description: 'd' }, { id: 'c', version: '2', displayName: 'C2', description: 'd' }] }),
-    'duplicate capability id');
-  await throwsWith('V17 invalid mcp ref id fails capability validation',
-    () => M.validateCapabilityDescriptor({ id: 'c', version: '1', displayName: 'C', description: 'd', mcps: ['../evil'] }),
-    'valid ids');
-  check('V18 duplicate component refs normalize/dedupe', (() => {
-    const c = M.validateCapabilityDescriptor({
-      id: 'c', version: '1', displayName: 'C', description: 'd',
-      plugins: ['p', 'p'], skills: ['s', 's', 's'],
-    });
-    return c.plugins.length === 1 && c.skills.length === 1;
-  })());
-  await throwsWith('V19 missing version fails validation',
-    () => M.validateCapabilityDescriptor({ id: 'c', displayName: 'C', description: 'd' }),
-    'version');
-  await throwsWith('V20 skill source store rejects oversized sources', () => {
-    const st = new M.SkillSourceStore();
-    st.define('s', '1', 'x'.repeat(256 * 1024 + 1));
-  }, 'skill source limit');
-  check('V21 skill source store hands out byte copies (no aliasing)', (() => {
-    const st = new M.SkillSourceStore();
-    st.define('s', '1', '# hi\n');
-    const a = st.sourceOf('s', '1');
-    const b = st.sourceOf('s', '1');
-    return a.bytes !== b.bytes && Buffer.compare(Buffer.from(a.bytes), Buffer.from(b.bytes)) === 0
-      && st.sourceOf('s', '2') === null && st.has('s', '1');
-  })());
+  // (Composition-core coverage — production catalogs, descriptor
+  // validation, manager lifecycle, MCP requirement states, system-prompt
+  // capability index — moved with the harness package; see the note in
+  // this file's head.)
 
-  // ================= manager lifecycle =================
-  // NOTE: the "no provider" case runs BEFORE any provider registration.
-  const bare = newManager();
-  const bareState = await bare.enable('synthetic-capability');
-  check('M1 python plugin without runtime provider -> capability state error', bareState === 'error', bareState);
-  check('M2 error capability names the missing provider', /no runtime provider registered for "python"/.test(bare.listCapabilities().find((c) => c.id === 'synthetic-capability').error || ''));
-  const bareEnv = bare.buildTaskEnvironment();
-  const bareCap = bareEnv.capabilities.find((c) => c.id === 'synthetic-capability');
-  check('M3 error capability contributes no components to the environment',
-    bareCap && bareCap.state === 'error' && bareCap.pluginIds.length === 0 && bareCap.skillIds.length === 0
-    && bareEnv.plugins.length === 0 && bareEnv.skills.length === 0);
-
+  // The synthetic python plugin runtime provider is SUITE-registered via
+  // the harness PUBLIC registerPluginRuntimeProvider — the old suite did
+  // the same inside its descriptor-validation section; unregistered in
+  // the run() tail.
   M.registerPluginRuntimeProvider('python', synthProvider());
-  const m4 = newManager();
-  check('M4 provider (re-)registration enables resolution', await m4.enable('synthetic-capability') === 'ready');
-
-  const mgr = newManager();
-  const list0 = mgr.listCapabilities();
-  check('M5 all catalog capabilities start disabled', list0.length === 4 && list0.every((c) => c.state === 'disabled' && !c.enabled));
-  check('M6 includes counts come from the descriptor refs', (() => {
-    const c = list0.find((x) => x.id === 'synthetic-capability');
-    return c.includes.plugins === 1 && c.includes.skills === 1 && c.includes.mcps === 0;
-  })());
-
-  const st = await mgr.enable('synthetic-capability');
-  check('M7 enable resolves local components + materializes -> ready', st === 'ready', st);
-  check('M7b enable materialized the capability-private instance',
-    (await mgr._testHome.read('/home/locus/../.skills/synthetic-capability/synthetic-skill.skill').catch(() => null)) === null
-    && (await mgr._testHome.read('.skills/synthetic-capability/synthetic-skill.skill')) === SYNTH_SKILL_BODY);
-  check('M7c install marker written LAST (after the default instance)',
-    await mgr._testHome.exists('.skills/synthetic-capability/.locus-installed.json'));
-  check('M7d the durable instance does NOT enter listCapabilities metadata',
-    JSON.stringify(mgr.listCapabilities().find((c) => c.id === 'synthetic-capability').skills[0])
-      === JSON.stringify({ id: 'synthetic-skill', displayName: 'Synthetic Skill', version: '1' }));
-  check('M8 enable of unknown id throws', await (async () => {
-    try { await mgr.enable('nope'); return false; } catch (e) { return /unknown capability/.test(e.message); }
-  })());
-
-  const env = mgr.buildTaskEnvironment();
-  check('M9 environment carries the capability (ready)', env.capabilities.length === 1 && env.capabilities[0].state === 'ready');
-  check('M10 environment carries the plugin descriptor (authority none)',
-    env.plugins.length === 1 && env.plugins[0].id === 'synthetic-python-plugin' && env.plugins[0].authority === 'none');
-  check('M11 environment carries the prepared payload',
-    env.plugins[0].payload.files['locus_test_plugin.py'].includes('return 42')
-    && env.plugins[0].payload.imports.join() === 'locus_test_plugin');
-  check('M12 environment carries the skill INSTANCE (metadata + derived path, never a body)',
-    env.skills.length === 1
-    && env.skills[0].capabilityId === 'synthetic-capability'
-    && env.skills[0].skillId === 'synthetic-skill'
-    && env.skills[0].path === '/home/locus/.skills/synthetic-capability/synthetic-skill.skill'
-    && env.skills[0].present === true
-    && !('body' in env.skills[0]) && !('content' in env.skills[0]) && !('source' in env.skills[0]));
-  check('M13 environment carries the instance path per capability', env.capabilities[0].skillPaths.join() === env.skills[0].path);
-  check('M14 pythonExtensionKey identifies the payload set', env.pythonExtensionKey === 'synthetic-python-plugin@1');
-
-  // ---- frozen TaskEnvironment ----
-  const envFrozen = Object.isFrozen(env) && Object.isFrozen(env.capabilities) && Object.isFrozen(env.plugins)
-    && Object.isFrozen(env.skills) && Object.isFrozen(env.mcps) && Object.isFrozen(env.capabilities[0])
-    && Object.isFrozen(env.plugins[0]) && Object.isFrozen(env.plugins[0].payload)
-    && Object.isFrozen(env.plugins[0].payload.files) && Object.isFrozen(env.skills[0]);
-  check('M15 TaskEnvironment is deeply frozen', envFrozen);
-  const mutationOK = await (async () => {
-    'use strict';
-    try {
-      const e = mgr.buildTaskEnvironment();
-      e.capabilities.push({ id: 'intruder' });
-      e.plugins[0].authority = 'network';
-      return false;
-    } catch (e) {
-      return e instanceof TypeError;
-    }
-  })();
-  check('M16 mutating a frozen environment throws (strict mode)', mutationOK);
-  const env2 = mgr.buildTaskEnvironment();
-  check('M17 after mutation attempt a fresh build is unchanged',
-    env2.capabilities.length === 1 && env2.plugins[0].authority === 'none');
-
-  // ---- dedupe / reference semantics (C1/C2/C3) ----
-  // Plugins and MCP requirements dedupe by id. Skill INSTANCES do NOT:
-  // the same definition referenced by two capabilities yields two
-  // capability-private entries with two independent paths.
-  await mgr.enable('cap-a');
-  await mgr.enable('cap-b');
-  const dedupe = mgr.buildTaskEnvironment();
-  check('M18 C1: shared plugin resolves once across capabilities',
-    dedupe.plugins.length === 2 && dedupe.plugins.filter((p) => p.id === 'shared-plugin').length === 1, JSON.stringify(dedupe.plugins.map((p) => p.id)));
-  check('M19 skill instances are NEVER deduped: shared definition -> two private entries',
-    dedupe.skills.length === 3
-    && dedupe.skills.filter((s) => s.skillId === 'shared-skill').length === 2
-    && dedupe.skills.filter((s) => s.skillId === 'shared-skill').every((s) => s.path.endsWith('/shared-skill.skill'))
-    && dedupe.skills.find((s) => s.skillId === 'shared-skill').path === '/home/locus/.skills/cap-a/shared-skill.skill'
-    && dedupe.skills.find((s) => s.capabilityId === 'cap-b' && s.skillId === 'shared-skill').path === '/home/locus/.skills/cap-b/shared-skill.skill',
-    JSON.stringify(dedupe.skills));
-  check('M19b each capability materialized its OWN instance file',
-    (await mgr._testHome.read('.skills/cap-a/shared-skill.skill')) === '# shared\n'
-    && (await mgr._testHome.read('.skills/cap-b/shared-skill.skill')) === '# shared\n');
-  await mgr.disable('cap-a');
-  const afterA = mgr.buildTaskEnvironment();
-  check('M20 C2: disabling A keeps the shared plugin while B needs it',
-    !afterA.capabilities.some((c) => c.id === 'cap-a') && afterA.capabilities.some((c) => c.id === 'cap-b')
-    && afterA.plugins.some((p) => p.id === 'shared-plugin')
-    && afterA.skills.some((s) => s.capabilityId === 'cap-b'));
-  await mgr.disable('cap-b');
-  const afterB = mgr.buildTaskEnvironment();
-  check('M21 C3: disabling B removes the shared components',
-    afterB.capabilities.length === 1 && afterB.capabilities[0].id === 'synthetic-capability'
-    && afterB.plugins.length === 1 && afterB.plugins[0].id === 'synthetic-python-plugin');
-  await throwsWith('M22 disable of unknown id throws', () => mgr.disable('nope'), 'unknown capability');
-  check('M23 disable is idempotent for disabled ids', (await mgr.disable('cap-a'), await mgr.disable('cap-a'), true));
-  const synthetic = mgr.buildTaskEnvironment();
-  check('M24 old snapshot (cap-a+cap-b era) was never mutated by disables',
-    synthetic.capabilities.length === 1 && synthetic.capabilities[0].id === 'synthetic-capability');
-  check('M25 disable removed ONLY the removed capability\'s instance directory',
-    !(await mgr._testHome.exists('.skills/cap-a')) && !(await mgr._testHome.exists('.skills/cap-b'))
-    && (await mgr._testHome.exists('.skills/synthetic-capability/synthetic-skill.skill')));
-
-  // ---- MCP requirement semantics ----
-  const mmgr = newManager();
-  await mmgr.enable('synthetic-mcp-capability');
-  check('M26 unconnected MCP requirement -> needs-connection (never ready)',
-    mmgr.capabilityState('synthetic-mcp-capability') === 'needs-connection');
-  const mEnv1 = mmgr.buildTaskEnvironment();
-  check('M27 environment carries the requirement state',
-    mEnv1.mcps.length === 1 && mEnv1.mcps[0].id === 'synthetic-service' && mEnv1.mcps[0].state === 'needs-connection');
-  check('M28 needs-connection snapshot is frozen too', Object.isFrozen(mEnv1.mcps[0]));
-  mmgr.setMcpState('synthetic-service', 'connected');
-  check('M29 explicit connection flips the manager state to ready',
-    mmgr.capabilityState('synthetic-mcp-capability') === 'ready');
-  const mEnv2 = mmgr.buildTaskEnvironment();
-  check('M30 connected status appears only in the NEXT snapshot',
-    mEnv2.mcps[0].state === 'connected' && mEnv1.mcps[0].state === 'needs-connection');
-  await throwsWith('M31 invalid MCP state is rejected', () => mmgr.setMcpState('synthetic-service', 'authorized'), 'invalid MCP state');
-  const umgr = newManager();
-  await umgr.enable('synthetic-mcp-capability');
-  umgr.setMcpState('synthetic-service', 'unavailable');
-  check('M32 unavailable authority also keeps needs-connection', umgr.capabilityState('synthetic-mcp-capability') === 'needs-connection');
-
-  // ---- catalog replacement (test/e2e injection path) ----
-  const rmgr = newManager();
-  await rmgr.enable('synthetic-capability');
-  rmgr.replaceCatalogs({ capabilities: [] });
-  check('M33 replaceCatalogs resets enabled-state', rmgr.listCapabilities().length === 0 && rmgr.buildTaskEnvironment().capabilities.length === 0);
-  await throwsWith('M34 broken replacement catalog fails loudly and keeps state', async () => {
-    try {
-      rmgr.replaceCatalogs({ capabilities: [{ id: 'x', version: '1', displayName: 'X', description: 'd', plugins: ['ghost'] }] });
-    } finally {
-      if (rmgr.listCapabilities().length !== 0) throw new Error('state was mutated by a failed replace');
-    }
-  }, 'unknown plugin');
-
-  // ================= system prompt =================
+  const prod = newManager({});
   const readyMgr = newManager();
   await readyMgr.enable('synthetic-capability');
   const readyEnv = readyMgr.buildTaskEnvironment();
-  const pMgr = newManager();
-  await pMgr.enable('synthetic-capability');
-  await pMgr.enable('synthetic-mcp-capability');
-  const pEnv = pMgr.buildTaskEnvironment();
-  const promptReady = A.buildSystemPrompt({ workspace: null, taskEnvironment: readyEnv });
-  check('S1 prompt contains the capability display name', promptReady.includes('Synthetic Capability'));
-  check('S2 prompt contains the capability-private instance path', promptReady.includes('/home/locus/.skills/synthetic-capability/synthetic-skill.skill'));
-  check('S2b prompt points at NO other skill location', !promptReady.includes('/usr/local/share/locus/skills'));
-  check('S3 prompt tells the model to read the guidance on demand', /read a file with cat only when/i.test(promptReady));
-  check('S3b prompt states the behavior-mutation rule', /customized when the user asks/i.test(promptReady)
-    && /explicit user confirmation/i.test(promptReady));
-  check('S4 prompt does NOT contain the skill body marker', !promptReady.includes('SHOULD_ONLY_APPEAR_AFTER_SKILL_READ_7F91'));
-  check('S5 prompt does NOT contain plugin ids', !promptReady.includes('synthetic-python-plugin'));
-  check('S6 prompt does NOT contain internal APIs', !promptReady.includes('CapabilityManager') && !promptReady.includes('TaskEnvironment')
-    && !promptReady.includes('SkillSourceStore') && !promptReady.includes('install marker'));
-  const promptMcp = A.buildSystemPrompt({ workspace: null, taskEnvironment: pEnv });
-  check('S7 needs-connection capability is NOT claimed available', promptMcp.includes('NOT connected') || promptMcp.includes('are not connected'));
-  const promptNone = A.buildSystemPrompt({ workspace: null });
-  check('S8 no capabilities -> no extension section at all', !promptNone.includes('## Capabilities'));
-  const promptEmpty = A.buildSystemPrompt({ workspace: null, taskEnvironment: prod.buildTaskEnvironment() });
-  check('S9 empty environment -> no extension section', !promptEmpty.includes('## Capabilities'));
-  // a deliberately deleted instance must not be advertised (present=false)
-  await readyMgr._testHome.remove('.skills/synthetic-capability/synthetic-skill.skill');
-  await readyMgr.refreshSkillPresence();
-  const presentEnv = readyMgr.buildTaskEnvironment();
-  check('S10 deleted instance drops out of the prompt index (capability stays listed)',
-    presentEnv.capabilities[0].skillPaths.length === 0
-    && presentEnv.skills.length === 1 && presentEnv.skills[0].present === false
-    && !A.buildSystemPrompt({ workspace: null, taskEnvironment: presentEnv }).includes('synthetic-skill.skill')
-    && A.buildSystemPrompt({ workspace: null, taskEnvironment: presentEnv }).includes('Synthetic Capability'));
-  // error-state capability stays out of the prompt (S11 below)
-  const errMgr = newManager();
-  M.unregisterPluginRuntimeProvider('python');
-  await errMgr.enable('synthetic-capability');
-  const errPrompt = A.buildSystemPrompt({ workspace: null, taskEnvironment: errMgr.buildTaskEnvironment() });
-  check('S11 error-state capability adds no prompt section', !errPrompt.includes('## Capabilities'));
-  M.registerPluginRuntimeProvider('python', synthProvider());
-
-  // budget integration: the index is inside the counted system prompt
-  const session = new A.AgentSession({
-    modelClient: async () => ({ content: 'done', rawMessage: { role: 'assistant', content: 'done' }, stopReason: 'end_turn', truncated: false }),
-    toolPort: asToolPort(async () => ({ output: 'ok', success: true })),
-  });
-  const bytesWithout = await session.historyRequestBytes(null, null);
-  const bytesWith = await session.historyRequestBytes(null, pEnv);
-  check('S12 capability index counts into the request byte budget', bytesWith > bytesWithout && bytesWith - bytesWithout < 4096,
-    String(bytesWith - bytesWithout));
 
   // ================= task VFS mounts =================
   const vEnv = readyEnv;
@@ -463,7 +194,7 @@ async function run() {
   check('F2 mount paths + system-read-only authority', mounts.every((m) => m.authority === 'system-read-only')
     && mounts.map((m) => m.path).sort().join() === '/mnt/plugins,/usr/local/share/locus/capabilities');
 
-  const vfs = new M.VirtualWorkspace({ listCommands: () => [] });
+  const vfs = runtimeApi.createWorkspace();
   const fork = vfs.fork();
   for (const m of mounts) fork.mount(m.path, m.provider, m.authority);
   check('F3 the old read-only skill body mount is GONE',
@@ -489,7 +220,7 @@ async function run() {
     (await vfs.list('/usr/local/share/locus/skills')).length === 0
     && vfs.resolveMount('/mnt/plugins') === null);
   check('F10 without capabilities the fork gains no mounts', (() => {
-    const v2 = new M.VirtualWorkspace({ listCommands: () => [] });
+    const v2 = runtimeApi.createWorkspace();
     const f2 = v2.fork();
     const before = f2.mounts.length;
     for (const m of M.productTaskVfsMounts(newManager(), prod.buildTaskEnvironment())) f2.mount(m.path, m.provider, m.authority);
@@ -508,22 +239,8 @@ async function run() {
     return w.stat('a/plugin.json').then((s) => s.size === 1);
   })());
 
-  // ================= python extension payload/key =================
-  const payload = newManager().pythonExtensionPayload(vEnv);
-  check('K1 payload key matches the environment', payload.key === vEnv.pythonExtensionKey);
-  check('K2 payload carries files + imports', payload.modules.length === 1
-    && payload.modules[0].pluginId === 'synthetic-python-plugin'
-    && payload.modules[0].files['locus_test_plugin.py'].includes('return 42')
-    && payload.modules[0].imports.join() === 'locus_test_plugin');
-  check('K3 payload is frozen', Object.isFrozen(payload) && Object.isFrozen(payload.modules) && Object.isFrozen(payload.modules[0]));
-  check('K4 key is null without python plugins', prod.buildTaskEnvironment().pythonExtensionKey === null);
-  check('K5 key changes with plugin version', (async () => {
-    const c = SYNTH_CATALOGS();
-    c.plugins[0].version = '2';
-    const m = newManager(c);
-    await m.enable('synthetic-capability');
-    return m.buildTaskEnvironment().pythonExtensionKey === 'synthetic-python-plugin@2';
-  })());
+  // (The python extension payload/key seam moved with the harness
+  // package — covered by locus-harness capability-composition tests.)
 
   // ================= worker plugin install (real worker source, VM) =================
   // M2a: the worker source lives in the runtime asset module; the product
@@ -620,6 +337,13 @@ async function run() {
     const rec = w.recorded() || [];
     check('W9 no extensionModules -> core-only boot unchanged (no FS writes)',
       !err && rec.filter((r) => r.kind === 'write').length === 0, err && err.message);
+  }
+
+  // Best-effort cleanup: the harness ENTRY exports the registration but
+  // deliberately not the unregistration — the suite process exits here
+  // anyway, so the suite-registered provider cannot leak anywhere.
+  if (typeof harnessApi.unregisterPluginRuntimeProvider === 'function') {
+    harnessApi.unregisterPluginRuntimeProvider('python');
   }
 
   console.log('\n' + passed + ' passed, ' + failed + ' failed');

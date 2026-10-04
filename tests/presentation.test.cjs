@@ -3,14 +3,17 @@
 // projector integration pass proving the real runtime events land as
 // expected. Run: node tests/presentation.test.cjs
 
-const fs = require('fs');
-const path = require('path');
+// M3c integration: real ESM imports (the projector and markdown are ES
+// modules; AgentSession/buildSystemPrompt come through the harness
+// transfer layer) — no eval'd in-repo duplicate sources.
+let Projector = null;   // src/ui/projector.js — LocusProjector
+let A = null;           // src/product/harness-api.js — AgentSession + buildSystemPrompt
+let MD = null;          // src/ui/markdown.js — LocusMarkdown
 
-const root = path.join(__dirname, '..');
-const projectorSrc = fs.readFileSync(path.join(root, 'src', 'ui', 'projector.js'), 'utf8');
-const agentSrc = fs.readFileSync(path.join(root, 'src', 'agent.js'), 'utf8');
-const Projector = eval(projectorSrc + '\n;LocusProjector');
-const A = eval(agentSrc + '\n;({ AgentSession, buildSystemPrompt });');
+(async () => {
+  Projector = (await import('../src/ui/projector.js')).LocusProjector;
+  A = await import('../src/product/harness-api.js');
+  MD = (await import('../src/ui/markdown.js')).LocusMarkdown;
 
 let passed = 0, failed = 0;
 // M2b (repository split): AgentSession consumes a ToolPort; this suite
@@ -107,7 +110,6 @@ function projectAll(events) {
 
 // ---------- M1..M5: markdown-lite safety + grammar ----------
 {
-  const MD = eval(fs.readFileSync(path.join(root, 'src', 'ui', 'markdown.js'), 'utf8') + '\n;LocusMarkdown');
   const html = MD.render('Done. **Bold** and `code`.\n\n- one\n- two\n\n## Head\n<script>alert(1)</script>');
   check('M1 escapes raw HTML', html.includes('&lt;script&gt;') && !html.includes('<script>'), html);
   check('M2 bold/code inline', html.includes('<strong>Bold</strong>') && html.includes('<code>code</code>'));
@@ -119,9 +121,10 @@ function projectAll(events) {
 // ---------- P8. REAL AgentSession events → projector integration ----------
 // The runtime emits; the projector consumes. Fakes are injected at the
 // documented AgentSession dependency boundary — no Vue, no DOM.
-{
-  const envelope = (text, extra) => Object.assign({
-    content: text, reasoning: null, stopReason: 'end_turn', usage: null,
+// (M3c integration: this block IS the suite's async-IIFE tail — the
+// declarations below are IIFE-scoped and the process exits inside the
+// session promise chain.)
+const envelope = (text, extra) => Object.assign({    content: text, reasoning: null, stopReason: 'end_turn', usage: null,
     rawMessage: { role: 'assistant', content: text }, truncated: false,
   }, extra || {});
   const replies = [
@@ -174,4 +177,4 @@ function projectAll(events) {
       process.exit(failed ? 1 : 0);
     }).catch((e) => { console.log('FAIL P10 threw: ' + e.message); process.exit(1); });
   }).catch((e) => { console.log('FAIL P8 threw: ' + e.message); process.exit(1); });
-}
+})().catch((e) => { console.error(e && e.stack || e); process.exit(1); });

@@ -1,7 +1,8 @@
 // Store runtime-session lifecycle wiring tests (M2a, repository split):
-// the REAL presentation store (src/ui/store.js) wired to a fake
-// AgentSession and a RECORDED runtime session. Proves the ownership
-// invariants at the product seam:
+// the REAL presentation store (src/ui/store.js) wired to a scripted
+// session fake (window.__LOCUS_HOOKS__.sessionFactory — the documented
+// injection seam, M3c integration) and a RECORDED runtime session. Proves
+// the ownership invariants at the product seam:
 //
 //   SP1  the store drives the ONE canonical runtime session and task
 //        preparation configures IT (prepare with the TaskEnvironment's
@@ -16,6 +17,16 @@
 //   SP5  window.__LOCUS_HOOKS__.runtimeSession substitutes the session
 //        (test/e2e seam) before first use.
 //
+// M3c integration dispositions:
+//   - SP7 (a missing classic policy script refuses loudly) is RETIRED:
+//     with static ESM imports the "mutation-policy.js was never loaded"
+//     failure mode is structurally impossible; the loud-refusal guard
+//     itself remains in the store's taskMutationPolicy as defense.
+//   - The capability-manager fakes (SP8/SP9) became per-scenario method
+//     patches on the REAL exported capabilityManager instance (the store
+//     resolves refreshSkillPresence/buildTaskEnvironment on it at call
+//     time) — no core table exists to swap a fake class into.
+//
 // Interpreter-instance BEHAVIOR (prepare/reset/dispose/prepare-barrier
 // semantics) is pinned in tests/python-lifecycle.test.cjs and
 // tests/runtime-session.test.mjs against the REAL factory/entry; REAL
@@ -23,11 +34,12 @@
 // production seam.
 // Run: node tests/store-python-lifecycle.test.mjs
 
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
-
-const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+// M3c integration: the store is a REAL ES module over the two installed
+// cores — the graph assembles itself; only the documented hooks seams are
+// set (sessionFactory / runtimeSession / runtimeCapabilities /
+// toolExecutor), and the store imports the policy, mounts and projector
+// itself.
+const { executeTool } = await import('../src/tools.js');
 
 // ---------- recorded runtime session ----------
 // A fake session faithful to the surface the store uses:
@@ -69,14 +81,19 @@ const HOOKS_RUNTIME_DECLARATION = Object.freeze({
 const hooksWith = (session, declaration) => ({
   runtimeSession: session,
   runtimeCapabilities: declaration === undefined ? HOOKS_RUNTIME_DECLARATION : declaration,
+  // The scripted AgentSession for the store's session boundary + run
+  // counting; production never sets this seam.
+  sessionFactory: (deps) => new FakeAgentSession(deps),
+  // Record the exact executor opts the store's ToolPort hands out (SP2
+  // evidence) and forward to the REAL production executor — the recorded
+  // call IS the production routing, not a parallel path.
+  toolExecutor: (tool, input, workspace, opts) => {
+    toolCalls.push({ tool, input, opts });
+    return executeTool(tool, input, workspace, opts);
+  },
 });
 
-// index.html loads src/mutation-policy.js as a classic script before the
-// store module runs; mirror that here.
-globalThis.LocusMutationPolicy = (0, eval)(
-  readFileSync(join(root, 'src', 'mutation-policy.js'), 'utf8') + String.fromCharCode(10) + ';LocusMutationPolicy');
-
-// ---------- stub runtime globals BEFORE importing the store ----------
+// ---------- the scripted AgentSession (injected via sessionFactory) ----------
 class FakeAgentSession {
   constructor(deps) {
     this.emit = deps.emit;
@@ -95,6 +112,7 @@ class FakeAgentSession {
     if (this.onSessionReset) this.onSessionReset();
   }
   cancel() { if (this.task && this.task.controller) this.task.controller.abort(); }
+  async historyRequestBytes() { return 0; }
   async run(input, opts) {
     if (this.task) throw new Error('AgentSession already has a running task');
     this.ranCount = (this.ranCount || 0) + 1;
@@ -115,74 +133,68 @@ class FakeAgentSession {
   }
 }
 
-const projectorSrc = readFileSync(join(root, 'src', 'ui', 'projector.js'), 'utf8');
-globalThis.LocusProjector = (0, eval)(projectorSrc + '\n;LocusProjector');
-globalThis.AgentSession = FakeAgentSession;
-globalThis.Model = { apiKey: '', apiBase: '', model: 'test-model', proxy: '', dialect: 'auto' };
-globalThis.callModel = async () => ({});
-// Records the opts the store hands to every tool call (SP2 evidence).
+// Records the opts the store hands to every tool call (SP2 evidence —
+// captured in the hooks.toolExecutor seam above, which forwards to the
+// REAL production executor).
 const toolCalls = [];
-globalThis.executeTool = async (tool, input, workspace, opts) => {
-  toolCalls.push({ tool, input, opts });
-  return { output: 'tool-ok', success: true };
-};
-globalThis.buildSystemPrompt = () => 'test';
-globalThis.verifyConnection = async () => {};
-globalThis.LocalDirectoryWorkspace = class {};
-globalThis.ensureWorkspacePermission = async () => true;
-globalThis.SHELL_COMMANDS = {};
-globalThis.ApprovalController = (0, eval)(
-  readFileSync(join(root, 'src', 'approval.js'), 'utf8') + String.fromCharCode(10) + ';ApprovalController');
-globalThis.VirtualWorkspace = (0, eval)(
-  readFileSync(join(root, 'src', 'workspace.js'), 'utf8') + '\n'
-  + readFileSync(join(root, 'src', 'vfs.js'), 'utf8') + '\n;VirtualWorkspace');
-// M2b: the store mounts task VFS mounts through the REAL product adapter
-// (extensions.js) over the fake manager's mount specs.
-globalThis.productTaskVfsMounts = (0, eval)(
-  readFileSync(join(root, 'src', 'extension-composition.js'), 'utf8') + '\n'
-  + readFileSync(join(root, 'src', 'extensions.js'), 'utf8') + '\n;productTaskVfsMounts');
 
 // ---------- gated capability manager (prepare-phase liveness, M1b fix) ----
 // Refreshes can hang (durability re-observation): these sections park a
 // REAL submit() inside refreshSkillPresence and prove the stale task never
 // prepares/resets/reconfigures the canonical runtime session afterwards.
-class FakeCapabilityManager {
-  constructor(opts) { this.opts = opts; this.refreshes = 0; this.envBuilt = 0; this.gate = null; }
-  async refreshSkillPresence() { this.refreshes++; if (this.gate) await this.gate(); }
-  buildTaskEnvironment() {
-    this.envBuilt++;
-    return { capabilities: [], plugins: [], skills: [], mcps: [], pythonExtensionKey: null };
-  }
-  pythonExtensionPayload() { return null; }
-  taskVfsMountSpecs() { return []; }
-  listCapabilities() { return []; }
+// M3c integration: the fake CLASS became per-scenario method patches on
+// the REAL exported capabilityManager instance (patchCapabilityManager
+// below) — the store resolves the methods on the instance at call time.
+function patchCapabilityManager(cm) {
+  const realRefresh = cm.refreshSkillPresence;
+  const realBuild = cm.buildTaskEnvironment;
+  const rec = { refreshes: 0, envBuilt: 0, release: null };
+  cm.refreshSkillPresence = async () => {
+    rec.refreshes++;
+    await new Promise((r) => { rec.release = r; });
+  };
+  cm.buildTaskEnvironment = (...args) => { rec.envBuilt++; return realBuild.apply(cm, args); };
+  rec.restore = () => {
+    cm.refreshSkillPresence = realRefresh;
+    cm.buildTaskEnvironment = realBuild;
+  };
+  return rec;
 }
 
 // The canonical runtime session for THIS module graph, injected through the
 // hooks seam BEFORE the store resolves it (the exact production seam).
 const canonical = makeSession();
-globalThis.window = { __LOCUS_HOOKS__: hooksWith(canonical) };
+globalThis.window = {
+  location: { protocol: 'https:' },
+  __LOCUS_HOOKS__: hooksWith(canonical),
+};
+
+// Every graph below shares THIS process's persistence singleton (memory
+// mode). A graph's boot restores conversations SAVED BY EARLIER GRAPHS and
+// the harness restoreInto() then resets the fresh session — node-suite
+// contamination a real page never sees. Wipe the store before each graph.
+const { PersistenceServiceInstance } = await import('../src/persistence.js');
+async function freshGraph(specifier) {
+  await PersistenceServiceInstance.reset();
+  return import(specifier);
+}
+const ui = await import('../src/ui/store.js');
+const { store, session, submit, newTask, whenBooted } = ui;
+// Boot settles asynchronously (durable restore replaces the conversations
+// array) — capture state only after it.
+await whenBooted;
 
 // M2b: the suite seeds the declared harness core table with its fakes
 // (the same rule a classic page follows). The FakeAgentSession is the
 // AgentSession the entry hands to the store. Review F1: the host provides
 // the capability-composition core fakes TOO (FakeCapabilityManager below),
 // so the REAL harnessCapabilities() declares capabilityComposition — the
-// product's declared degrade (skip capability work) must NOT fire for a
-// host that assembles that core.
-globalThis.__LOCUS_HARNESS_CORE__ = Object.freeze({
-  contractVersion: 1,
-  AgentSession: FakeAgentSession,
-  ApprovalController: globalThis.ApprovalController,
-  buildSystemPrompt: () => 'test',
-  HISTORY_BUDGET_BYTES: 768 * 1024,
-  MAX_TOOL_ITERATIONS: 32,
-  CapabilityManager: FakeCapabilityManager,
-  validatePluginPayload: () => { throw new Error('composition-core fake: payload validation not exercised by this suite'); },
-  pythonExtensionKeyOf: () => null,
-});
-const ui = await import('../src/ui/store.js');
-const { store, session, submit, newTask } = ui;
+// (The legacy __LOCUS_HARNESS_CORE__ host table is gone in the three-repo
+// world: the store imports the REAL harness session factory, catalogs and
+// validators through the transfer layer, and the scripted session enters
+// through the hooks.sessionFactory seam above. The REAL
+// harnessCapabilities() declares capabilityComposition — the product's
+// declared degrade (skip capability work) must NOT fire.)
 
 let passed = 0, failed = 0;
 function check(name, cond, detail) {
@@ -191,6 +203,14 @@ function check(name, cond, detail) {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const runScript = (script) => { session.script = script; };
+// M3c integration: wait for the parked STATE, never a fixed yield.
+async function waitFor(cond, label, deadlineMs = 10000) {
+  const deadline = Date.now() + deadlineMs;
+  while (!cond()) {
+    if (Date.now() > deadline) throw new Error('waitFor timeout: ' + label);
+    await sleep(5);
+  }
+}
 
 check('SP0 the store resolved exactly the injected session (no second construction)',
   ui.runtimeSession() === canonical && createdSessions.length === 1,
@@ -278,8 +298,11 @@ const createdBefore = createdSessions.length;
   // Fresh module graph: hooks must be set BEFORE the first resolution of
   // that graph. Use a query string so the store module re-evaluates.
   const hookedSession = makeSession();
-  globalThis.window = { __LOCUS_HOOKS__: hooksWith(hookedSession) };
-  const ui2 = await import('../src/ui/store.js?hooks-seam');
+  globalThis.window = {
+    location: { protocol: 'https:' },
+    __LOCUS_HOOKS__: hooksWith(hookedSession),
+  };
+  const ui2 = await freshGraph('../src/ui/store.js?hooks-seam');
   const resolved = ui2.runtimeSession();
   check('SP5 window.__LOCUS_HOOKS__.runtimeSession substitutes the session',
     resolved === hookedSession && typeof resolved.prepare === 'function'
@@ -288,22 +311,10 @@ const createdBefore = createdSessions.length;
   delete globalThis.window;
 }
 
-// ---------- SP7: a missing policy implementation fails LOUDLY ----------
-{
-  // Fresh graph without the policy global (the product forgot to load
-  // mutation-policy.js): the first bash call must REFUSE, never run
-  // unprotected.
-  const savedPolicy = globalThis.LocusMutationPolicy;
-  delete globalThis.LocusMutationPolicy;
-  const ui3 = await import('../src/ui/store.js?no-policy');
-  let refused = null;
-  try { await ui3.session.toolPort.execute({ name: 'bash', input: 'echo hi', context: { filesystem: ui3.vfs } }); }
-  catch (e) { refused = e; }
-  check('SP7 a missing product policy refuses execution loudly',
-    !!refused && /mutation policy unavailable/.test(String(refused && refused.message)),
-    String(refused && refused.message));
-  globalThis.LocusMutationPolicy = savedPolicy;
-}
+// (SP7 — "a missing classic policy script refuses loudly" — RETIRED at
+// M3c integration: mutation-policy.js is a static ESM import now, so the
+// script-order failure mode it guarded cannot occur. The loud-refusal
+// guard itself remains in the store's taskMutationPolicy as defense.)
 
 // ---------- SP8: cancel while refreshSkillPresence hangs ----------
 // The task is cancelled DURING the async capability refresh (before any
@@ -312,31 +323,27 @@ const createdBefore = createdSessions.length;
 // reach the model. The runner's own guards catch it; the Product must not
 // hand the cancelled task's configuration work to the runtime at all.
 {
-  globalThis.CapabilityManager = FakeCapabilityManager;
-  globalThis.CAPABILITY_CATALOG = [];
-  globalThis.PLUGIN_CATALOG = [];
-  globalThis.SKILL_CATALOG = [];
-  globalThis.MCP_CATALOG = [];
   const s8 = makeSession();
-  globalThis.window = { __LOCUS_HOOKS__: hooksWith(s8) };
-  const ui8 = await import('../src/ui/store.js?presence-cancel');
-  const cm8 = ui8.capabilityManager;
-  let release8 = null;
-  cm8.gate = () => new Promise((r) => { release8 = r; });
+  globalThis.window = {
+    location: { protocol: 'https:' },
+    __LOCUS_HOOKS__: hooksWith(s8),
+  };
+  const ui8 = await freshGraph('../src/ui/store.js?presence-cancel');
+  const rec8 = patchCapabilityManager(ui8.capabilityManager);
   const done8 = ui8.submit('presence cancel task');
-  await sleep(30);
+  await waitFor(() => !!rec8.release, 'SP8 park');
   check('SP8 the task is parked inside refreshSkillPresence',
-    cm8.refreshes === 1 && !!release8, JSON.stringify({ refreshes: cm8.refreshes }));
+    rec8.refreshes === 1 && !!rec8.release, JSON.stringify({ refreshes: rec8.refreshes }));
   ui8.cancelTask();
-  release8();
+  rec8.release();
   await done8;
   check('SP8b the cancelled task never prepared the canonical runtime session',
     s8.prepared.length === 0, JSON.stringify({ prepared: s8.prepared.length }));
   check('SP8c no TaskEnvironment was built for the cancelled task',
-    cm8.envBuilt === 0, JSON.stringify({ envBuilt: cm8.envBuilt }));
+    rec8.envBuilt === 0, JSON.stringify({ envBuilt: rec8.envBuilt }));
   check('SP8d no model request was made for the cancelled task',
     (ui8.session.ranCount || 0) === 0, JSON.stringify({ ran: ui8.session.ranCount }));
-  cm8.gate = null; // the follow-up must not hang on the section's gate
+  rec8.restore(); // the follow-up must run the REAL manager again
   const followUp8 = ui8.submit('follow-up after cancel');
   check('SP8e the cancelled task ended and admission reopened',
     ui8.store.busy === false && !!followUp8, JSON.stringify({ busy: ui8.store.busy }));
@@ -346,19 +353,20 @@ const createdBefore = createdSessions.length;
 // ---------- SP9: session boundary while refreshSkillPresence hangs ----------
 {
   const s9 = makeSession();
-  globalThis.window = { __LOCUS_HOOKS__: hooksWith(s9) };
-  const ui9 = await import('../src/ui/store.js?presence-boundary');
-  const cm9 = ui9.capabilityManager;
-  let release9 = null;
-  cm9.gate = () => new Promise((r) => { release9 = r; });
+  globalThis.window = {
+    location: { protocol: 'https:' },
+    __LOCUS_HOOKS__: hooksWith(s9),
+  };
+  const ui9 = await freshGraph('../src/ui/store.js?presence-boundary');
+  const rec9 = patchCapabilityManager(ui9.capabilityManager);
   const done9 = ui9.submit('presence boundary task');
-  await sleep(30);
+  await waitFor(() => !!rec9.release, 'SP9 park');
   ui9.newTask();          // the session boundary lands mid-refresh
-  release9();
+  rec9.release();
   await done9;
   check('SP9 the boundary-struck task stops cold: no environment, no model',
-    cm9.envBuilt === 0 && (ui9.session.ranCount || 0) === 0,
-    JSON.stringify({ envBuilt: cm9.envBuilt, ran: ui9.session.ranCount }));
+    rec9.envBuilt === 0 && (ui9.session.ranCount || 0) === 0,
+    JSON.stringify({ envBuilt: rec9.envBuilt, ran: ui9.session.ranCount }));
   check('SP9b the stale task neither prepared the session nor reset it again (the boundary owns the one reset)',
     s9.prepared.length === 0 && s9.resets.length === 1,
     JSON.stringify({ prepared: s9.prepared.length, resets: s9.resets.length }));
@@ -369,8 +377,8 @@ const createdBefore = createdSessions.length;
 // ---------- SP10: normal flow still prepares — with the task signal ----------
 {
   const s10 = makeSession();
-  globalThis.window = { __LOCUS_HOOKS__: hooksWith(s10) };
-  const ui10 = await import('../src/ui/store.js?presence-normal');
+  globalThis.window = { location: { protocol: 'https:' }, __LOCUS_HOOKS__: hooksWith(s10) };
+  const ui10 = await freshGraph('../src/ui/store.js?presence-normal');
   const cm10 = ui10.capabilityManager;
   const done10 = ui10.submit('normal presence task');
   await done10;
@@ -393,8 +401,11 @@ const createdBefore = createdSessions.length;
 // — an absent declaration is never defaulted to compatible.
 {
   const s11 = makeSession();
-  globalThis.window = { __LOCUS_HOOKS__: { runtimeSession: s11 } }; // no declaration
-  const ui11 = await import('../src/ui/store.js?compat-no-decl');
+  globalThis.window = {
+    location: { protocol: 'https:' },
+    __LOCUS_HOOKS__: { runtimeSession: s11, sessionFactory: (deps) => new FakeAgentSession(deps) },
+  }; // no runtime declaration
+  const ui11 = await freshGraph('../src/ui/store.js?compat-no-decl');
   const done11 = ui11.submit('no declaration task');
   await done11;
   const evts11 = ui11.store.conversations.flatMap((c) => c.items);
@@ -406,14 +417,17 @@ const createdBefore = createdSessions.length;
       codes: evts11.map((i) => i.kind + ':' + i.code) }));
 
   const s11b = makeSession();
-  globalThis.window = { __LOCUS_HOOKS__: hooksWith(s11b, Object.freeze({
-    contractVersion: 999,
-    executionKinds: ['shell', 'python'],
-    bootstrap: { shaPinned: true },
-    policyMechanisms: ['mutationPolicy', 'authorization'],
-    commands: ['echo'],
-  })) };
-  const ui11b = await import('../src/ui/store.js?compat-bad-version');
+  globalThis.window = {
+    location: { protocol: 'https:' },
+    __LOCUS_HOOKS__: hooksWith(s11b, Object.freeze({
+      contractVersion: 999,
+      executionKinds: ['shell', 'python'],
+      bootstrap: { shaPinned: true },
+      policyMechanisms: ['mutationPolicy', 'authorization'],
+      commands: ['echo'],
+    })),
+  };
+  const ui11b = await freshGraph('../src/ui/store.js?compat-bad-version');
   const done11b = ui11b.submit('bad version task');
   await done11b;
   const evts11b = ui11b.store.conversations.flatMap((c) => c.items);
@@ -424,8 +438,8 @@ const createdBefore = createdSessions.length;
     JSON.stringify({ ran: ui11b.session.ranCount || 0,
       msgs: evts11b.map((i) => (i.message || '').slice(0, 120)) }));
   // The slot is released: the next (legal) task is admitted.
-  globalThis.window = { __LOCUS_HOOKS__: hooksWith(s11b) };
-  const follow11b = await import('../src/ui/store.js?compat-recovery');
+  globalThis.window = { location: { protocol: 'https:' }, __LOCUS_HOOKS__: hooksWith(s11b) };
+  const follow11b = await freshGraph('../src/ui/store.js?compat-recovery');
   const done11c = follow11b.submit('legal follow-up');
   check('SP11c the slot was released and the next legal task is admitted', !!done11c);
   await done11c;
@@ -433,13 +447,8 @@ const createdBefore = createdSessions.length;
     follow11b.session.ranCount === 1, JSON.stringify({ ran: follow11b.session.ranCount }));
 }
 
-// Presence-fixture globals are section-local: remove them so nothing after
-// this file's sections observes a capability manager by accident.
-delete globalThis.CapabilityManager;
-delete globalThis.CAPABILITY_CATALOG;
-delete globalThis.PLUGIN_CATALOG;
-delete globalThis.SKILL_CATALOG;
-delete globalThis.MCP_CATALOG;
+// The hooks window is section-local: remove it so nothing after this
+// file's sections observes an injected session by accident.
 delete globalThis.window;
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed');

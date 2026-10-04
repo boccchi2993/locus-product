@@ -13,33 +13,23 @@
 //     a capability skill directory are refused outright.
 // Run: node tests/skill-instances.test.cjs
 
+// M3c integration: every symbol comes from the REAL modules — harness
+// classes via the transfer layer, Product adapters as ESM imports, the
+// runtime session through the public entry. No eval'd duplicate sources
+// (the grep fake-worker install was vestigial: this suite never runs a
+// grep command).
 const fs = require('fs');
 const path = require('path');
-
 const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
 
-const extSrc = ['src/workspace.js', 'src/vfs.js', 'src/extension-composition.js', 'src/extensions.js', 'src/approval.js']
-  .map((f) => read(f)).join('\n;\n');
-const M = eval(extSrc + '\n;({ CapabilityManager, SkillSourceStore, SkillInstanceStorage,'
-  + ' SkillInstanceWorkspace, VirtualWorkspace, MemoryWorkspace, ApprovalController, skillInstancePath });');
-
-// shell bundle for the mv/rm boundary tests (same recipe as shell-compat)
 global.window = { location: { protocol: 'https:' } };
 global.document = { getElementById: () => null };
-const shellSrc = ['src/telemetry.js', 'src/workspace.js', 'src/vfs.js', 'src/network.js', 'src/shell.js', 'src/tools.js']
-  .map((f) => read(f)).join('\n;\n');
-const POLICY = eval(read('src/mutation-policy.js') + '\n;({ LocusMutationPolicy });');
-const SH = eval(shellSrc + '\n;({ executeTool, VirtualWorkspace, MemoryWorkspace, SHELL_COMMANDS, GrepRegexRuntime, Telemetry });');
-const { installGrepFakeWorker } = require('./helpers/grep-fake-worker.cjs');
-installGrepFakeWorker(SH);
-// M2a: bash routes through the PUBLIC runtime entry (core registry from
-// the eval'd shell.js); worker sources are never booted in this suite.
-const { createRuntime } = require('../src/runtime/index.js');
-// M2a review: the public entry assembles asynchronously — the session is
-// resolved before the checks drive them.
-const __hostPromise = createRuntime({
-  workerAssets: { pyWorkerSource: '/* not booted */', grepWorkerSource: '/* not booted */' },
-});
+
+let runtimeApi = null, harnessApi = null, ext = null, toolsMod = null, LocusMutationPolicy = null;
+
+// One real runtime host + session (public entry); worker sources are
+// never booted in this suite. Created lazily in run().
+let __hostPromise = null;
 let __session = null;
 
 let passed = 0, failed = 0;
@@ -47,6 +37,21 @@ function check(name, cond, detail) {
   if (cond) { passed++; console.log('PASS ' + name); }
   else { failed++; console.log('FAIL ' + name + (detail !== undefined ? ' | ' + String(detail).slice(0, 300) : '')); }
 }
+let M = null;   // resolved in run() after the imports
+let SH = null;
+function resolveRuntimeAliases() {
+  M = {
+    CapabilityManager: harnessApi.CapabilityManager,
+    SkillSourceStore: harnessApi.SkillSourceStore,
+    skillInstancePath: harnessApi.skillInstancePath,
+    ApprovalController: harnessApi.ApprovalController,
+    SkillInstanceStorage: ext.SkillInstanceStorage,
+    SkillInstanceWorkspace: ext.SkillInstanceWorkspace,
+    MemoryWorkspace: Object.getPrototypeOf(runtimeApi.createMemoryWorkspace({})).constructor,
+  };
+  SH = { executeTool: toolsMod.executeTool };
+}
+
 async function throwsWith(name, fn, codePart, msgPart) {
   try {
     await fn();
@@ -122,6 +127,15 @@ function guardFor(manager, storage, taskEnvironment, signalOrNull) {
 }
 
 async function run() {
+  runtimeApi = await import('../src/product/runtime-api.js');
+  harnessApi = await import('../src/product/harness-api.js');
+  ext = await import('../src/extensions.js');
+  toolsMod = await import('../src/tools.js');
+  ({ LocusMutationPolicy } = await import('../src/mutation-policy.js'));
+  resolveRuntimeAliases();
+  __hostPromise = runtimeApi.createRuntime({
+    workerAssets: { pyWorkerSource: '/* not booted */', grepWorkerSource: '/* not booted */' },
+  });
   __session = (await __hostPromise).createSession();
   // ================= Definition / Instance model =================
   const rig0 = rig();
@@ -526,7 +540,7 @@ async function run() {
     // A task fork with the guarded mount + a live signal, like store.js builds.
     const approvals = new M.ApprovalController({});
     const ac = new AbortController();
-    const taskVfs = new SH.VirtualWorkspace({ listCommands: () => Object.keys(SH.SHELL_COMMANDS) });
+    const taskVfs = runtimeApi.createWorkspace();
     taskVfs.mount('/home/locus', home, 'read-write');
     taskVfs.mount('/home/locus/.skills', new M.SkillInstanceWorkspace({
       storage: storage,
@@ -541,7 +555,7 @@ async function run() {
     // M1b: the skill-identity mv/rm protection is PRODUCT policy injected
     // via opts.mutationPolicy (store.js wiring); the shell no longer
     // hardcodes ~/.skills rules.
-    const run = (cmd) => SH.executeTool('bash', cmd, taskVfs, { signal: ac.signal, mutationPolicy: POLICY.LocusMutationPolicy.create(), runtimeSession: __session });
+    const run = (cmd) => SH.executeTool('bash', cmd, taskVfs, { signal: ac.signal, mutationPolicy: LocusMutationPolicy.create(), runtimeSession: __session });
 
     const mv1 = await run('mv /home/locus/.skills/cap-a/synthetic-skill.skill /home/locus/renamed.skill');
     check('S1 mv of a skill instance is refused with the identity contract',

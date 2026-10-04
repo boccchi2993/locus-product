@@ -56,12 +56,10 @@
 //
 // Run: node tests/product-integration.test.mjs
 
-import { readFileSync } from 'node:fs';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-const readSrc = (...p) => readFileSync(join(root, ...p), 'utf8');
 
 let passed = 0, failed = 0;
 function check(name, cond, detail) {
@@ -112,53 +110,15 @@ async function waitFor(desc, condFn, timeoutMs = 15000) {
 
 // The Product hooks seam is read through `window`; joint graphs run in
 // Node, so host the same global here. Blocks that inject a seam MUST
-// delete globalThis.__LOCUS_HOOKS__ in their finally.
+// delete window.__LOCUS_HOOKS__ in their finally.
 globalThis.window = globalThis;
 
-// ---------- REAL cores over their public entries ----------
-const runtimeEntry = await import('../src/runtime/index.js');
-const { PY_WORKER_SOURCE, GREP_WORKER_SOURCE } = await import('../src/runtime/worker-assets.js');
-// The FIRST createRuntime() resolves the core (self-assembly) and publishes
-// the runtime core registry — afterwards every later host (one per store
-// graph, like one per page) delegates to the SAME registry (the product
-// page's registry mode). The published globalThis names (VirtualWorkspace,
-// SHELL_COMMANDS, …) are what the store reads at module scope.
-await runtimeEntry.createRuntime({
-  workerAssets: { pyWorkerSource: PY_WORKER_SOURCE, grepWorkerSource: GREP_WORKER_SOURCE },
-});
-
-const harnessEntry = await import('../src/harness/index.js');
-// The REAL harness core self-assembles; the product store and the real
-// harnessCapabilities() both resolve through the published table.
-await harnessEntry.ensureHarnessCore();
-
-// ---------- product classic sources (the production adapter path) ----------
-globalThis.LocusMutationPolicy = (0, eval)(readSrc('src', 'mutation-policy.js') + '\n;LocusMutationPolicy');
-globalThis.LocusProjector = (0, eval)(readSrc('src', 'ui', 'projector.js') + '\n;LocusProjector');
-// telemetry.js (utf8ByteLength + Telemetry) and tools.js share ONE eval so
-// the tool adapter resolves its helpers through the same lexical scope the
-// product page uses; tools.js stays the ONLY tool adaptation path.
-const toolGlobals = (0, eval)(readSrc('src', 'telemetry.js') + '\n' + readSrc('src', 'tools.js')
-  + '\n;[utf8ByteLength, Telemetry, executeTool, AGENT_TOOL_DEFINITIONS]');
-globalThis.executeTool = toolGlobals[2];
-globalThis.AGENT_TOOL_DEFINITIONS = toolGlobals[3];
-globalThis.Telemetry = toolGlobals[1];
-// extensions.js is the PRODUCT adapter half of the extensions split; its
-// composition-core references resolve through the names the harness core
-// already published (one live copy). The store wires task mounts through
-// its productTaskVfsMounts adapter.
-const extGlobals = (0, eval)(readSrc('src', 'extensions.js')
-  + '\n;[productTaskVfsMounts, SkillInstanceStorage, SkillInstanceWorkspace, StaticFileWorkspace]');
-globalThis.productTaskVfsMounts = extGlobals[0];
-globalThis.SkillInstanceStorage = extGlobals[1];
-globalThis.SkillInstanceWorkspace = extGlobals[2];
-globalThis.StaticFileWorkspace = extGlobals[3];
-// Review F1 (OPT-A): the REAL AttachmentStore (the Product image storage
-// implementation) so the missing-imageInputGate test proves the DECISION
-// path with a live store — never the "store unavailable" fallback.
-const attGlobals = (0, eval)(readSrc('src', 'attachments.js')
-  + '\n;[AttachmentStore, resolveImageMime]');
-globalThis.AttachmentStore = attGlobals[0];
+// ---------- REAL cores through the product transfer layers (M3c) ----------
+const runtimeApi = await import('../src/product/runtime-api.js');
+const harnessApi = await import('../src/product/harness-api.js');
+const toolsMod = await import('../src/tools.js');
+// (The store graph imports the policy, projector, telemetry, extensions
+// and attachments adapters itself — no global seeding exists anymore.)
 
 // Review F1: a genuinely different-declaring HARNESS generation, hosted
 // through the store's narrow declaration seam (hooks.harnessCapabilities —
@@ -167,7 +127,7 @@ globalThis.AttachmentStore = attGlobals[0];
 // no skip mode). The variant derives from the real declaration so only the
 // patched capability differs.
 function harnessDeclarationVariant(patch) {
-  const base = JSON.parse(JSON.stringify(harnessEntry.harnessCapabilities()));
+  const base = JSON.parse(JSON.stringify(harnessApi.harnessCapabilities()));
   for (const [k, v] of Object.entries(patch || {})) {
     if (v === undefined) delete base.capabilities[k];
     else base.capabilities[k] = v;
@@ -246,8 +206,10 @@ const wires = new Map();
 // wire scenarios configure the STORE settings + applySettings (exactly the
 // wire e2e does), then attach the scripted transport to Model.transport
 // (applySettings never touches the transport).
-function configureModel(wire) {
-  globalThis.Model.transport = wire ? wire.transport : undefined;
+// M3c: the model transport is the store's EXPLICIT port (the legacy Model
+// singleton is deleted) — installed per store graph.
+function configureModel(ui, wire) {
+  ui.setProductModelTransport(wire ? wire.transport : null);
 }
 function applyJointSettings(ui) {
   ui.store.settings.apiKey = 'JOINT-KEY';
@@ -270,9 +232,12 @@ async function instrument(ui) {
   session.prepare = async (req) => { counts.prepare++; return origPrepare(req); };
   const origExecute = session.execute.bind(session);
   session.execute = async (req) => { counts.execute++; return origExecute(req); };
-  const origTool = globalThis.executeTool;
-  globalThis.executeTool = (n, i, w, o) => { counts.tool++; counts.toolNames.push(n); return origTool(n, i, w, o); };
-  return { counts, restore: () => { globalThis.executeTool = origTool; } };
+  // M3c: the tool counter rides the store's hooks.toolExecutor seam (the
+  // ToolPort consults it at call time) and forwards to the REAL executor.
+  window.__LOCUS_HOOKS__ = Object.assign({}, window.__LOCUS_HOOKS__, {
+    toolExecutor: (n, i, w, o) => { counts.tool++; counts.toolNames.push(n); return toolsMod.executeTool(n, i, w, o); },
+  });
+  return { counts, restore: () => { if (window.__LOCUS_HOOKS__) delete window.__LOCUS_HOOKS__.toolExecutor; } };
 }
 
 // Review F1: counters wrapped ONTO the real CapabilityManager + the real
@@ -289,15 +254,18 @@ function instrumentCapabilities(ui) {
   cm.buildTaskEnvironment = (...a) => { counts.build++; return oBuild(...a); };
   const oPayload = cm.pythonExtensionPayload.bind(cm);
   cm.pythonExtensionPayload = (...a) => { counts.payload++; return oPayload(...a); };
-  const oMounts = globalThis.productTaskVfsMounts;
-  globalThis.productTaskVfsMounts = (...a) => { counts.mounts++; return oMounts(...a); };
+  // M3c: the task-mount counter wraps the manager's specs call — the
+  // productTaskVfsMounts adapter derives exactly one specs call per mount
+  // round, so zero disabled-work still reads as zero here.
+  const oSpecs = cm.taskVfsMountSpecs.bind(cm);
+  cm.taskVfsMountSpecs = (...a) => { counts.mounts++; return oSpecs(...a); };
   return {
     counts,
     restore: () => {
       cm.refreshSkillPresence = oRefresh;
       cm.buildTaskEnvironment = oBuild;
       cm.pythonExtensionPayload = oPayload;
-      globalThis.productTaskVfsMounts = oMounts;
+      cm.taskVfsMountSpecs = oSpecs;
     },
   };
 }
@@ -318,8 +286,38 @@ function itemsOf(ui) {
 }
 const findConv = (ui, title) => ui.store.conversations.find((c) => c.title === title);
 
-async function freshStore(tag) {
-  return import(pathToFileURL(join(root, 'src', 'ui', 'store.js')).href + '?' + tag);
+// M3c: the store resolves persistence through its module import — a
+// section swaps the CANONICAL SINGLETON's per-call methods (restored in
+// finally); no global persistence handle exists to reassign.
+const { PersistenceServiceInstance } = await import('../src/persistence.js');
+async function freshStore(tag, persist) {
+  // Every graph shares THIS process's persistence singleton; a graph's
+  // boot restores conversations SAVED BY EARLIER GRAPHS (node-suite
+  // contamination a real page never sees). Wipe, install THIS section's
+  // stub (the boot runs at module eval), then import.
+  if (persistRestore) { persistRestore(); persistRestore = null; }   // undo any previous section's stub
+  await PersistenceServiceInstance.reset();
+  if (persist) installPersistence(persist);
+  const ui = await import(pathToFileURL(join(root, 'src', 'ui', 'store.js')).href + '?' + tag);
+  // The boot restores durable state asynchronously and REPLACES the
+  // conversations array with the loaded rows — wait it out so no section
+  // races a stale pre-boot object.
+  await ui.whenBooted;
+  return ui;
+}
+const PRISTINE_PERSISTENCE = {};
+for (const k of Object.keys(PersistenceServiceInstance)) PRISTINE_PERSISTENCE[k] = PersistenceServiceInstance[k];
+let persistRestore = null;   // module-level so every finally can reach it
+function installPersistence(persist) {
+  // The real methods live on the PROTOTYPE — a stub shadows them as OWN
+  // properties. Restoring must DELETE those own keys (un-shadow) and then
+  // re-apply the captured own state; copying 'pristine' alone never
+  // removes the shadow (Object.keys sees no prototype methods).
+  for (const k of Object.keys(persist)) PersistenceServiceInstance[k] = persist[k];
+  persistRestore = () => {
+    for (const k of Object.keys(persist)) delete PersistenceServiceInstance[k];
+    for (const k of Object.keys(PRISTINE_PERSISTENCE)) PersistenceServiceInstance[k] = PRISTINE_PERSISTENCE[k];
+  };
 }
 
 // =====================================================================
@@ -328,8 +326,8 @@ async function freshStore(tag) {
 {
   const wire = createWire('i1');
   wires.set('i1', wire);
-  configureModel(wire);
   const ui = await freshStore('joint-i1');
+  configureModel(ui, wire);
   const inst = await instrument(ui);
   applyJointSettings(ui);
   wire.push(wire.openai(null, [wire.toolCall('i1-call-1', 'echo m2c-joint > /tmp/joint-i1.txt && cat /tmp/joint-i1.txt')]));
@@ -366,8 +364,8 @@ async function freshStore(tag) {
 {
   const wire = createWire('i2');
   wires.set('i2', wire);
-  configureModel(wire);
   const ui = await freshStore('joint-i2');
+  configureModel(ui, wire);
   const inst = await instrument(ui);
   applyJointSettings(ui);
   wire.push(wire.openai(null, [wire.toolCall('i2-call-1', 'cat /tmp/joint-i2-missing.txt')]));
@@ -396,8 +394,8 @@ async function freshStore(tag) {
 {
   const wire = createWire('i3');
   wires.set('i3', wire);
-  configureModel(wire);
   const ui = await freshStore('joint-i3');
+  configureModel(ui, wire);
   const inst = await instrument(ui);
   applyJointSettings(ui);
   wire.push({ __park: true }); // parked first request (abort-aware fake)
@@ -466,8 +464,8 @@ async function freshStore(tag) {
 {
   const wire = createWire('i4');
   wires.set('i4', wire);
-  configureModel(wire);
   const ui = await freshStore('joint-i4');
+  configureModel(ui, wire);
   const inst = await instrument(ui);
   applyJointSettings(ui);
   // The old task commits a real VFS write, then parks on its SECOND model
@@ -529,7 +527,7 @@ async function freshStore(tag) {
       && itemsOf(ui).some((i) => i.conv === oldConvId && i.code === 'session_changed'),
     JSON.stringify(itemsOf(ui).filter((i) => i.conv === oldConvId).map((i) => i.kind + ':' + i.code)));
   inst.restore();
-  configureModel(null);
+  configureModel(ui, null);
 }
 
 // =====================================================================
@@ -538,8 +536,8 @@ async function freshStore(tag) {
 {
   const wire = createWire('i5');
   wires.set('i5', wire);
-  configureModel(wire);
   const ui = await freshStore('joint-i5');
+  configureModel(ui, wire);
   const inst = await instrument(ui);
   applyJointSettings(ui);
   const fetchCalls = [];
@@ -600,11 +598,11 @@ const requiredWritesAreZero = (d) => d.requiredConversation === 0 && d.providerS
 {
   const wire = createWire('joint-i6a');
   wires.set('joint-i6a', wire);
-  configureModel(wire);
   const persist = createMemoryPersistence();
-  globalThis.PersistenceServiceInstance = persist;
+  let ui;
   try {
-    const ui = await freshStore('joint-i6a');
+    ui = await freshStore('joint-i6a', persist);
+    configureModel(ui, wire);
     const inst = await instrument(ui);
     applyJointSettings(ui);
     const host = ui.runtimeHost();
@@ -636,8 +634,8 @@ const requiredWritesAreZero = (d) => d.requiredConversation === 0 && d.providerS
       JSON.stringify({ calls: wire.calls.length }));
     inst.restore();
   } finally {
-    delete globalThis.PersistenceServiceInstance;
-    configureModel(null);
+    persistRestore?.();
+    if (ui) configureModel(ui, null);
   }
 }
 
@@ -647,14 +645,21 @@ const requiredWritesAreZero = (d) => d.requiredConversation === 0 && d.providerS
 {
   const wire = createWire('joint-i6b');
   wires.set('joint-i6b', wire);
-  configureModel(wire);
-  const savedTable = globalThis.__LOCUS_HARNESS_CORE__;
-  globalThis.__LOCUS_HARNESS_CORE__ = Object.freeze(
-    Object.assign({}, savedTable, { contractVersion: 999 }));
+  // M3c: the host-declared core table is gone — the different-declaring
+  // harness generation is hosted through the hooks DECLARATION seam (the
+  // same production compatibility check runs over it).
+  window.__LOCUS_HOOKS__ = { toolExecutor: window.__LOCUS_HOOKS__ && window.__LOCUS_HOOKS__.toolExecutor,
+      harnessCapabilities: () => {
+      const d = JSON.parse(JSON.stringify(harnessApi.harnessCapabilities()));
+      d.contractVersion = 999;
+      return Object.freeze(d);
+    },
+  };
   const persist = createMemoryPersistence();
-  globalThis.PersistenceServiceInstance = persist;
+  let ui;
   try {
-    const ui = await freshStore('joint-i6b');
+    ui = await freshStore('joint-i6b', persist);
+    configureModel(ui, wire);
     const inst = await instrument(ui);
     applyJointSettings(ui);
     const convId_joint_6b = ui.store.liveConversationId;
@@ -675,9 +680,8 @@ const requiredWritesAreZero = (d) => d.requiredConversation === 0 && d.providerS
       requiredWritesAreZero(wd), JSON.stringify(wd));
     inst.restore();
   } finally {
-    globalThis.__LOCUS_HARNESS_CORE__ = savedTable;
-    delete globalThis.PersistenceServiceInstance;
-    configureModel(null);
+    delete window.__LOCUS_HOOKS__;
+    if (ui) configureModel(ui, null);
   }
 }
 
@@ -689,16 +693,16 @@ const requiredWritesAreZero = (d) => d.requiredConversation === 0 && d.providerS
 {
   const wire = createWire('joint-i6b2');
   wires.set('joint-i6b2', wire);
-  configureModel(wire);
   const persist = createMemoryPersistence();
-  globalThis.PersistenceServiceInstance = persist;
+  let ui;
   try {
-    const ui = await freshStore('joint-i6b2');
+    ui = await freshStore('joint-i6b2', persist);
+    configureModel(ui, wire);
     const inst = await instrument(ui);
     applyJointSettings(ui);
-    globalThis.__LOCUS_HOOKS__ = {
-      harnessCapabilities: () => {
-        const d = JSON.parse(JSON.stringify(harnessEntry.harnessCapabilities()));
+    globalThis.__LOCUS_HOOKS__ = { toolExecutor: window.__LOCUS_HOOKS__ && window.__LOCUS_HOOKS__.toolExecutor,
+        harnessCapabilities: () => {
+        const d = JSON.parse(JSON.stringify(harnessApi.harnessCapabilities()));
         d.ports.taskLifecycle.version = 2;
         return Object.freeze(d);
       },
@@ -728,9 +732,9 @@ const requiredWritesAreZero = (d) => d.requiredConversation === 0 && d.providerS
       JSON.stringify({ status: conv.status }));
     inst.restore();
   } finally {
-    delete globalThis.__LOCUS_HOOKS__;
-    delete globalThis.PersistenceServiceInstance;
-    configureModel(null);
+    delete window.__LOCUS_HOOKS__;
+    persistRestore?.();
+    if (ui) configureModel(ui, null);
   }
 }
 
@@ -739,11 +743,11 @@ const requiredWritesAreZero = (d) => d.requiredConversation === 0 && d.providerS
 {
   const wire = createWire('joint-i6c');
   wires.set('joint-i6c', wire);
-  configureModel(wire);
   const persist = createMemoryPersistence();
-  globalThis.PersistenceServiceInstance = persist;
+  let ui;
   try {
-    const ui = await freshStore('joint-i6c');
+    ui = await freshStore('joint-i6c', persist);
+    configureModel(ui, wire);
     const inst = await instrument(ui);
     applyJointSettings(ui);
     const host = ui.runtimeHost();
@@ -776,8 +780,8 @@ const requiredWritesAreZero = (d) => d.requiredConversation === 0 && d.providerS
       JSON.stringify({ calls: wire.calls.length }));
     inst.restore();
   } finally {
-    delete globalThis.PersistenceServiceInstance;
-    configureModel(null);
+    persistRestore?.();
+    if (ui) configureModel(ui, null);
   }
 }
 
@@ -785,11 +789,11 @@ const requiredWritesAreZero = (d) => d.requiredConversation === 0 && d.providerS
 {
   const wire = createWire('joint-i6d');
   wires.set('joint-i6d', wire);
-  configureModel(wire);
   const persist = createMemoryPersistence();
-  globalThis.PersistenceServiceInstance = persist;
+  let ui;
   try {
-    const ui = await freshStore('joint-i6d');
+    ui = await freshStore('joint-i6d', persist);
+    configureModel(ui, wire);
     const inst = await instrument(ui);
     applyJointSettings(ui);
     const host = ui.runtimeHost();
@@ -824,8 +828,8 @@ const requiredWritesAreZero = (d) => d.requiredConversation === 0 && d.providerS
       JSON.stringify({ calls: wire.calls.length }));
     inst.restore();
   } finally {
-    delete globalThis.PersistenceServiceInstance;
-    configureModel(null);
+    persistRestore?.();
+    if (ui) configureModel(ui, null);
   }
 }
 
@@ -944,18 +948,18 @@ function createMemoryPersistence() {
 {
   const wire = createWire('joint-i7');
   wires.set('joint-i7', wire);
-  configureModel(wire);
   const persist = createMemoryPersistence();
-  globalThis.PersistenceServiceInstance = persist;
+  let ui;
   try {
-    const ui = await freshStore('joint-i7');
+    ui = await freshStore('joint-i7', persist);
+    configureModel(ui, wire);
     const inst = await instrument(ui);
   applyJointSettings(ui);
     wire.push(wire.openai(null, [wire.toolCall('i7-call-1', 'echo i7-replay > /tmp/joint-i7.txt')]));
     wire.push(wire.openai('Joint I7 first task done'));
     await ui.submit('joint I7: persisted tool task');
     const conv = findConv(ui, 'joint I7: persisted tool task');
-    check('I7 the persisted tool task completed with frames + checkpoints on disk',
+      check('I7 the persisted tool task completed with frames + checkpoints on disk',
       conv && conv.status === 'completed' && conv.activeProviderSessionId
         && (persist._frames.get(conv.activeProviderSessionId) || []).length >= 4,
       JSON.stringify({ status: conv && conv.status, frames: persist._frames.get(conv && conv.activeProviderSessionId || '')?.length }));
@@ -1005,8 +1009,8 @@ function createMemoryPersistence() {
       conv.persistenceState === 'degraded' && conv.status === 'interrupted',
       JSON.stringify({ persistenceState: conv.persistenceState, status: conv.status }));
   } finally {
-    delete globalThis.PersistenceServiceInstance;
-    configureModel(null);
+    persistRestore?.();
+    if (ui) configureModel(ui, null);
   }
 }
 
@@ -1014,11 +1018,11 @@ function createMemoryPersistence() {
 {
   const wire = createWire('joint-i7b');
   wires.set('joint-i7b', wire);
-  configureModel(wire);
   const persist = createMemoryPersistence();
-  globalThis.PersistenceServiceInstance = persist;
+  let ui;
   try {
-    const ui = await freshStore('joint-i7b');
+    ui = await freshStore('joint-i7b', persist);
+    configureModel(ui, wire);
     const inst = await instrument(ui);
   applyJointSettings(ui);
     wire.push(wire.openai(null, [wire.toolCall('i7b-call-1', 'echo i7b > /tmp/joint-i7b.txt')]));
@@ -1050,8 +1054,8 @@ function createMemoryPersistence() {
       JSON.stringify({ status: conv.status }));
     inst.restore();
   } finally {
-    delete globalThis.PersistenceServiceInstance;
-    configureModel(null);
+    persistRestore?.();
+    if (ui) configureModel(ui, null);
   }
 }
 
@@ -1067,11 +1071,11 @@ function sessionCheckpointOf(persist, sessionId) {
 {
   const wire = createWire('joint-i7c');
   wires.set('joint-i7c', wire);
-  configureModel(wire);
   const persist = createMemoryPersistence();
-  globalThis.PersistenceServiceInstance = persist;
+  let ui;
   try {
-    const ui = await freshStore('joint-i7c');
+    ui = await freshStore('joint-i7c', persist);
+    configureModel(ui, wire);
     const inst = await instrument(ui);
   applyJointSettings(ui);
     persist._failFrameWrites((frame) => frame.kind === 'tool_result');
@@ -1088,8 +1092,8 @@ function sessionCheckpointOf(persist, sessionId) {
       JSON.stringify({ calls: wire.calls.length, tools: inst.counts.tool }));
     inst.restore();
   } finally {
-    delete globalThis.PersistenceServiceInstance;
-    configureModel(null);
+    persistRestore?.();
+    if (ui) configureModel(ui, null);
   }
 }
 
@@ -1105,19 +1109,19 @@ function sessionCheckpointOf(persist, sessionId) {
 {
   const wire = createWire('joint-opt-a');
   wires.set('joint-opt-a', wire);
-  configureModel(wire);
   const persist = createMemoryPersistence();
-  globalThis.PersistenceServiceInstance = persist;
+  let ui;
   try {
-    const ui = await freshStore('joint-opt-a');
+    ui = await freshStore('joint-opt-a', persist);
+    configureModel(ui, wire);
     const inst = await instrument(ui);
     const ingest = instrumentAttachmentIngest(ui);
     applyJointSettings(ui);
     // A genuinely different-declaring harness generation WITHOUT the
     // imageInputGate capability (the narrow declaration seam; the SAME
     // production check runs).
-    globalThis.__LOCUS_HOOKS__ = {
-      harnessCapabilities: () => harnessDeclarationVariant({ imageInputGate: false }),
+    globalThis.__LOCUS_HOOKS__ = { toolExecutor: window.__LOCUS_HOOKS__ && window.__LOCUS_HOOKS__.toolExecutor,
+        harnessCapabilities: () => harnessDeclarationVariant({ imageInputGate: false }),
     };
     // A REAL readable image on the user upload path.
     const pngBytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 1, 2, 3, 4]);
@@ -1172,9 +1176,9 @@ function sessionCheckpointOf(persist, sessionId) {
     inst.restore();
     ingest.restore();
   } finally {
-    delete globalThis.__LOCUS_HOOKS__;
-    delete globalThis.PersistenceServiceInstance;
-    configureModel(null);
+    delete window.__LOCUS_HOOKS__;
+    persistRestore?.();
+    if (ui) configureModel(ui, null);
   }
 }
 
@@ -1185,11 +1189,11 @@ function sessionCheckpointOf(persist, sessionId) {
 {
   const wire = createWire('joint-opt-b');
   wires.set('joint-opt-b', wire);
-  configureModel(wire);
   const persist = createMemoryPersistence();
-  globalThis.PersistenceServiceInstance = persist;
+  let ui;
   try {
-    const ui = await freshStore('joint-opt-b');
+    ui = await freshStore('joint-opt-b', persist);
+    configureModel(ui, wire);
     const inst = await instrument(ui);
     applyJointSettings(ui);
     // A capability the user enabled (production catalogs are empty; the
@@ -1199,8 +1203,8 @@ function sessionCheckpointOf(persist, sessionId) {
       description: 'review-F1 negative fixture', plugins: [], skills: [], mcps: [],
     }] });
     await ui.enableCapability('joint.cap');
-    globalThis.__LOCUS_HOOKS__ = {
-      harnessCapabilities: () => harnessDeclarationVariant({ capabilityComposition: false }),
+    globalThis.__LOCUS_HOOKS__ = { toolExecutor: window.__LOCUS_HOOKS__ && window.__LOCUS_HOOKS__.toolExecutor,
+        harnessCapabilities: () => harnessDeclarationVariant({ capabilityComposition: false }),
     };
     const convC = ui.store.liveConversationId;
     const w0 = { ...persist._counts };
@@ -1233,9 +1237,9 @@ function sessionCheckpointOf(persist, sessionId) {
     inst.restore();
     caps.restore();
   } finally {
-    delete globalThis.__LOCUS_HOOKS__;
-    delete globalThis.PersistenceServiceInstance;
-    configureModel(null);
+    delete window.__LOCUS_HOOKS__;
+    persistRestore?.();
+    if (ui) configureModel(ui, null);
   }
 }
 
@@ -1244,8 +1248,8 @@ function sessionCheckpointOf(persist, sessionId) {
 {
   const wire = createWire('joint-opt-d');
   wires.set('joint-opt-d', wire);
-  configureModel(wire);
   const ui = await freshStore('joint-opt-d');
+  configureModel(ui, wire);
   const inst = await instrument(ui);
   applyJointSettings(ui);
   const convD = ui.store.liveConversationId;
@@ -1275,7 +1279,7 @@ function sessionCheckpointOf(persist, sessionId) {
     ui.store.conversations.find((c) => c.id === convD).status === 'completed',
     JSON.stringify({ status: ui.store.conversations.find((c) => c.id === convD).status }));
   inst.restore();
-  configureModel(null);
+  configureModel(ui, null);
 }
 
 // OPT-E: nativeToolCalls missing → the strict TEXT-FALLBACK protocol
@@ -1284,12 +1288,12 @@ function sessionCheckpointOf(persist, sessionId) {
 {
   const wire = createWire('joint-opt-e');
   wires.set('joint-opt-e', wire);
-  configureModel(wire);
   const ui = await freshStore('joint-opt-e');
+  configureModel(ui, wire);
   const inst = await instrument(ui);
   applyJointSettings(ui);
-  globalThis.__LOCUS_HOOKS__ = {
-    harnessCapabilities: () => harnessDeclarationVariant({ nativeToolCalls: false }),
+  globalThis.__LOCUS_HOOKS__ = { toolExecutor: window.__LOCUS_HOOKS__ && window.__LOCUS_HOOKS__.toolExecutor,
+      harnessCapabilities: () => harnessDeclarationVariant({ nativeToolCalls: false }),
   };
   const fenced = '```json\n{"tool":"bash","input":"echo opt-e-ok > /tmp/joint-opt-e.txt && cat /tmp/joint-opt-e.txt"}\n```';
   wire.push(wire.openai(fenced));          // text fallback: NO native tool_calls
@@ -1309,7 +1313,7 @@ function sessionCheckpointOf(persist, sessionId) {
     secondBody.includes('<tool_result>') && secondBody.includes('opt-e-ok'),
     secondBody.slice(0, 160));
   inst.restore();
-  configureModel(null);
+  configureModel(ui, null);
 }
 
 // OPT-F: the runtime stops declaring the direct python execution kind —
@@ -1318,8 +1322,8 @@ function sessionCheckpointOf(persist, sessionId) {
 {
   const wire = createWire('joint-opt-f');
   wires.set('joint-opt-f', wire);
-  configureModel(wire);
   const ui = await freshStore('joint-opt-f');
+  configureModel(ui, wire);
   const inst = await instrument(ui);
   applyJointSettings(ui);
   const host = ui.runtimeHost();
@@ -1337,7 +1341,7 @@ function sessionCheckpointOf(persist, sessionId) {
       JSON.stringify({ status: ui.store.conversations.find((c) => c.id === convF).status,
       tools: inst.counts.tool, file: String(file).slice(0, 40) }));
   inst.restore();
-  configureModel(null);
+  configureModel(ui, null);
 }
 
 // =====================================================================
@@ -1369,10 +1373,14 @@ function instrumentImageReads(ui, persist) {
   const att = ui.getAttachmentStore();
   const origResolve = att.resolveForWire.bind(att);
   att.resolveForWire = async (id) => { counts.resolveWire++; return origResolve(id); };
-  const origRead = persist.readAttachmentBytes.bind(persist);
-  persist.readAttachmentBytes = async (k) => { counts.durableReads++; return origRead(k); };
-  const origPut = persist.put.bind(persist);
-  persist.put = async (name, row) => {
+  // M3c: installPersistence COPIES the stub's methods onto the singleton
+  // at freshStore time — patch the SINGLETON's live copies here (a patch
+  // on the stub object would miss what the chain actually calls). The
+  // next freshStore's undo deletes these own keys again.
+  const origRead = PersistenceServiceInstance.readAttachmentBytes.bind(PersistenceServiceInstance);
+  PersistenceServiceInstance.readAttachmentBytes = async (k) => { counts.durableReads++; return origRead(k); };
+  const origPut = PersistenceServiceInstance.put.bind(PersistenceServiceInstance);
+  PersistenceServiceInstance.put = async (name, row) => {
     if (name === 'capabilities') counts.registryWrites++;
     return origPut(name, row);
   };
@@ -1408,11 +1416,11 @@ async function imgSeedHistory(wire, ui) {
 {
   const wire = createWire('joint-img-1');
   wires.set('joint-img-1', wire);
-  configureModel(wire);
   const persist = createMemoryPersistence();
-  globalThis.PersistenceServiceInstance = persist;
+  let ui;
   try {
-    const ui = await freshStore('joint-img-1');
+    ui = await freshStore('joint-img-1', persist);
+    configureModel(ui, wire);
     const inst = await instrument(ui);
     const ingest = instrumentAttachmentIngest(ui);
     applyJointSettings(ui);
@@ -1425,8 +1433,8 @@ async function imgSeedHistory(wire, ui) {
     const reads = instrumentImageReads(ui, persist);
     const asks = instrumentApprovalRequests(ui);
     const ingestBefore = ingest.counts.ingest;
-    globalThis.__LOCUS_HOOKS__ = {
-      harnessCapabilities: () => harnessDeclarationVariant({ imageInputGate: false }),
+    globalThis.__LOCUS_HOOKS__ = { toolExecutor: window.__LOCUS_HOOKS__ && window.__LOCUS_HOOKS__.toolExecutor,
+        harnessCapabilities: () => harnessDeclarationVariant({ imageInputGate: false }),
     };
     // NO newTask: the in-memory session history still holds the image
     // ref. The composer still carries task 1's upload too (kept — never
@@ -1456,9 +1464,9 @@ async function imgSeedHistory(wire, ui) {
     inst.restore();
     ingest.restore();
   } finally {
-    delete globalThis.__LOCUS_HOOKS__;
-    delete globalThis.PersistenceServiceInstance;
-    configureModel(null);
+    delete window.__LOCUS_HOOKS__;
+    persistRestore?.();
+    if (ui) configureModel(ui, null);
   }
 }
 
@@ -1467,11 +1475,11 @@ async function imgSeedHistory(wire, ui) {
 {
   const wire = createWire('joint-img-2');
   wires.set('joint-img-2', wire);
-  configureModel(wire);
   const persist = createMemoryPersistence();
-  globalThis.PersistenceServiceInstance = persist;
+  let ui;
   try {
-    const ui = await freshStore('joint-img-2');
+    ui = await freshStore('joint-img-2', persist);
+    configureModel(ui, wire);
     const inst = await instrument(ui);
     applyJointSettings(ui);
     const convA = await imgSeedHistory(wire, ui);
@@ -1485,8 +1493,8 @@ async function imgSeedHistory(wire, ui) {
     ui.openConversation(convA);
     const reads = instrumentImageReads(ui, persist);
     const asks = instrumentApprovalRequests(ui);
-    globalThis.__LOCUS_HOOKS__ = {
-      harnessCapabilities: () => harnessDeclarationVariant({ imageInputGate: false }),
+    globalThis.__LOCUS_HOOKS__ = { toolExecutor: window.__LOCUS_HOOKS__ && window.__LOCUS_HOOKS__.toolExecutor,
+        harnessCapabilities: () => harnessDeclarationVariant({ imageInputGate: false }),
     };
     wire.push(wire.openai('joint img-2 degrade answer'));
     const callsBefore = wire.calls.length;
@@ -1540,9 +1548,9 @@ async function imgSeedHistory(wire, ui) {
       JSON.stringify({ hasRef: !!imageRef, resolved: !!resolved }));
     inst.restore();
   } finally {
-    delete globalThis.__LOCUS_HOOKS__;
-    delete globalThis.PersistenceServiceInstance;
-    configureModel(null);
+    delete window.__LOCUS_HOOKS__;
+    persistRestore?.();
+    if (ui) configureModel(ui, null);
   }
 }
 
@@ -1552,23 +1560,23 @@ async function imgSeedHistory(wire, ui) {
 {
   const wire = createWire('joint-img-4');
   wires.set('joint-img-4', wire);
-  configureModel(wire);
   const persist = createMemoryPersistence();
-  globalThis.PersistenceServiceInstance = persist;
+  let ui;
   try {
-    const ui = await freshStore('joint-img-4');
+    ui = await freshStore('joint-img-4', persist);
+    configureModel(ui, wire);
     const inst = await instrument(ui);
     applyJointSettings(ui);
     const convA = await imgSeedHistory(wire, ui);
     const asks = instrumentApprovalRequests(ui);
-    globalThis.__LOCUS_HOOKS__ = {
-      harnessCapabilities: () => harnessDeclarationVariant({ imageInputGate: false }),
+    globalThis.__LOCUS_HOOKS__ = { toolExecutor: window.__LOCUS_HOOKS__ && window.__LOCUS_HOOKS__.toolExecutor,
+        harnessCapabilities: () => harnessDeclarationVariant({ imageInputGate: false }),
     };
     // First response: the declaration flips back to the REAL one the
     // moment the first request is dispatched — MID-TASK.
     wire.push((record, respond) => {
-      globalThis.__LOCUS_HOOKS__ = {
-        harnessCapabilities: () => harnessDeclarationVariant({}),
+      globalThis.__LOCUS_HOOKS__ = { toolExecutor: window.__LOCUS_HOOKS__ && window.__LOCUS_HOOKS__.toolExecutor,
+          harnessCapabilities: () => harnessDeclarationVariant({}),
       };
       return respond(wire.openai(null, [wire.toolCall('img4-call-1', 'echo img4-tool > /tmp/joint-img-4.txt')]));
     });
@@ -1596,9 +1604,9 @@ async function imgSeedHistory(wire, ui) {
       'successor request carried no image');
     inst.restore();
   } finally {
-    delete globalThis.__LOCUS_HOOKS__;
-    delete globalThis.PersistenceServiceInstance;
-    configureModel(null);
+    delete window.__LOCUS_HOOKS__;
+    persistRestore?.();
+    if (ui) configureModel(ui, null);
   }
 }
 
@@ -1629,8 +1637,8 @@ function parkProviderWrite(ui, marker) {
 {
   const wire = createWire('joint-i8a');
   wires.set('joint-i8a', wire);
-  configureModel(wire);
   const ui = await freshStore('joint-i8a');
+  configureModel(ui, wire);
   const inst = await instrument(ui);
   applyJointSettings(ui);
   const park = parkProviderWrite(ui, 'joint-i8a');
@@ -1674,7 +1682,7 @@ function parkProviderWrite(ui, marker) {
     JSON.stringify({ status: endConv.status, busy: ui.store.busy, ...inst.counts, calls: wire.calls.length }));
   park.restore();
   inst.restore();
-  configureModel(null);
+  configureModel(ui, null);
 }
 
 // I8b — Runtime reset boundary (newTask) while the dispatched operation is
@@ -1682,8 +1690,8 @@ function parkProviderWrite(ui, marker) {
 {
   const wire = createWire('joint-i8b');
   wires.set('joint-i8b', wire);
-  configureModel(wire);
   const ui = await freshStore('joint-i8b');
+  configureModel(ui, wire);
   const inst = await instrument(ui);
   applyJointSettings(ui);
   const park = parkProviderWrite(ui, 'joint-i8b');
@@ -1719,7 +1727,7 @@ function parkProviderWrite(ui, marker) {
     JSON.stringify({ status: ui.store.conversations.find((c) => c.id === convNew).status }));
   park.restore();
   inst.restore();
-  configureModel(null);
+  configureModel(ui, null);
 }
 
 // I8c — dispose: the public port refuses new executions, and through the
@@ -1727,8 +1735,8 @@ function parkProviderWrite(ui, marker) {
 {
   const wire = createWire('joint-i8c');
   wires.set('joint-i8c', wire);
-  configureModel(wire);
   const ui = await freshStore('joint-i8c');
+  configureModel(ui, wire);
   const inst = await instrument(ui);
   applyJointSettings(ui);
   const convC = ui.store.liveConversationId;
@@ -1756,7 +1764,7 @@ function parkProviderWrite(ui, marker) {
       && wire.calls.length === callsBefore && inst.counts.tool === 1,
     JSON.stringify({ calls: wire.calls.length - callsBefore, tools: inst.counts.tool }));
   inst.restore();
-  configureModel(null);
+  configureModel(ui, null);
 }
 
 // I8d — review round 2: dispose WHILE the dispatched provider operation
@@ -1771,8 +1779,8 @@ function parkProviderWrite(ui, marker) {
 {
   const wire = createWire('joint-i8d');
   wires.set('joint-i8d', wire);
-  configureModel(wire);
   const ui = await freshStore('joint-i8d');
+  configureModel(ui, wire);
   const inst = await instrument(ui);
   applyJointSettings(ui);
   const park = parkProviderWrite(ui, 'joint-i8d');
@@ -1828,7 +1836,7 @@ function parkProviderWrite(ui, marker) {
     JSON.stringify({ calls: wire.calls.length - callsBeforeRefusal, tools: inst.counts.tool }));
   park.restore();
   inst.restore();
-  configureModel(null);
+  configureModel(ui, null);
 }
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed');

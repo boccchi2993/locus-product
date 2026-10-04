@@ -4,18 +4,11 @@
 // trip, durable reload, failure propagation and no-base64-persisted.
 // Run: node tests/attachments.test.cjs
 
-const fs = require('fs');
-const path = require('path');
 const crypto = require('crypto');
 
-const P = eval(
-  fs.readFileSync(path.join(__dirname, '..', 'src', 'persistence.js'), 'utf8') +
-  '\n;({ PersistenceService, PERSISTENCE_SCHEMA_VERSION, PERSISTENCE_STORES });'
-);
-const A = eval(
-  fs.readFileSync(path.join(__dirname, '..', 'src', 'attachments.js'), 'utf8') +
-  '\n;({ AttachmentStore, IMAGE_MIME_TYPES, MAX_IMAGE_ATTACHMENT_BYTES, imageContentPart, textContentPart, attachmentIntegrityError, isAttachmentIntegrityError });'
-);
+// M3c integration: the REAL ES modules are imported (no eval).
+let P = null;
+let A = null;
 
 let passed = 0, failed = 0;
 function check(name, cond, detail) {
@@ -32,6 +25,8 @@ const WEBP_BYTES = new Uint8Array([0x52, 0x49, 0x46, 0x46, 0x18, 0x00, 0x00, 0x0
 const TEXT_BYTES = new Uint8Array([0x68, 0x65, 0x6C, 0x6C, 0x6F]); // "hello"
 
 async function main() {
+  P = await import('../src/persistence.js');
+  A = await import('../src/attachments.js');
   check('S0 schema v3 carries attachments store', P.PERSISTENCE_SCHEMA_VERSION === 3
     && P.PERSISTENCE_STORES.includes('attachments') && P.PERSISTENCE_STORES.includes('capabilities'),
     P.PERSISTENCE_STORES.join(','));

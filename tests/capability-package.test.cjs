@@ -17,12 +17,11 @@ const crypto = require('crypto');
 
 const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
 
-// ---- module under test (workspace.js + vfs.js + extensions.js are base) ----
-const src = ['src/workspace.js', 'src/vfs.js', 'src/extension-composition.js', 'src/extensions.js', 'src/capability-package.js']
-  .map((f) => read(f)).join('\n;\n');
-const M = eval(src + '\n;({ LocusCapabilityPackage: globalThis.LocusCapabilityPackage,'
-  + ' MemoryWorkspace, WorkspaceAdapter });');
-const LCP = M.LocusCapabilityPackage;
+// ---- module under test (M3c integration: the REAL ESM adapter over the
+// installed cores — no eval'd duplicate sources) ----
+let LCP = null;
+let MemoryWorkspace = null;   // resolved from the public factory's prototype chain
+let WorkspaceAdapter = null;
 
 let passed = 0, failed = 0;
 function check(name, cond, detail) {
@@ -56,7 +55,7 @@ const FIXTURE_FILES = walkFixture(FIXTURE_DIR, '', new Map());
 // Generous provider caps: package-layer bounds are tested explicitly
 // below and must not collide with MemoryWorkspace defaults (16 MiB).
 async function makeWorkspace(files, opts) {
-  const ws = new M.MemoryWorkspace({
+  const ws = new MemoryWorkspace({
     maxFileBytes: 512 * 1024 * 1024,
     maxBytes: 1024 * 1024 * 1024,
     ...(opts || {}),
@@ -69,11 +68,13 @@ function fixtureWorkspace() { return makeWorkspace(FIXTURE_FILES); }
 
 // A provider whose list() order is deliberately different (reversed):
 // validation/build results must never depend on provider list order.
-class ReversedWorkspace extends M.MemoryWorkspace {
-  async list(p) { return (await super.list(p)).slice().reverse(); }
-}
+// (M3c integration: the MemoryWorkspace class is resolved inside the
+// async body, so the reversal is an instance-level list override —
+// the same semantics without module-load-order coupling.)
 async function makeReversedWorkspace(files) {
-  const ws = new ReversedWorkspace({ maxFileBytes: 512 * 1024 * 1024, maxBytes: 1024 * 1024 * 1024 });
+  const ws = new MemoryWorkspace({ maxFileBytes: 512 * 1024 * 1024, maxBytes: 1024 * 1024 * 1024 });
+  const realList = ws.list.bind(ws);
+  ws.list = async (p) => (await realList(p)).slice().reverse();
   for (const [rel, data] of files) await ws.write(rel, data);
   return ws;
 }
@@ -104,6 +105,11 @@ async function patchManifest(ws, rel, transform) {
 }
 
 (async () => {
+  LCP = (await import('../src/capability-package.js')).LocusCapabilityPackage;
+  const runtimeApi = await import('../src/product/runtime-api.js');
+  WorkspaceAdapter = runtimeApi.WorkspaceAdapter;
+  MemoryWorkspace = Object.getPrototypeOf(runtimeApi.createMemoryWorkspace({})).constructor;
+
   // ===================== P1 valid project validate =====================
   const ws1 = await fixtureWorkspace();
   const v1 = await LCP.validateProject({ workspace: ws1, root: '' });
@@ -503,8 +509,8 @@ async function patchManifest(ws, rel, transform) {
       for (const [rel, data] of files) await ws.write(rel, data);
       return ws;
     };
-    const vA = await LCP.validateProject({ workspace: await broken(M.MemoryWorkspace), root: '' });
-    const vB = await LCP.validateProject({ workspace: await broken(ReversedWorkspace), root: '' });
+    const vA = await LCP.validateProject({ workspace: await broken(MemoryWorkspace), root: '' });
+    const vB = await LCP.validateProject({ workspace: await broken(MemoryWorkspace), root: '' });
     const diagA = vA.diagnostics;
     const sortedCopy = diagA.slice().sort((x, y) => {
       if (x.path !== y.path) return x.path < y.path ? -1 : 1;

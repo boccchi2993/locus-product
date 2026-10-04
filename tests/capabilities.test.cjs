@@ -6,22 +6,16 @@
 // agent-writability boundary and the gate's ask-once-per-run contract.
 // Run: node tests/capabilities.test.cjs
 
-const fs = require('fs');
-const path = require('path');
-
-const P = eval(
-  fs.readFileSync(path.join(__dirname, '..', 'src', 'persistence.js'), 'utf8') +
-  '\n;({ PersistenceService });'
-);
-eval(fs.readFileSync(path.join(__dirname, '..', 'src', 'attachments.js'), 'utf8') + '\n;void AttachmentStore;');
-const A = eval(
-  fs.readFileSync(path.join(__dirname, '..', 'src', 'approval.js'), 'utf8') +
-  '\n;({ ApprovalController });'
-);
-const C = eval(
-  fs.readFileSync(path.join(__dirname, '..', 'src', 'capabilities.js'), 'utf8') +
-  '\n;({ ModelCapabilityRegistry, createImageInputGate, capabilityIdentityKey, builtinImageCapability, imageInputUnavailableNotice, runImageInputProbe, isImageUnsupportedProviderError, classifyImageProviderError, parseEndpointIdentity, isOfficialProviderEndpoint });'
-);
+// M3c integration: the classes come from the REAL harness transfer layer,
+// persistence from the REAL ES module (no eval'd duplicate sources). The
+// harness-internal helpers are observed through their PUBLIC seams:
+// capabilityIdentityKey -> registry.identityKey(); the
+// isImageUnsupportedProviderError predicate is the documented boolean seam
+// over the public classifier (kind === model_unsupported); the
+// endpoint-parsing internals are observed through registry.lookup (the
+// builtin-seed behavior those checks pin).
+let P = null;
+let C = null;
 
 let passed = 0, failed = 0;
 function check(name, cond, detail) {
@@ -60,18 +54,27 @@ function fakeProbe(state, reason) {
 }
 
 async function main() {
+  P = await import('../src/persistence.js');
+  C = await import('../src/product/harness-api.js');
+  // A registry instance exposes the identity-key derivation publicly.
+  const keyRegistry = new C.ModelCapabilityRegistry({ persistence: new P.PersistenceService() });
+  await keyRegistry.ready;
+  const capabilityIdentityKey = (identity) => keyRegistry.identityKey(identity);
+  // Documented boolean seam over the PUBLIC classifier (harness
+  // capabilities.js keeps the same one-line definition internally).
+  const isImageUnsupportedProviderError = (e) => C.classifyImageProviderError(e).kind === 'model_unsupported';
   const service = new P.PersistenceService();
   await service.ready;
 
   // --- identity scoping ---
   check('R1 identity key includes more than the model name',
-    C.capabilityIdentityKey(identity({ model: 'x' })) !== C.capabilityIdentityKey(identity({ model: 'y' })));
-  check('R1b endpoint switch yields a NEW identity', C.capabilityIdentityKey(identity())
-    !== C.capabilityIdentityKey(identity({ endpointIdentity: 'https://gateway.example/anthropic' })));
-  check('R1c model switch yields a NEW identity', C.capabilityIdentityKey(identity())
-    !== C.capabilityIdentityKey(identity({ model: 'deepseek-chat' })));
-  check('R1d dialect/adapter/protocol switch yields a NEW identity', C.capabilityIdentityKey(identity())
-    !== C.capabilityIdentityKey(identity({ dialect: 'openai', adapterId: 'openai-compatible', protocolVersion: 'chat-completions-v1' })));
+    capabilityIdentityKey(identity({ model: 'x' })) !== capabilityIdentityKey(identity({ model: 'y' })));
+  check('R1b endpoint switch yields a NEW identity', capabilityIdentityKey(identity())
+    !== capabilityIdentityKey(identity({ endpointIdentity: 'https://gateway.example/anthropic' })));
+  check('R1c model switch yields a NEW identity', capabilityIdentityKey(identity())
+    !== capabilityIdentityKey(identity({ model: 'deepseek-chat' })));
+  check('R1d dialect/adapter/protocol switch yields a NEW identity', capabilityIdentityKey(identity())
+    !== capabilityIdentityKey(identity({ dialect: 'openai', adapterId: 'openai-compatible', protocolVersion: 'chat-completions-v1' })));
 
   // --- builtin seed ---
   const registry = new C.ModelCapabilityRegistry({ persistence: service });
@@ -208,7 +211,7 @@ async function main() {
   await cancelRegistry.ready;
   const cancelGate = G({ registry: cancelRegistry, approvals: fakeApprovals('cancelled'), probe: fakeProbe('supported') });
   out = await cancelGate.ensure({ askCache: new Map() });
-  const cancelRow = await cancelRegistry.persistence.get('capabilities', C.capabilityIdentityKey(unknownId));
+  const cancelRow = await cancelRegistry.persistence.get('capabilities', capabilityIdentityKey(unknownId));
   check('G6 a cancelled capability question writes NOTHING to the registry (not a No)',
     out.decision === 'cancelled' && out.state === 'unknown' && cancelRow === null, JSON.stringify(out));
 
@@ -221,13 +224,13 @@ async function main() {
 
   // Conservative provider-rejection classifier: capability evidence only.
   check('N2 classifier: explicit image validation rejection counts',
-    C.isImageUnsupportedProviderError({ status: 400, message: 'image content is not supported by this model', providerError: { param: 'content' } }));
+    isImageUnsupportedProviderError({ status: 400, message: 'image content is not supported by this model', providerError: { param: 'content' } }));
   check('N2b classifier: auth/quota/5xx/size never downgrade capability',
-    !C.isImageUnsupportedProviderError({ status: 401, message: 'invalid api key' })
-    && !C.isImageUnsupportedProviderError({ status: 429, message: 'rate limited' })
-    && !C.isImageUnsupportedProviderError({ status: 500, message: 'internal error' })
-    && !C.isImageUnsupportedProviderError({ status: 400, message: 'image too large: 9 MB exceeds the 5 MB limit' })
-    && !C.isImageUnsupportedProviderError({ status: 400, message: 'tools payload is unsupported' }));
+    !isImageUnsupportedProviderError({ status: 401, message: 'invalid api key' })
+    && !isImageUnsupportedProviderError({ status: 429, message: 'rate limited' })
+    && !isImageUnsupportedProviderError({ status: 500, message: 'internal error' })
+    && !isImageUnsupportedProviderError({ status: 400, message: 'image too large: 9 MB exceeds the 5 MB limit' })
+    && !isImageUnsupportedProviderError({ status: 400, message: 'tools payload is unsupported' }));
 
   // ============================================================
   //  F-I21 — builtin endpoint identity: URL-parsed hostname, exact match
@@ -242,8 +245,7 @@ async function main() {
   });
 
   check('E1 official DeepSeek hostname matches exactly (bare + /v1 + path variants)',
-    C.isOfficialProviderEndpoint('https://api.deepseek.com', 'api.deepseek.com')
-    && (await registry.lookup(OPENAI_ID('https://api.deepseek.com/v1', 'deepseek-flash'))).state === 'supported'
+    (await registry.lookup(OPENAI_ID('https://api.deepseek.com/v1', 'deepseek-flash'))).state === 'supported'
     && (await registry.lookup(DEEPSEEK_FLASH)).state === 'supported');
   check('E1b OpenAI/Anthropic official hostnames still seed',
     (await registry.lookup(OPENAI_ID('https://api.openai.com/v1'))).state === 'supported'
@@ -258,8 +260,7 @@ async function main() {
     (await registry.lookup(identity({ endpointIdentity: 'https://evil.com/api.deepseek.com/v1', model: 'deepseek-flash' }))).state === 'unknown'
     && (await registry.lookup(identity({ endpointIdentity: 'https://attacker.example/api.deepseek.com', model: 'deepseek-chat' }))).state === 'unknown');
   check('E4 (T7) deepseek USERINFO attack is unknown (userinfo is rejected outright; real hostname is evil.com)',
-    C.parseEndpointIdentity('https://api.deepseek.com@evil.com/v1') === null
-    && (await registry.lookup(identity({ endpointIdentity: 'https://api.deepseek.com@evil.com/v1', model: 'deepseek-flash' }))).state === 'unknown'
+    (await registry.lookup(identity({ endpointIdentity: 'https://api.deepseek.com@evil.com/v1', model: 'deepseek-flash' }))).state === 'unknown'
     && (await registry.lookup(identity({ endpointIdentity: 'https://deepseek-flash@api.deepseek.com.evil.com', model: 'deepseek-flash' }))).state === 'unknown');
   check('E5 near-miss hostnames never official-match: apex / typo / port',
     (await registry.lookup(identity({ endpointIdentity: 'https://deepseek.com', model: 'deepseek-flash' }))).state === 'unknown'
@@ -275,9 +276,9 @@ async function main() {
     && (await registry.lookup(ANTHROPIC_ID('https://evil.com/api.anthropic.com/v1'))).state === 'unknown'
     && (await registry.lookup(ANTHROPIC_ID('https://api.anthropic.com@evil.com'))).state === 'unknown');
   check('E8 non-http(s) or garbage endpoints never match',
-    C.parseEndpointIdentity('ftp://api.deepseek.com') === null
-    && C.parseEndpointIdentity('api.deepseek.com') === null
-    && C.parseEndpointIdentity('') === null
+    (await registry.lookup(identity({ endpointIdentity: 'ftp://api.deepseek.com', model: 'deepseek-flash' }))).state === 'unknown'
+    && (await registry.lookup(identity({ endpointIdentity: 'api.deepseek.com', model: 'deepseek-flash' }))).state === 'unknown'
+    && (await registry.lookup(identity({ endpointIdentity: '', model: 'deepseek-flash' }))).state === 'unknown'
     && (await registry.lookup(identity({ endpointIdentity: 'not a url', model: 'deepseek-flash' }))).state === 'unknown');
   check('E9 the seed never matches on a substring of the model name (prefix anchoring kept)',
     (await registry.lookup(OPENAI_ID('https://api.openai.com/v1', 'my-gpt-4o-clone'))).state === 'unknown'
@@ -331,9 +332,9 @@ async function main() {
     && kindOf({ status: 400, message: 'image', providerError: {} }) === 'ambiguous');
 
   check('K6 the boolean seam is true ONLY for model_unsupported',
-    C.isImageUnsupportedProviderError({ status: 400, message: 'this model does not support image input' })
-    && !C.isImageUnsupportedProviderError({ status: 400, code: 'invalid_image', message: 'Invalid image: the image file is corrupted or missing data.' })
-    && !C.isImageUnsupportedProviderError({ status: 400, message: 'Unsupported media_type: image/gif' }));
+    isImageUnsupportedProviderError({ status: 400, message: 'this model does not support image input' })
+    && !isImageUnsupportedProviderError({ status: 400, code: 'invalid_image', message: 'Invalid image: the image file is corrupted or missing data.' })
+    && !isImageUnsupportedProviderError({ status: 400, message: 'Unsupported media_type: image/gif' }));
 
   check('K7 classification detail is a bounded debug summary (no payload semantics change)',
     C.classifyImageProviderError({ status: 400, message: 'x'.repeat(1000) }).detail.length <= 300

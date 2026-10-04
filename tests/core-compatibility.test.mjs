@@ -6,8 +6,10 @@
 //   CC2  declaration_missing / declaration_invalid (both cores, wrong
 //        shapes, absent required fields — undefined never defaults
 //        to compatible)
-//   CC3  contract_version_unsupported / registry_version_unsupported
-//        (distinct concepts, both enforced)
+//   CC3  contract_version_unsupported (the internal-registry version
+//        concept was deleted with the harness package at M3c: no
+//        supportedRegistryVersions requirement exists, and a stray
+//        extra registryVersion field is an ignored unknown extra)
 //   CC4  port_version_unsupported + missing/malformed ports
 //   CC5  capability_missing / capability_value_mismatch (arrays,
 //        shaPinned, commands, harness semantic capabilities)
@@ -78,7 +80,7 @@ const pass = () => checkCoreCompatibility({
   check('CC8 the product requirement table is frozen and complete',
     Object.isFrozen(r) && Object.isFrozen(r.runtime) && Object.isFrozen(r.harness)
       && r.runtime.supportedContractVersions.length === 1
-      && r.harness.supportedRegistryVersions.length === 1
+      && r.harness.supportedRegistryVersions === undefined
       && Object.keys(r.harness.requiredPorts).length === 5
       && r.runtime.optionalCapabilities.every((o) => typeof o.rule === 'string' && o.rule)
       && r.harness.optionalCapabilities.every((o) => typeof o.rule === 'string' && o.rule),
@@ -92,7 +94,7 @@ const pass = () => checkCoreCompatibility({
     res.compatible === true && Object.isFrozen(res)
       && Object.isFrozen(res.runtime) && Object.isFrozen(res.optional.runtime.missing)
       && res.runtime.contractVersion === 1 && res.harness.contractVersion === 1
-      && res.harness.registryVersion === 1,
+      && res.harness.registryVersion === undefined,
     JSON.stringify(res));
   const noOptionals = checkCoreCompatibility({
     runtime: RUNTIME_OK(), harness: HARNESS_OK(),
@@ -145,19 +147,18 @@ const pass = () => checkCoreCompatibility({
       requirements: PRODUCT_CORE_REQUIREMENTS,
     }),
     'contract_version_unsupported');
-  expectError('CC3c an unsupported harness REGISTRY version is rejected under its own concept', 'harness',
-    () => checkCoreCompatibility({
+  // M3c (handoff §6.1): the internal registry version was deleted from the
+  // harness package — no requirement, no projection, and a stray extra
+  // field is an ignored unknown extra (never a hidden rejection semantic).
+  {
+    const stray = checkCoreCompatibility({
       runtime: RUNTIME_OK(), harness: { ...HARNESS_OK(), registryVersion: 999 },
       requirements: PRODUCT_CORE_REQUIREMENTS,
-    }),
-    'registry_version_unsupported', (e) => e.port === 'registryVersion' && e.provided === 999);
-  expectError('CC3d a missing harness registry version is reported, never defaulted', 'harness',
-    () => checkCoreCompatibility({
-      runtime: RUNTIME_OK(),
-      harness: (() => { const h = JSON.parse(JSON.stringify(HARNESS_OK())); delete h.registryVersion; return h; })(),
-      requirements: PRODUCT_CORE_REQUIREMENTS,
-    }),
-    'capability_missing', (e) => e.port === 'registryVersion');
+    });
+    check('CC3c a stray extra registryVersion is ignored, never a rejection',
+      stray.compatible === true && stray.harness.registryVersion === undefined,
+      JSON.stringify(stray));
+  }
 }
 
 // ---------- CC4 ----------

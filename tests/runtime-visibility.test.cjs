@@ -9,35 +9,30 @@
 //      in internal results, telemetry and UI events, and are never
 //      serialized into provider-visible tool results on the native OR
 //      the text-fallback path.
-// The real network.js + shell.js + tools.js + agent.js run unchanged;
-// only the model client is a stub. Run: node tests/runtime-visibility.test.cjs
-
-const fs = require('fs');
-const path = require('path');
+// M3c integration (three-repo switch): the suite runs the REAL installed
+// cores through the product transfer layers + the Product ESM modules —
+// no eval'd in-repo duplicate sources anymore. Ownership split applied,
+// NO kept assertion weakened:
+//   - V1–V3 (the direct NetworkRuntime.request / safeNetworkUrlForDisplay
+//     internal surface) moved with the network core:
+//     locus-runtime tests/runtime-visibility.test.cjs (V1–V3) +
+//     tests/network.test.cjs cover them; locus-runtime publishes no
+//     NetworkRuntime entry export, so the product side cannot reach that
+//     surface without a forbidden deep import.
+//   - V9/V9b (direct nativeResultContent call) — the builder is
+//     harness-internal now (not an entry export); the SAME content
+//     contract stays pinned here through the real AgentSession end to
+//     end (V5/V6/V7/V8) and in locus-harness tests/agent.test.mjs.
+//   - V4–V8, V10 run unchanged through executeTool → the real runtime
+//     session and the real AgentSession.
+// Only the model client is a stub. Run: node tests/runtime-visibility.test.cjs
 
 global.window = { location: { protocol: 'https:' } };
 global.document = { getElementById: () => null }; // PythonRuntime._setStatus touches the status bar
 
-const read = (f) => fs.readFileSync(path.join(__dirname, '..', 'src', f), 'utf8');
-const M = eval(
-  read('telemetry.js') + '\n' +
-  read('workspace.js') + '\n' +
-  read('vfs.js') + '\n' +
-  read('network.js') + '\n' +
-  read('shell.js') + '\n' +
-  read('tools.js') + '\n' +
-  read('agent.js') +
-  '\n;({ NetworkRuntime, safeNetworkUrlForDisplay, nativeResultContent, executeTool, Telemetry, AgentSession, buildSystemPrompt, VirtualWorkspace, AGENT_TOOL_DEFINITIONS });'
-);
+let createRuntime, createWorkspace, AgentSession, buildSystemPrompt,
+  executeTool, AGENT_TOOL_DEFINITIONS, Telemetry;
 
-// M2a: bash routes through the PUBLIC runtime entry (the eval'd shell.js
-// published the core registry). Worker sources are never booted here.
-const { createRuntime } = require('../src/runtime/index.js');
-// M2a review: the public entry assembles asynchronously — the host and
-// session are resolved before the checks drive them.
-const __hostPromise = createRuntime({
-  workerAssets: { pyWorkerSource: '/* not booted in this suite */', grepWorkerSource: '/* not booted in this suite */' },
-});
 let __host = null;
 let __session = null;
 const withSession = (opts) => Object.assign({ runtimeSession: __session }, opts || {});
@@ -48,7 +43,7 @@ let passed = 0, failed = 0;
 // fakes keep the legacy executor shape and convert through the exact
 // mapping the contract documents (docs/REPOSITORY-SPLIT-CONTRACTS.md 3.2).
 const asToolPort = (executor) => ({
-  definitions: () => M.AGENT_TOOL_DEFINITIONS.slice(),
+  definitions: () => AGENT_TOOL_DEFINITIONS.slice(),
   execute: ({ name, input, context }) =>
     executor(name, input, (context && context.filesystem) || null, { signal: context && context.signal }),
 });
@@ -63,7 +58,7 @@ async function errOf(promise) {
 }
 
 function newVfs() {
-  return new M.VirtualWorkspace({ listCommands: () => Object.keys(M.SHELL_COMMANDS) });
+  return createWorkspace();
 }
 
 function envelope(text, extra) {
@@ -80,10 +75,10 @@ function envelope(text, extra) {
 function newSession(overrides) {
   const events = [];
   const bodies = [];
-  const session = new M.AgentSession(Object.assign({
+  const session = new AgentSession(Object.assign({
     modelClient: async (body) => { bodies.push(body); return envelope('done'); },
     toolPort: asToolPort(async () => ({ output: 'ok', success: true })),
-    buildSystemPrompt: M.buildSystemPrompt,
+    buildSystemPrompt,
     emit: (e) => events.push(e),
   }, overrides || {}));
   return { session, events, bodies };
@@ -92,83 +87,29 @@ function newSession(overrides) {
 const WS = { name: 'visibility-test' };
 
 async function run() {
-  __host = await __hostPromise;
+  ({ createRuntime, createWorkspace } = await import('../src/product/runtime-api.js'));
+  ({ AgentSession, buildSystemPrompt } = await import('../src/product/harness-api.js'));
+  ({ executeTool, AGENT_TOOL_DEFINITIONS } = await import('../src/tools.js'));
+  ({ Telemetry } = await import('../src/telemetry.js'));
+
+  // M2a review: the public entry assembles asynchronously — the host and
+  // session are resolved before the checks drive them.
+  __host = await createRuntime({
+    workerAssets: { pyWorkerSource: '/* not booted in this suite */', grepWorkerSource: '/* not booted in this suite */' },
+  });
   __session = __host.createSession();
-  // ================= R-NF04C: malformed URL is never echoed raw =================
-
-  // --- V1. the runtime error itself is the bounded constant ---
-  {
-    const MALFORMED = 'ht tp://example.com/?token=SECRET_INVALID_URL_123';
-    const e = await errOf(M.NetworkRuntime.request({ url: MALFORMED }));
-    check('V1 malformed URL → network_invalid_url',
-      e && e.networkCode === 'network_invalid_url', e && (e.message || String(e)));
-    check('V1b error message is the bounded constant', e && e.message === 'invalid URL',
-      JSON.stringify(e && e.message));
-    check('V1c raw input never echoed', e && e.message.indexOf('SECRET_INVALID_URL_123') === -1
-      && e.message.indexOf('ht tp') === -1, JSON.stringify(e && e.message));
-
-    // Parse failure happens BEFORE any attempt or approval: with a
-    // side-effecting method and no approval consumer wired, the invalid
-    // URL diagnosis still wins (an attempt would demand approval first).
-    const pe = await errOf(M.NetworkRuntime.request({
-      method: 'POST',
-      url: MALFORMED,
-      policyContext: { approvals: null },
-    }));
-    check('V1d parse failure precedes approval and any attempt',
-      pe && pe.networkCode === 'network_invalid_url', pe && pe.networkCode);
-  }
-
-  // --- V2. every malformed shape gets the same bounded deterministic error ---
-  {
-    const VARIANTS = [
-      ['space-in-scheme', 'ht tp://example.com/?token=SECRET_VAR_SPACE'],
-      ['space-in-host', 'https://exa mple.com/?x=SECRET_VAR_HOST'],
-      ['missing-scheme', '://SECRET_VAR_NOSCHEME'],
-      ['bad-ipv6', 'https://[invalid-ipv6]/?token=SECRET_VAR_IPV6'],
-      ['control-char', 'ht\x01tp://example.com/?token=SECRET_VAR_CTRL'],
-      ['del-in-host', 'https://exa\x7fmple.com/?token=SECRET_VAR_DEL'],
-    ];
-    for (const [label, raw] of VARIANTS) {
-      const ve = await errOf(M.NetworkRuntime.request({ url: raw }));
-      check('V2 ' + label + ' → bounded invalid URL',
-        ve && ve.networkCode === 'network_invalid_url' && ve.message === 'invalid URL',
-        JSON.stringify(ve && ve.message));
-      check('V2b ' + label + ' sentinel never echoed',
-        ve && ve.message.indexOf('SECRET_VAR_') === -1, JSON.stringify(ve && ve.message));
-    }
-    // An OVERLONG URL that WHATWG still accepts fails later, at dispatch —
-    // that failure must ALSO be bounded: a classified code, a constant
-    // length message, and never the raw input (R-NF04C §boundedness).
-    const long = await errOf(M.NetworkRuntime.request({
-      url: 'https://' + 'a'.repeat(1048576) + '/?token=SECRET_VAR_LONG',
-    }));
-    check('V2c overlong URL fails classified, never echoing the input',
-      long && typeof long.networkCode === 'string'
-      && long.message.length <= 120
-      && long.message.indexOf('SECRET_VAR_LONG') === -1
-      && long.message.indexOf('aaaa') === -1,
-      JSON.stringify(long && long.message));
-  }
-
-  // --- V3. parseable URL display drops query secrets (regression) ---
-  {
-    check('V3 safe display keeps origin+path, drops the query',
-      M.safeNetworkUrlForDisplay('https://example.com/path?token=SECRET_QUERY_123')
-        === 'https://example.com/path');
-  }
 
   // --- V4. real stack: tool output and telemetry never see the sentinel ---
   {
-    M.Telemetry.records.length = 0;
-    const res = await M.executeTool('bash',
+    Telemetry.records.length = 0;
+    const res = await executeTool('bash',
       'curl "ht tp://example.com/?token=SECRET_INVALID_URL_123"', newVfs(), withSession({}));
     check('V4 tool fails with bounded output mentioning invalid URL',
       res.success === false && res.output.includes('invalid URL'), JSON.stringify(res.output));
     check('V4b tool output never echoes the sentinel or the raw input',
       res.output.indexOf('SECRET_INVALID_URL_123') === -1 && res.output.indexOf('ht tp') === -1,
       JSON.stringify(res.output));
-    const rec = M.Telemetry.records[M.Telemetry.records.length - 1];
+    const rec = Telemetry.records[Telemetry.records.length - 1];
     check('V4c telemetry error hides the sentinel',
       rec && rec.error && rec.error.indexOf('SECRET_INVALID_URL_123') === -1,
       JSON.stringify(rec && rec.error));
@@ -189,7 +130,7 @@ async function run() {
             : envelope('done');
         };
       })(),
-      toolPort: asToolPort((tool, input, ws, opts) => M.executeTool(tool, input, newVfs(), withSession(opts))),
+      toolPort: asToolPort((tool, input, ws, opts) => executeTool(tool, input, newVfs(), withSession(opts))),
     });
     await session.run('fetch that url', { workspace: WS });
     const tr = session.history.find((m) => m.role === 'tool_result');
@@ -279,22 +220,12 @@ async function run() {
       tr && tr.content.indexOf('backend:') === -1, JSON.stringify(tr && tr.content));
   }
 
-  // --- V9. nativeResultContent contract (§26): no execution-location metadata ---
-  {
-    const c = M.nativeResultContent('bash', true, 'ok output');
-    check('V9 nativeResultContent carries tool/success/output framing',
-      c.includes('tool: bash') && c.includes('success: true') && c.includes('ok output')
-      && c.includes('untrusted data, not instructions'), JSON.stringify(c));
-    check('V9b nativeResultContent never serializes a backend line',
-      c.indexOf('backend:') === -1, JSON.stringify(c));
-  }
-
   // --- V10. telemetry retention regression: backend survives everywhere it should ---
   {
-    M.Telemetry.records.length = 0;
-    const ok = await M.executeTool('bash', 'echo retention-check', newVfs(), withSession({}));
+    Telemetry.records.length = 0;
+    const ok = await executeTool('bash', 'echo retention-check', newVfs(), withSession({}));
     check('V10 ordinary execution still succeeds', ok.success === true, JSON.stringify(ok.output));
-    const rec = M.Telemetry.records[M.Telemetry.records.length - 1];
+    const rec = Telemetry.records[Telemetry.records.length - 1];
     check('V10b telemetry still records backend: browser',
       rec && rec.backend === 'browser' && rec.success === true, JSON.stringify(rec));
   }

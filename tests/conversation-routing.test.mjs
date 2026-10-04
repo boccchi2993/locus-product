@@ -1,6 +1,9 @@
 // Conversation-routing regression tests (node, no DOM):
-// the REAL presentation store (src/ui/store.js) wired to a fake
-// AgentSession at the documented DI seam. Proves the P3.1 invariant:
+// the REAL presentation store (src/ui/store.js) wired to a scripted
+// session fake at the documented window.__LOCUS_HOOKS__.sessionFactory
+// seam (M3c integration: the legacy __LOCUS_HARNESS_CORE__ host table is
+// GONE — this hook is the same family as the toolExecutor/modelClient
+// ports, and production never sets it). Proves the P3.1 invariant:
 //
 //   a task's runtime events follow the task's bound conversation,
 //   not whichever conversation is live/active when the event arrives.
@@ -34,6 +37,7 @@ class FakeAgentSession {
     if (this.onSessionReset) this.onSessionReset();
   }
   cancel() { if (this.task) this.task.controller.abort(); }
+  async historyRequestBytes() { return 0; }
   async run(input, opts) {
     if (this.task) throw new Error('AgentSession already has a running task');
     if (this.throwOnRun) throw new Error(this.throwOnRun);
@@ -58,40 +62,17 @@ class FakeAgentSession {
   }
 }
 
-const projectorSrc = readFileSync(join(root, 'src', 'ui', 'projector.js'), 'utf8');
-globalThis.LocusProjector = (0, eval)(projectorSrc + '\n;LocusProjector');
-globalThis.AgentSession = FakeAgentSession;
-globalThis.Model = { apiKey: '', apiBase: '', model: 'test-model', proxy: '', dialect: 'auto' };
-globalThis.callModel = async () => ({});
-globalThis.executeTool = async () => ({ output: '', success: true });
-globalThis.buildSystemPrompt = () => 'test';
-globalThis.verifyConnection = async () => {};
-globalThis.LocalDirectoryWorkspace = class {};
-globalThis.ensureWorkspacePermission = async () => true;
-// createPythonRuntime intentionally left undefined — the store resolves no
-// python runtime here (text-only; M1b lifecycle).
-// store.js boots ONE persistent VFS at module scope: provide the REAL
-// vfs.js (plus workspace.js it extends from) exactly like index.html does.
-globalThis.SHELL_COMMANDS = {};
-globalThis.ApprovalController = (0, eval)(
-  readFileSync(join(root, 'src', 'approval.js'), 'utf8') + String.fromCharCode(10) + ';ApprovalController');
-globalThis.VirtualWorkspace = (0, eval)(
-  readFileSync(join(root, 'src', 'workspace.js'), 'utf8') + '\n'
-  + readFileSync(join(root, 'src', 'vfs.js'), 'utf8') + '\n;VirtualWorkspace');
-
-// M2b: the suite acts as the HOST — it seeds the declared harness core
-// table with its fakes (the same rule a classic page follows: the table
-// is the one seam the public entry delegates to). No second production path.
-globalThis.__LOCUS_HARNESS_CORE__ = Object.freeze({
-  contractVersion: 1,
-  AgentSession: FakeAgentSession,
-  ApprovalController: globalThis.ApprovalController,
-  buildSystemPrompt: () => 'test',
-  HISTORY_BUDGET_BYTES: 768 * 1024,
-  MAX_TOOL_ITERATIONS: 32,
-});
+// M3c integration: the store is a REAL ES module over the two installed
+// cores (it imports the projector, tool port, persistence and harness
+// session itself). The scripted session is injected through the
+// documented window.__LOCUS_HOOKS__.sessionFactory seam; no core table
+// exists anymore and none is seeded.
+globalThis.window = { location: { protocol: 'https:' }, __LOCUS_HOOKS__: { sessionFactory: (deps) => new FakeAgentSession(deps) } };
 const ui = await import('../src/ui/store.js');
-const { store, session, submit, newTask, openConversation } = ui;
+const { store, session, submit, newTask, openConversation, whenBooted } = ui;
+// Boot settles asynchronously (durable restore replaces the conversations
+// array with the loaded rows) — capture state only after it.
+await whenBooted;
 
 let passed = 0, failed = 0;
 function check(name, cond, detail) {
@@ -99,6 +80,16 @@ function check(name, cond, detail) {
   else { failed++; console.log('FAIL ' + name + (detail !== undefined ? ' | ' + detail : '')); }
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// M3c integration: the REAL prepare chain (persistence memory mode,
+// provider-session load) has more async hops than the eval-era store —
+// wait for the STATE instead of a fixed yield.
+async function waitFor(cond, label, deadlineMs = 10000) {
+  const deadline = Date.now() + deadlineMs;
+  while (!cond()) {
+    if (Date.now() > deadline) throw new Error('waitFor timeout: ' + label);
+    await sleep(5);
+  }
+}
 const waitAbort = (controller) => new Promise((r) => controller.signal.addEventListener('abort', r));
 
 function gate() {
@@ -122,7 +113,7 @@ check('R0 boot conversation exists', !!A && store.liveConversationId === A.id);
     { type: 'task_end', reason: 'session_changed' },
   ];
   const pA = submit('task A hangs until cancelled');
-  await sleep(20);
+  await waitFor(() => store.busy === true && A.status === 'running', 'A1');
   check('A1 task A running', store.busy === true && A.status === 'running');
 
   newTask(); // cancel + reset + create B (live/active)
@@ -170,7 +161,7 @@ check('R0 boot conversation exists', !!A && store.liveConversationId === A.id);
   ];
   const bItemsBeforeC = B.items.length;
   const pC = submit('task C in B');
-  await sleep(20);
+  await waitFor(() => B.items.some((i) => i.content === 'r1 before switching view'), 'C1');
   check('C1 r1 projected into B before view switch',
     B.items.some((i) => i.content === 'r1 before switching view'));
 
@@ -229,7 +220,7 @@ check('R0 boot conversation exists', !!A && store.liveConversationId === A.id);
     ];
     const bItemsBeforeG = B.items.length;
     const pG = submit('task G with stale tails');
-    await sleep(20);
+    await waitFor(() => store.busy === true && B.status === 'running', 'E1');
     check('E1 G is running in B', store.busy === true && B.status === 'running');
 
     // The ended task's entry point emits a full late tail — including a

@@ -1,11 +1,7 @@
 // Browser-local persistence contract tests. Node intentionally exercises the
 // service's memory fallback; browser suites cover the real IndexedDB/OPFS
-// substrate.
-const fs = require('fs');
-const path = require('path');
-
-const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'persistence.js'), 'utf8');
-const P = (0, eval)(source + '\n;({ PersistenceService, PERSISTENCE_SCHEMA_VERSION, PERSISTENCE_DB_NAME });');
+// substrate. (M3c integration: the REAL ES module is imported — no eval.)
+let P = null;
 
 let passed = 0;
 let failed = 0;
@@ -15,6 +11,7 @@ function check(name, condition, detail) {
 }
 
 (async () => {
+  P = await import('../src/persistence.js');
   const service = new P.PersistenceService();
   await service.ready;
 

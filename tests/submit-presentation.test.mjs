@@ -2,12 +2,14 @@
 // exercise the real store with a persistence seam so normal task_start
 // ownership and pre-run terminal fallbacks are tested at their actual await
 // boundaries.
-
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
-
-const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+//
+// M3c integration: the store is a REAL ES module over the two installed
+// cores. The scripted session is injected through the documented
+// window.__LOCUS_HOOKS__.sessionFactory seam (production never sets it);
+// the persistence gate/record seams below PATCH the canonical
+// PersistenceServiceInstance's per-call methods (the store resolves them
+// on the instance at call time) — no global persistence handle exists
+// anymore to swap.
 
 class FakeAgentSession {
   constructor(deps) {
@@ -28,6 +30,8 @@ class FakeAgentSession {
   }
 
   cancel() { if (this.task) this.task.controller.abort(); }
+
+  async historyRequestBytes() { return 0; }
 
   async run(input, opts) {
     if (this.task) throw new Error('AgentSession already has a running task');
@@ -52,74 +56,27 @@ class FakeAgentSession {
   }
 }
 
-globalThis.LocusProjector = (0, eval)(
-  readFileSync(join(root, 'src', 'ui', 'projector.js'), 'utf8') + '\n;LocusProjector');
-globalThis.AgentSession = FakeAgentSession;
-globalThis.Model = { apiKey: '', apiBase: '', model: 'test-model', proxy: '', dialect: 'auto' };
-globalThis.callModel = async () => ({});
-globalThis.executeTool = async () => ({ output: '', success: true });
-globalThis.buildSystemPrompt = () => 'test';
-globalThis.verifyConnection = async () => {};
-globalThis.LocalDirectoryWorkspace = class {};
-globalThis.ensureWorkspacePermission = async () => true;
-globalThis.SHELL_COMMANDS = {};
-globalThis.VirtualWorkspace = (0, eval)(
-  readFileSync(join(root, 'src', 'workspace.js'), 'utf8') + '\n'
-  + readFileSync(join(root, 'src', 'vfs.js'), 'utf8') + '\n;VirtualWorkspace');
-globalThis.getProviderAdapter = ({ dialect, apiBase }) => ({
-  providerFamily: 'test-provider',
-  adapterId: 'test-adapter',
-  dialect: dialect || 'auto',
-  apiBase,
-  isRawReplayCompatible: () => true,
-});
-globalThis.createCredentialIdentity = (config) => ({
-  provider: config.provider,
-  adapterId: config.adapterId,
-  dialect: config.dialect,
-  endpointIdentity: config.apiBase,
-});
-globalThis.createProviderIdentity = (config) => ({
-  provider: config.provider,
-  adapterId: config.adapterId,
-  dialect: config.dialect,
-  endpointIdentity: config.apiBase,
-  protocolVersion: 'test-v1',
-});
-globalThis.ApprovalController = (0, eval)(
-  readFileSync(join(root, 'src', 'approval.js'), 'utf8') + '\n;ApprovalController');
-globalThis.projectNormalizedHistory = (rows) => rows || [];
-
-// M2b: the suite acts as the HOST — it seeds the declared harness core
-// table with its fakes (the same rule a classic page follows: the table
-// is the one seam the public entry delegates to). No second production path.
-globalThis.__LOCUS_HARNESS_CORE__ = Object.freeze({
-  contractVersion: 1,
-  AgentSession: FakeAgentSession,
-  ApprovalController: globalThis.ApprovalController,
-  buildSystemPrompt: () => 'test',
-  HISTORY_BUDGET_BYTES: 768 * 1024,
-  MAX_TOOL_ITERATIONS: 32,
-});
+globalThis.window = {
+  location: { protocol: 'https:' },
+  __LOCUS_HOOKS__: { sessionFactory: (deps) => new FakeAgentSession(deps) },
+};
 const ui = await import('../src/ui/store.js');
-const { store, session, submit, newTask, cancelTask } = ui;
+const { store, session, submit, newTask, cancelTask, whenBooted } = ui;
+// Boot settles asynchronously (durable restore replaces the conversations
+// array with the loaded rows) — capture state only after it.
+await whenBooted;
 
 const providerSessions = new Map();
 const presentationEvents = [];
 let loadProviderSession = async () => null;
-globalThis.PersistenceServiceInstance = {
-  saveConversation: async (record) => record,
-  get: async (storeName, id) => storeName === 'providerSessions' ? providerSessions.get(id) || null : null,
-  loadProviderSession: async (conversationId) => loadProviderSession(conversationId),
-  loadProviderFrames: async () => [],
-  loadNormalizedMessages: async () => [],
-  saveProviderSession: async (row) => { providerSessions.set(row.id, row); return row; },
-  appendProviderFrame: async (row) => row,
-  saveNormalizedMessage: async (row) => row,
-  appendPresentationEvent: async (conversationId, sequence, event) => {
-    presentationEvents.push({ conversationId, sequence, event });
-  },
-  notePersistenceError: () => {},
+// Patch the canonical singleton's per-call methods: the load goes through
+// the suite's gate hook (C/D/E/F park or fail the prepare exactly there);
+// presentation events are recorded for the task_start ownership checks.
+const { PersistenceServiceInstance } = await import('../src/persistence.js');
+PersistenceServiceInstance.loadProviderSession = (conversationId) => loadProviderSession(conversationId);
+PersistenceServiceInstance.appendPresentationEvent = async (conversationId, sequence, event) => {
+  presentationEvents.push({ conversationId, sequence, event });
+  return event;
 };
 
 let passed = 0;

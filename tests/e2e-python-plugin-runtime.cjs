@@ -245,7 +245,7 @@ async function main() {
     assetBytes.set('__extensions__', await fs.readFile(path.join(__dirname, '..', 'src', 'extensions.js')));
     for (const a of PY_MANIFEST) assetBytes.set(a.name, await loadAsset(a.name));
     // M2a: the worker source comes from the runtime asset module.
-    const workerSrc = require('./helpers/runtime.cjs').PY_WORKER_SOURCE;
+    const workerSrc = require('locus-runtime/worker-assets').PY_WORKER_SOURCE;
 
     pageHtml = buildPage('shell.js', workerSrc, ASSETS + '/',
       wheelBytesBuf.toString('base64'), wheelSha, wheelSize);

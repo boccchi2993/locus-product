@@ -2,17 +2,14 @@
 // close to the durable contracts: invalid replay never reaches a provider,
 // opaque values are not JSON-coerced, credentials are destination-scoped,
 // and a required write failure stops the agent before another model turn.
-const fs = require('fs');
-const path = require('path');
-
-const root = path.join(__dirname, '..');
-const persistenceSrc = fs.readFileSync(path.join(root, 'src', 'persistence.js'), 'utf8');
-const adapterSrc = fs.readFileSync(path.join(root, 'src', 'model-adapters.js'), 'utf8');
-const toolsSrc = fs.readFileSync(path.join(root, 'src', 'tools.js'), 'utf8');
-const agentSrc = fs.readFileSync(path.join(root, 'src', 'agent.js'), 'utf8');
-const P = (0, eval)(persistenceSrc + '\n;({ PersistenceService, validateReplayPrefix, validateNormalizedPrefix });');
-const A = (0, eval)(adapterSrc + '\n;({ OpenAIAdapter, AnthropicAdapter, createCredentialIdentity, createProviderIdentity, normalizeCredentialEndpoint });');
-const G = (0, eval)(toolsSrc + '\n' + agentSrc + '\n;({ AgentSession, AGENT_TOOL_DEFINITIONS });');
+// (M3c integration: persistence.js + the harness transfer layer + tools.js
+// are imported as the REAL ES modules — no eval'd duplicate sources. The
+// endpoint-normalization checks AUD-I1/I2 observe the same normalization
+// through the PUBLIC createProviderIdentity().endpointIdentity — the raw
+// helper became harness-internal.)
+let P = null;
+let A = null;
+let G = null;
 
 let passed = 0;
 let failed = 0;
@@ -52,12 +49,16 @@ function openAiSession(checkpoint) {
 }
 
 async function run() {
-  // Review round F3: the durable-prefix validation ALGORITHMS are Harness
-  // code now (src/harness/replay-validation.js); persistence.js keeps
-  // one-way delegates that resolve the single implementation through the
-  // published table. Evaluate the module once so the audited P.validate*
-  // calls keep exercising the REAL algorithm.
-  await import(require('url').pathToFileURL(path.join(root, 'src', 'harness', 'replay-validation.js')).href);
+  P = await import('../src/persistence.js');
+  A = await import('../src/product/harness-api.js');
+  // M3c integration: persistence.js one-way re-exports the REAL entry
+  // validators (identity with the harness entry — pinned by B's R1), so
+  // the audited P.validate* calls exercise the REAL algorithm without the
+  // old src/harness eval import.
+  G = {
+    AgentSession: A.AgentSession,
+    AGENT_TOOL_DEFINITIONS: (await import('../src/tools.js')).AGENT_TOOL_DEFINITIONS,
+  };
   // ---------- F-05: the raw prefix is a validated protocol boundary ----------
   {
     const good = openAiSession(2);
@@ -237,9 +238,14 @@ async function run() {
   }
 
   {
-    const normalized = A.normalizeCredentialEndpoint;
-    check('AUD-I1 endpoint identity normalizes scheme/host/default port/slashes', normalized('HTTPS://API.Example.COM:443/v1///') === 'https://api.example.com/v1');
-    check('AUD-I2 endpoint path participates in identity', normalized('https://api.example.com/team-a') !== normalized('https://api.example.com/team-b'));
+    // The raw normalizeCredentialEndpoint helper is harness-internal now;
+    // the PUBLIC provider identity exposes the same normalization.
+    const endpointIdentityOf = (apiBase) =>
+      A.createProviderIdentity({ dialect: 'openai', apiBase, model: 'm' }).endpointIdentity;
+    check('AUD-I1 endpoint identity normalizes scheme/host/default port/slashes',
+      endpointIdentityOf('HTTPS://API.Example.COM:443/v1///') === 'https://api.example.com/v1');
+    check('AUD-I2 endpoint path participates in identity',
+      endpointIdentityOf('https://api.example.com/team-a') !== endpointIdentityOf('https://api.example.com/team-b'));
     const auto = A.createProviderIdentity({ dialect: 'auto', apiBase: 'https://api.example.com/v1///', model: 'm' });
     check('AUD-I3 auto identity records effective dialect', auto.dialect === 'openai' && auto.protocolVersion === 'chat-completions-v1');
     const same = { dialect: 'openai', apiBase: 'HTTPS://API.Example.COM:443/v1///', model: 'm' };

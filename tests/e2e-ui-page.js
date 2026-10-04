@@ -294,7 +294,21 @@
     // ---------- settings / dialect wiring ----------
     L.store.settings.dialect = 'anthropic';
     L.actions.applySettings();
-    check('U34 dialect setting reaches Model', Model.dialect === 'anthropic');
+    // M3c: the legacy Model singleton is deleted — dialect propagation is
+    // observed through the production read path: the applied dialect picks
+    // the ANTHROPIC adapter (the captured request hits /v1/messages).
+    {
+      let capturedUrl = null;
+      L.actions.setProductModelTransport(async (url, init) => {
+        capturedUrl = String(url);
+        return { ok: true, status: 200, headers: { get: () => 'application/json' },
+          text: async () => JSON.stringify({ content: [{ type: 'text', text: 'OK' }], stop_reason: 'end_turn' }) };
+      });
+      await L.actions.testConnection();
+      check('U34 dialect setting reaches the model layer (anthropic adapter selected)',
+        !!capturedUrl && capturedUrl.includes('/v1/messages'), capturedUrl);
+      L.actions.setProductModelTransport(null);
+    }
     L.store.settings.dialect = 'auto';
     L.actions.applySettings();
     L.store.settingsOpen = true;

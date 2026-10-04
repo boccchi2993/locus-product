@@ -29,21 +29,24 @@
 // call and fails loudly without it) is pinned in
 // tests/store-python-lifecycle.test.mjs; the browser e2e skill-instances
 // suite drives the same chain through the built app.
+//
+// M3c integration: the suite drives the REAL installed runtime through its
+// PUBLIC session surface — session.execute({ kind: 'shell' }) — with the
+// Product policy injected per call, exactly as the store's ToolPort does.
+// MP9 disposition: the old section injected a hand-stubbed interpreter
+// (opts.pythonRuntime — no longer public); the shell→python-commit→
+// policy-classification MECHANISM is pinned runtime-side by locus-runtime
+// tests/mutation-policy.test.cjs MP-G7, and this suite keeps the
+// PRODUCT-specific half (which error codes the Locus policy classifies as
+// refusals) as direct policy checks. Real browser python stays gated by
+// the e2e python suites.
 // Run: node tests/mutation-policy.test.cjs
-
-const fs = require('fs');
-const path = require('path');
 
 global.window = { location: { protocol: 'https:' } };
 global.document = { getElementById: () => null };
 
-const src = ['telemetry.js', 'workspace.js', 'vfs.js', 'network.js', 'shell.js', 'tools.js']
-  .map((f) => fs.readFileSync(path.join(__dirname, '..', 'src', f), 'utf8'))
-  .join('\n;\n');
-const M = eval(src + '\n;({ createPythonRuntime, runShellCommand, VirtualWorkspace, MemoryWorkspace, SHELL_COMMANDS });');
-const { freshRuntime } = require('./helpers/runtime.cjs');
-const { LocusMutationPolicy } = eval(
-  fs.readFileSync(path.join(__dirname, '..', 'src', 'mutation-policy.js'), 'utf8') + '\n;({ LocusMutationPolicy });');
+let runtimeApi = null;
+let LocusMutationPolicy = null;
 
 let passed = 0, failed = 0;
 function check(name, cond, detail) {
@@ -53,8 +56,8 @@ function check(name, cond, detail) {
 
 const IDENTITY_MSG = 'Skill instance paths are stable; edit the skill in place, '
   + 'delete the individual skill with approval, or remove/re-add the capability.';
-const policy = LocusMutationPolicy.create();
-const bare = () => new M.VirtualWorkspace({ listCommands: () => Object.keys(M.SHELL_COMMANDS) });
+let policy = null;   // created in run() after the imports
+const bare = () => runtimeApi.createWorkspace();
 
 async function freshSkillsTree(vfs) {
   await vfs.mkdir('/home/locus/.skills');
@@ -67,11 +70,29 @@ async function freshSkillsTree(vfs) {
 }
 
 async function run() {
+  runtimeApi = await import('../src/product/runtime-api.js');
+  ({ LocusMutationPolicy } = await import('../src/mutation-policy.js'));
+  policy = LocusMutationPolicy.create();
+  // ONE real runtime host + session (the public surface); every section
+  // builds a fresh workspace and injects the policy per call.
+  const host = await runtimeApi.createRuntime({
+    workerAssets: {
+      pyWorkerSource: runtimeApi.runtimeWorkerAssets.PY_WORKER_SOURCE,
+      grepWorkerSource: runtimeApi.runtimeWorkerAssets.GREP_WORKER_SOURCE,
+    },
+  });
+  const session = host.createSession();
+  const shellRun = (cmd, vfs, opts) => session.execute({
+    kind: 'shell', input: cmd,
+    context: Object.assign({ filesystem: vfs }, opts || {}),
+  });
+
+  try {
   // ================= MP1. byte-stable refusal matrix =================
   {
     const vfs = bare();
     await freshSkillsTree(vfs);
-    const run = (cmd) => M.runShellCommand(cmd, vfs, { mutationPolicy: policy });
+    const run = (cmd) => shellRun(cmd, vfs, { mutationPolicy: policy });
 
     const mv1 = await run('mv /home/locus/.skills/cap-a/synthetic-skill.skill /home/locus/renamed.skill');
     check('MP1 mv of a skill instance is refused with the identity contract',
@@ -130,9 +151,9 @@ async function run() {
     };
     // A REAL writable mount (a plain memory provider) guarded by the
     // alternative policy — the custom tree must be a legal VFS target.
-    vfs.mount('/mnt/protected', new M.MemoryWorkspace({ name: 'protected' }), 'read-write');
+    vfs.mount('/mnt/protected', runtimeApi.createMemoryWorkspace({ name: 'protected' }), 'read-write');
     await vfs.write('/mnt/protected/data.txt', 'locked\n');
-    const run = (cmd) => M.runShellCommand(cmd, vfs, { mutationPolicy: other });
+    const run = (cmd) => shellRun(cmd, vfs, { mutationPolicy: other });
 
     const r1 = await run('mv /mnt/protected/data.txt /tmp/work/data.txt');
     check('MP2 the alternative policy is enforced verbatim',
@@ -156,10 +177,10 @@ async function run() {
   {
     const vfs = bare();
     await freshSkillsTree(vfs);
-    const r1 = await M.runShellCommand('mv /home/locus/.skills/cap-a/synthetic-skill.skill /tmp/work/skill.skill', vfs, {});
+    const r1 = await shellRun('mv /home/locus/.skills/cap-a/synthetic-skill.skill /tmp/work/skill.skill', vfs, {});
     check('MP3 without a policy the skills tree is a plain path (generic runtime)',
       !r1.isError && (await vfs.exists('/tmp/work/skill.skill')), JSON.stringify(r1.output));
-    const r2 = await M.runShellCommand('rm -r /home/locus/.skills', vfs, {});
+    const r2 = await shellRun('rm -r /home/locus/.skills', vfs, {});
     check('MP3b rm -r of the skills tree without a policy is VFS-rules-only',
       !r2.isError && !(await vfs.exists('/home/locus/.skills')), JSON.stringify(r2.output));
   }
@@ -168,7 +189,7 @@ async function run() {
   {
     const vfs = bare();
     await freshSkillsTree(vfs);
-    const run = (cmd) => M.runShellCommand(cmd, vfs, { mutationPolicy: policy });
+    const run = (cmd) => shellRun(cmd, vfs, { mutationPolicy: policy });
 
     const spellings = [
       'mv /home/locus/.skills/../.skills/cap-a/synthetic-skill.skill /tmp/work/x.skill',
@@ -185,12 +206,12 @@ async function run() {
     }
 
     // Relative paths against an explicit cwd are resolved by the shell.
-    const r5 = await M.runShellCommand('cd /home/locus && mv .skills/cap-a/synthetic-skill.skill /tmp/work/x.skill', vfs,
+    const r5 = await shellRun('cd /home/locus && mv .skills/cap-a/synthetic-skill.skill /tmp/work/x.skill', vfs,
       { mutationPolicy: policy });
     check('MP4b a relative path into the skills tree is refused after resolution',
       r5.isError && r5.output === 'mv: .skills/cap-a/synthetic-skill.skill: ' + IDENTITY_MSG,
       JSON.stringify(r5.output));
-    const r6 = await M.runShellCommand('cd /home/locus/.skills/cap-a/sub && rm -r ../../../.skills', vfs,
+    const r6 = await shellRun('cd /home/locus/.skills/cap-a/sub && rm -r ../../../.skills', vfs,
       { mutationPolicy: policy });
     check('MP4c .. traversal out of a nested cwd still lands on the skills root',
       r6.isError && r6.output === 'rm: refusing to remove capability skill directory: /home/locus/.skills. ' + IDENTITY_MSG,
@@ -201,7 +222,7 @@ async function run() {
   {
     const vfs = bare();
     await freshSkillsTree(vfs);
-    const run = (cmd) => M.runShellCommand(cmd, vfs, { mutationPolicy: policy });
+    const run = (cmd) => shellRun(cmd, vfs, { mutationPolicy: policy });
 
     // mv INTO a directory appends the basename — the FINAL target is under
     // the skills tree, so the refusal fires on the resolved destination.
@@ -234,7 +255,7 @@ async function run() {
   {
     const vfs = bare();
     await freshSkillsTree(vfs);
-    const run = (cmd) => M.runShellCommand(cmd, vfs, { mutationPolicy: policy });
+    const run = (cmd) => shellRun(cmd, vfs, { mutationPolicy: policy });
     const r = await run('rm /home/locus/.skills/cap-a/synthetic-skill.skill');
     check('MP6 a single declared skill FILE is not refused by the policy (per-file guard owns it)',
       !r.isError && !(await vfs.exists('/home/locus/.skills/cap-a/synthetic-skill.skill')),
@@ -245,7 +266,7 @@ async function run() {
   {
     const vfs = bare();
     await freshSkillsTree(vfs);
-    const run = (cmd) => M.runShellCommand(cmd, vfs, { mutationPolicy: policy });
+    const run = (cmd) => shellRun(cmd, vfs, { mutationPolicy: policy });
     const r1 = await run('mv /home/locus/notes.txt /tmp/work/notes.txt');
     check('MP7 ordinary mv is untouched', !r1.isError && (await vfs.exists('/tmp/work/notes.txt')), JSON.stringify(r1.output));
     const r2 = await run('rm -r /tmp/work');
@@ -260,7 +281,7 @@ async function run() {
   {
     const vfs = bare();
     await freshSkillsTree(vfs);
-    const run = (cmd) => M.runShellCommand(cmd, vfs, { mutationPolicy: policy });
+    const run = (cmd) => shellRun(cmd, vfs, { mutationPolicy: policy });
     const r1 = await run('rm -r /home/locus');
     check('MP8 the protected-root refusal stays a RUNTIME check (never the policy)',
       r1.isError && r1.output.startsWith('rm: refusing to recursively remove protected path: /home/locus'),
@@ -272,7 +293,7 @@ async function run() {
     check('MP8b skill paths get the identity refusal first (original check order preserved)',
       r2.isError && r2.output === 'mv: /home/locus/.skills: ' + IDENTITY_MSG, JSON.stringify(r2.output));
     // The geometric rule itself stays runtime-owned for non-skill trees.
-    vfs.mount('/mnt/area', new M.MemoryWorkspace({ name: 'area' }), 'read-write');
+    vfs.mount('/mnt/area', runtimeApi.createMemoryWorkspace({ name: 'area' }), 'read-write');
     await vfs.write('/mnt/area/keep.txt', 'x\n');
     const r3 = await run('mv /mnt/area /mnt/area/inside');
     check('MP8c mount-root protection is still the runtime\'s refusal',
@@ -280,46 +301,25 @@ async function run() {
       JSON.stringify(r3.output));
   }
 
-  // ============ MP9. isPolicyRefusal in the python commit phase =========
+  // ============ MP9. the PRODUCT policy's refusal classification =========
+  // (M3c integration: the shell→python-commit→classification MECHANISM is
+  // pinned runtime-side by locus-runtime MP-G7 with the same fake-worker
+  // technique — interpreter injection is no longer public surface, and
+  // real browser python is the e2e gates' job. This suite keeps the
+  // PRODUCT-specific half: WHICH error codes the Locus policy reports as
+  // its own refusals, consulted by the runtime's commit phase.)
   {
-    const rt = freshRuntime(M);
-    rt._ensureWorker = async () => {};
-    rt.worker = {
-      postMessage(msg) {
-        const p = rt._pending.get(msg.id);
-        queueMicrotask(() => {
-          clearTimeout(p.timer);
-          rt._pending.delete(msg.id);
-          p.resolve({
-            stdout: '', stderr: '', error: null,
-            files: [{ path: '/home/locus/out.txt', b64: Buffer.from('written by python', 'utf8').toString('base64') }],
-            deleted: [],
-          });
-        });
-      },
-    };
-    const refusingProvider = {
-      name: 'refusing',
-      async list() { return []; },
-      async readBytes(p) { const e = new Error('no such file: ' + p); e.name = 'NotFoundError'; throw e; },
-      async write(p) { const e = new Error('declined by the user'); e.code = 'skill_mutation_declined'; throw e; },
-      async exists() { return false; },
-      async stat() { const e = new Error('no such file'); e.name = 'NotFoundError'; throw e; },
-    };
-    const vfs = bare();
-    vfs.mount('/home/locus', refusingProvider, 'read-write');
+    const declined = Object.assign(new Error('declined by the user'), { code: 'skill_mutation_declined' });
+    const plain = Object.assign(new Error('disk full'), { code: 'quota_exceeded' });
+    check('MP9 the policy classifies the declined-mutation family as its own refusal',
+      policy.isPolicyRefusal(declined) === true, JSON.stringify({ code: declined.code }));
+    check('MP9b an ordinary write error is NOT a policy refusal (plain failure, never a conflict)',
+      policy.isPolicyRefusal(plain) === false && policy.isPolicyRefusal(new Error('nope')) === false,
+      'plain errors must fall through to the honest write-failure report');
+  }
 
-    const withPolicy = await M.runShellCommand("python -c 'x'", vfs, { mutationPolicy: policy, pythonRuntime: rt });
-    check('MP9 a policy-family error is reported as a REFUSED conflict (with policy)',
-      withPolicy.isError && withPolicy.output.includes('conflict: /home/locus/out.txt')
-        && withPolicy.output.includes('declined by the user'),
-      JSON.stringify(withPolicy.output));
-
-    const withoutPolicy = await M.runShellCommand("python -c 'x'", vfs, { pythonRuntime: rt });
-    check('MP9b without the policy the same error is a plain write failure',
-      withoutPolicy.isError && withoutPolicy.output.includes('write-back failed: /home/locus/out.txt')
-        && !withoutPolicy.output.includes('conflict:'),
-      JSON.stringify(withoutPolicy.output));
+  } finally {
+    await host.dispose('mutation-policy suite end');
   }
 
   console.log('\n' + passed + ' passed, ' + failed + ' failed');
