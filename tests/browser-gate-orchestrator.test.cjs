@@ -216,13 +216,14 @@ function captureErrors(store) {
 
 const tests = [];
 
-tests.push(['registry: default suite list unchanged', async () => {
+tests.push(['registry: default suite list (14 original + review-round registrations)', async () => {
   const expected = [
     'e2e-ui.cjs', 'e2e-responsive.cjs', 'e2e-grep.cjs', 'e2e-approval.cjs',
     'e2e-network.cjs', 'e2e-capabilities.cjs', 'e2e-image.cjs',
     'e2e-skill-instances.cjs', 'e2e-persistence.cjs', 'e2e-wire.cjs',
     'e2e-product-joint.cjs', 'e2e-runtime-host.cjs', 'e2e-harness-host.cjs',
     'e2e-m3c-storage-adapters.cjs',
+    'e2e-m3c-storage-built.cjs', 'e2e-m3c-python-integration.cjs',
   ];
   check('default list intact', JSON.stringify(SUITES) === JSON.stringify(expected), JSON.stringify(SUITES));
   check('empty request -> full list', JSON.stringify(require('./helpers/browser-gate-suites.cjs').resolveSuites([]).suites) === JSON.stringify(expected));

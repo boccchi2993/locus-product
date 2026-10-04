@@ -21,6 +21,10 @@ const SUITES = [
   'e2e-runtime-host.cjs',
   'e2e-harness-host.cjs',
   'e2e-m3c-storage-adapters.cjs',
+  // Review-round registrations (D wiring): C's packaged-build storage gate
+  // and B's python product-integration gate.
+  'e2e-m3c-storage-built.cjs',
+  'e2e-m3c-python-integration.cjs',
 ];
 
 // Resolve requested suite names against the registry. Returns the run list

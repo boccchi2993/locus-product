@@ -25,6 +25,9 @@ const SUITES = [
   'attachments.test.cjs',
   'capabilities.test.cjs',
   'chrome-helper.test.cjs',
+  // M3c review A: browser-gate orchestrator fault-path suite (real-preview
+  // test stays gated behind BROWSER_GATE_ORCH_REAL_PREVIEW=1).
+  'browser-gate-orchestrator.test.cjs',
   // M3c integration: the three parallel agents' dedicated gates (D wiring).
   'm3c-runtime-adapter.test.mjs',
   'm3c-storage-adapters.test.mjs',
