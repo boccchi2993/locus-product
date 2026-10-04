@@ -137,13 +137,25 @@ expectation.
 ## 5. Verification evidence
 
 - `npm ci` → `vite build` → **`node tests/e2e-m3c-python-integration.cjs`
-  → 55 passed, 0 failed** (run 4, 2026-10-04, warm asset cache; wall
-  clock ≈ 3.5 min including the build). Every suite total held: exactly
-  ONE probe-server dispatch across the whole gate (the B-NET1 allow
-  control), every intercepted asset URL a pinned manifest name, zero page
-  errors.
+  → 55 passed, 0 failed** — final run executed on the EXACT pushed bytes
+  after the line-ending normalization below (run 5, 2026-10-04, warm
+  asset cache; wall clock ≈ 3.5 min including the build; exit 0). Every
+  suite total held: exactly ONE probe-server dispatch across the whole
+  gate (the B-NET1 allow control), every intercepted asset URL a pinned
+  manifest name, zero page errors.
+- **Unit gate re-verified on this branch: `npm test` → all 24 suites
+  passed** (matches the M3c-D integration record). One environment
+  episode is recorded honestly: on the FIRST fresh clone the unit gate
+  reported `m3c-runtime-adapter` RA1 failing — root-caused to the
+  documented Windows `core.autocrlf=true` checkout artifact (the repo
+  blob is LF; the working tree materialized CRLF and RA1's exact-line
+  source audit matched the trailing `\r`). The clone was normalized
+  (`core.autocrlf false` + re-checkout); the failure disappeared with
+  ZERO source changes. It never affected the browser gate (55/55 passed
+  both before and after normalization — the gate's assertions match
+  URLs/outputs, not source lines).
 - Real Pyodide CDN record (B-CDN line): run 1 downloaded **8 of 12 assets
-  from cdn.jsdelivr.net** (4 disk-cache hits); runs 2–4 were fully served
+  from cdn.jsdelivr.net** (4 disk-cache hits); runs 2–5 were fully served
   from the warmed cache. The CDN was reachable — NOT an environment
   blockage. The bootstrap scenarios themselves run on locally served,
   manifest-verified bytes for determinism; J2 in the product-joint gate
@@ -175,6 +187,23 @@ expectation.
      codes mark different cancellation points (prepare-phase vs
      a tool already executed), and the honest-committed semantics is the
      stronger assertion for a mid-execution cancel.
+
+## 5a. Remote push record (transport outage fallback)
+
+`git push` to github.com failed repeatedly with `Recv failure: Connection
+was reset` / connect timeouts (the known git-transport RST outage), and
+SSH was unavailable in this environment. The documented fallback was
+used: the five blobs, the tree (`2f5788deb3d6469c66490247fa4560576f208b4a`
+— byte-identical to the locally committed tree), the commit and the ref
+were created through the GitHub API
+(`refs/heads/fix/m3c-review-python-gates` @
+`91be96df39d45e908052321137c4085456f15bb7`, parent exactly
+`b7da804fd24e64c2fb1b3c82b69070d4c55cb31e`). The API commit equals the
+local commit except the trailing message newline the API strips; the
+local object was reconstructed byte-exactly (same object hash), the local
+branch and remote-tracking ref were aligned to `91be96df`, and the
+working tree is clean. Verified via API after creation: branch head =
+`91be96df`, parent = `b7da804`, tree = `2f5788de`.
 
 ## 6. Registration (integration D)
 
