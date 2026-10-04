@@ -7,7 +7,11 @@ verification results, and the residuals. It implements the M3c switch on
 top of `refactor/m3c-base`; **no PR is merged, nothing is published, no
 deploy** — the base PR and every agent PR stay OPEN.
 
-Established: 2026-10-04.
+Established: 2026-10-04. Review-round integration (A/B/C fixes) recorded
+2026-10-05 in [M3C-REVIEW-VERIFICATION.md](M3C-REVIEW-VERIFICATION.md);
+that document also corrects two §5 statements made here (the
+"packaged 14/14" storage claim and the orchestrator retry sentence) —
+the original wording below is kept as history, with inline markers.
 
 ## 1. Fixed inputs (verified reachable before work started)
 
@@ -187,6 +191,9 @@ compatibility negatives; zero page errors), runtime-host (22),
 harness-host (12), m3c-storage-adapters (23). First-failure evidence for
 every suite fixed along the way is preserved in the integration commit
 messages and was never overwritten by a later rerun.
+[Corrected 2026-10-05: at this head `e2e-m3c-storage-adapters.cjs` was a
+SOURCE-ESM browser test, not a packaged-build gate — see
+M3C-REVIEW-C.md §1 and the §5a corrections below.]
 
 Real-browser interaction walkthrough (in-app browser, wire-mode fake
 transport — no real model/relay/key contacted): cold start (app shell +
@@ -209,6 +216,10 @@ timeout flake remain separately tracked; neither was assumed resolved
 here. The browser-gate run surfaced one CDP readiness failure caused by
 a zombie preview process holding the port — an environment fault
 (orchestrator tree-kill added), not a product failure.
+[Annotated 2026-10-05: the port-holder fact was directly observed, but
+the described remedy is superseded — review A rebuilt the orchestrator
+(bind-probe refusal + build-identity readiness + owned-process cleanup);
+no retry exists. E3 SystemError stays UNROOT-CAUSED.]
 
 Clean-checkout gate: fresh local clone → `npm ci` → build → full suite →
 14/14 browser gates. It caught one real integration defect (a comment
@@ -226,6 +237,50 @@ the PR run of the SAME commit was fully green — environment, not
 product; the orchestrator now retries a failed suite once with the
 first failure preserved in the log, and CI exports the runner's Chrome
 explicitly (commit c0d1503).
+[Corrected 2026-10-05: (1) the "environment, not product" root-cause
+label is RETRACTED as unproven — the same-commit-green observation
+supports only "not deterministic at that commit", nothing more; (2) the
+retry sentence described the pre-review-A orchestrator and is now FALSE:
+review A deleted the auto-retry — each suite runs exactly once, the
+first failure is the run's final verdict. See §5a.]
+
+### 5a. Review-round corrections (2026-10-05)
+
+The review-fix integration (branches `fix/m3c-review-orchestrator` /
+`fix/m3c-review-python-gates` / `fix/m3c-review-storage-build`, all cut
+from this branch's head `b7da804`) landed here and with it three
+corrections to §5 above. The original wording is preserved for history;
+the full evidence lives in
+[M3C-REVIEW-VERIFICATION.md](M3C-REVIEW-VERIFICATION.md):
+
+1. The "**14/14** packaged" sentence overstated the storage suite: at
+   that head it was a SOURCE-ESM browser test. The packaged-artifact gate
+   for storage is `e2e-m3c-storage-built.cjs` (review C), registered
+   alongside the source gate — both run, each reported under its own name;
+   the source gate is never counted as packaged proof.
+2. The orchestrator description "retries a failed suite once" is
+   superseded: review A DELETED the auto-retry. Each suite runs exactly
+   once; the first failure is the run's final verdict; unknown suite names
+   are a hard usage error; only processes the run owns are cleaned up.
+3. The "environment, not product" root-cause label for the CDP
+   cold-start readiness flake is retracted as unproven — what was
+   observed is only that the same commit was green on the PR run; no
+   environment root cause was established. The E3 Pyodide SystemError
+   stays independently tracked (rooted/fixed in the source repo during
+   F04a; no product-side claim is made).
+
+Post-integration verification on this branch: orchestrator fault-path
+13/13 (incl. the real-preview gated run), unit gate 25/25, all 16
+registered browser gates green in ONE single-retry-free round
+(source storage 24, packaged storage 27+2 self-proof, python
+integration 55). The fresh clean-checkout chain re-verified unit 25/25
+(after a documented CRLF checkout artifact, zero source changes) and
+passed 15/16 browser suites, with ONE recorded intermittent failure —
+the python gate's B-PY1 error-text assertion (security properties held:
+honest failure + zero dispatch; E3 family, root cause UNDETERMINED,
+failed round preserved; a standalone diagnostic run passed 55/55) —
+all recorded with commands, exit codes and logs in
+M3C-REVIEW-VERIFICATION.md §4.
 
 ## 6. Residuals / M4 (explicitly NOT done here)
 
