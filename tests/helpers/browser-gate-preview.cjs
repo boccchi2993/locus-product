@@ -95,12 +95,20 @@ function httpGet(url, timeoutMs = 2000) {
 // Kill a process TREE we own (the pid and everything it spawned). On
 // Windows spawn() without a shell gives us the real root pid, so
 // taskkill /T is exact — and it is per-tree, never per-port.
+// On POSIX the whole tree shares the group of the spawned root (every
+// spawn in this module sets detached, making the root its own group
+// leader), so a negative pid reaches the tree; the single-process
+// fallback covers a pid that is not a group leader (e.g. a fixture that
+// never opted into a group) — a bare root kill is then the honest best
+// effort and the caller's verified-exit check still reports the truth.
 function killTree(pid) {
   if (process.platform === 'win32') {
     const r = spawnSync('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
     return !r.error && r.status === 0;
   }
-  try { process.kill(pid, 'SIGTERM'); } catch (e) { return false; }
+  try { process.kill(-pid, 'SIGTERM'); } catch (groupErr) {
+    try { process.kill(pid, 'SIGTERM'); } catch (singleErr) { return false; }
+  }
   return true;
 }
 
@@ -154,7 +162,9 @@ function startPreview({ cwd, port, buildToken = null } = {}) {
   const child = spawn(
     process.execPath,
     [viteEntry(cwd), 'preview', '--port', String(port), '--strictPort', '--host', '127.0.0.1'],
-    { cwd, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true },
+    // POSIX: own process group, so killTree's negative pid reaches the
+    // whole tree. Windows keeps the reviewed flags (taskkill /T is exact).
+    { cwd, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, detached: process.platform !== 'win32' },
   );
   let output = '';
   const tail = (c) => {

@@ -41,16 +41,19 @@ Fixed dependencies (unchanged, resolved exactly by `npm ci` + `npm ls`):
 In the `refactor/m3c-integration` worktree, in A → B → C order, all four
 commits cherry-picked with **zero conflicts** (the branches' file sets are
 disjoint: A owns the orchestrator, B owns the python gate, C owns the
-storage pair + one `vite.config.js` input):
+storage pair + one `vite.config.js` input). Pushed commit chain (SHAs as
+on the remote — see §6 for the push mechanism; file/tree bytes are the
+cherry-picked ones, commit metadata is UTC-normalized by the push recipe):
 
-| Integration commit | Origin | Content |
+| Pushed commit | Origin | Content |
 |---|---|---|
-| `f7568ea3bfa6f8b3734c0d3bda8adb577e724647` | A `8a3848c1` | single-run orchestrator + owned preview lifecycle + fault-path suite |
-| `7ce732c5661b2c7100d9c73ffbee6b21b125191a` | B `91be96df` | python product-integration browser gate (55 checks) + servers/fixtures |
-| `3686a4bbaf4d6db63d66ea893069f13f3eaa545b` | B `655f1f19` | B evidence/push record doc |
-| `b0d040b25ad3bac92f164ccbe6e22e7e59ea9265` | C `fdcd0393` | storage packaged-build gate + shared engine/check table |
-| `1ff69248004a949d03801a5771ba5ea934ce1248` | D wiring (this round) | suite registration, see §3 |
-| *(final docs commit of this round)* | D docs (this round) | this document + M3C-D-INTEGRATION.md §5a corrections |
+| `a1a511aae25eb68dc6274aaafbb83cbac4780aea` | A `8a3848c1` | single-run orchestrator + owned preview lifecycle + fault-path suite |
+| `5b84de09daed602a5cf80f91505a03c0ecf59e2e` | B `91be96df` | python product-integration browser gate (55 checks) + servers/fixtures |
+| `eb443f532a5045057d771b51a94b7323cf08203d` | B `655f1f19` | B evidence/push record doc |
+| `0b03dd8ef2dd6d840192b327f37e23291239c9f3` | C `fdcd0393` | storage packaged-build gate + shared engine/check table |
+| `a8e41f331799310f8255d28b65b699f3718ca7db` | D wiring (this round) | suite registration, see §3 |
+| `a4c84de9c27d5830c6f8a237ddf27ae88c46931f` | D docs (this round) | this document + M3C-D-INTEGRATION.md §5a corrections |
+| *(this commit)* | D CI-fix (this round) | POSIX tree-kill fix caught by CI (§6) + this record |
 
 No force push anywhere; the remote branch only moves forward. A/B/C
 histories untouched.
@@ -74,7 +77,7 @@ histories untouched.
   whose CLI contract review A kept while replacing the internals with the
   single-run orchestrator helpers. Verified by reading the refactored CLI
   (thin wrapper over `browser-gate-runner.cjs`) and by the CI runs on the
-  pushed head (§4 step 7).
+  pushed heads (§6).
 
 ## 4. Verification sequence (results, first results preserved)
 
@@ -307,26 +310,54 @@ correction markers, and a new §5a summarizes:
    appeared; the item stays independently tracked — no product-side
    resolution is claimed here.
 
-## 6. Push + final CI
+## 6. Push + CI record
 
-Push record: `refactor/m3c-integration` is pushed to
-boccchi2993/locus-product as a fast-forward (no force, no history
-rewrite). The three input branch heads were re-read from the remote
-immediately before the push and were byte-identical to §1 — nothing
-moved underneath this round.
+**Push mechanism.** git's HTTPS transport to github.com was down for the
+whole session (connect timeouts, the recurring outage; `gh api` still
+worked). The three input branch heads were re-verified LIVE through the
+API immediately before the push (byte-identical to §1; the target branch
+still at the baseline `b7da804`), then the six commits were pushed
+through the documented Git Data API fallback: each local commit rebuilt
+as a byte-blueprint (message trailing newlines stripped, dates in
+`<unix> +0000` form — the API's canonical commit bytes), then uploaded
+object-by-object — 24 blobs (every SHA verified equal to the local
+object), 6 trees (every SHA byte-identical), 6 commits (every SHA equal
+to the rebuilt local object) — and finally a NON-FORCED ref update
+(`PATCH`, `b7da804` → `a4c84de9`). Trees and file bytes on the remote
+are exactly the cherry-picked/wired bytes; only commit-metadata bytes
+differ from the pre-push local objects, so the remote SHAs (§2) are
+UTC-normalized twins of the local ones.
 
-A commit cannot contain its own hash, so this file pins the
-**code-freeze point** and delegates the moving parts:
+**CI first failure on the first pushed head (kept; runs 37224450842
+push / 37224454061 pull_request):** the unit job FAILED — the newly
+registered `browser-gate-orchestrator.test.cjs` reported
+`13 passed, 1 skipped, 2 FAILED` on ubuntu, with `CHECK FAIL: grandchild
+dead` and `CHECK FAIL: grandchild port released`. Root cause, read
+directly from the CI log and the code: A's `killTree` POSIX branch
+signaled only the root pid (`process.kill(pid, 'SIGTERM')`), so a
+spawned grandchild survived — Windows was exact (`taskkill /T`), which
+is why both local runs were green. This is a REAL Linux defect in the
+review deliverable, caught by exactly the registration §3 made (the
+same mechanism would also have let a timed-out suite's own children,
+e.g. headless Chrome, survive on POSIX). The two failed CI runs stand
+as the first-failure record.
 
-- every code-level result in §4 was produced against the tree of
-  `1ff69248004a949d03801a5771ba5ea934ce1248` (the D wiring commit);
-- the commits after it are documentation only (`docs/*.md`: this file
-  and the M3C-D-INTEGRATION.md corrections) — no test, source, config
-  or CI file differs between the freeze point and the pushed head;
-- the exact pushed head SHA and the CI run IDs for that exact head are
-  recorded in the PR #5 description (a CI run can only exist after the
-  push; the PR body is the non-git record tying head to runs). If the
-  branch moves after review, newer runs supersede those.
+**Fix (same commit as this record; POSIX-only, Windows flags untouched;
+no assertion changed, no timeout changed):** `killTree` now signals the
+whole process group (`-pid`) on POSIX, falling back to the single pid
+when the target is not a group leader; every process the orchestrator
+owns — preview, suite subprocess, and the test's own fixtures — is
+spawned `detached` on POSIX so the root is its own group leader and the
+negative pid reaches the tree. Local Windows regression after the fix:
+`13 passed, 1 skipped, no failures` and, gated, `13 passed, 0 skipped,
+no failures` (real vite build → readiness identity → verified shutdown
+→ port released). Linux proof comes from the CI run on the final head
+(below) — it cannot be produced locally on this Windows machine.
+
+**Final head + CI.** A commit cannot contain its own hash: the exact
+final pushed head SHA and the CI run IDs for that exact head are
+recorded in the PR #5 description (the non-git record tying head to
+runs). If the branch moves after review, newer runs supersede those.
 
 ## 7. Not verified here / residuals
 

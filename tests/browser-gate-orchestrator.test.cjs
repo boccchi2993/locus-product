@@ -169,6 +169,7 @@ function makeRealServerPreview(port, tokenMode) {
     env: { ...process.env, FIX_PORT: String(port), FIX_TOKEN_MODE: tokenMode },
     stdio: 'ignore',
     windowsHide: true,
+    detached: process.platform !== 'win32',
   }), 'fixture-server(port ' + port + ')');
   let exitInfo = null;
   const exited = new Promise((resolve) => {
@@ -351,6 +352,7 @@ tests.push(['busy port: refuse to run, foreign fixture untouched (real)', async 
     env: { ...process.env, FIX_PORT: String(port), FIX_TOKEN_MODE: 'match' },
     stdio: 'ignore',
     windowsHide: true,
+    detached: process.platform !== 'win32',
   }), 'foreign-fixture(port ' + port + ')');
   let foreignExit = null;
   foreign.once('exit', (code) => { foreignExit = code; });
@@ -470,6 +472,7 @@ tests.push(['real tree-kill: grandchild port released (real cleanup)', async () 
     env: { ...process.env, FIX_PORT: String(port), FIX_TOKEN_MODE: 'match' },
     stdio: 'ignore',
     windowsHide: true,
+    detached: process.platform !== 'win32',
   }), 'parent-with-child(port ' + port + ')');
   await withTimeout(waitUntilResponding(port, 10000, 'parent/child fixture startup'), TEST_TIMEOUT_MS, 'tree fixture up');
 

@@ -278,9 +278,14 @@ integration 55). The fresh clean-checkout chain re-verified unit 25/25
 passed 15/16 browser suites, with ONE recorded intermittent failure —
 the python gate's B-PY1 error-text assertion (security properties held:
 honest failure + zero dispatch; E3 family, root cause UNDETERMINED,
-failed round preserved; a standalone diagnostic run passed 55/55) —
-all recorded with commands, exit codes and logs in
-M3C-REVIEW-VERIFICATION.md §4.
+failed round preserved; a standalone diagnostic run passed 55/55).
+CI then caught a REAL Linux defect in the registered orchestrator
+deliverable: killTree's POSIX branch killed only the root pid, so a
+spawned grandchild survived (runs 37224450842/37224454061 preserved);
+fixed POSIX-only in this round (process-group signal + detached
+spawns; no assertion or timeout changed), Windows regression green.
+All recorded with commands, exit codes and logs in
+M3C-REVIEW-VERIFICATION.md §4 and §6.
 
 ## 6. Residuals / M4 (explicitly NOT done here)
 

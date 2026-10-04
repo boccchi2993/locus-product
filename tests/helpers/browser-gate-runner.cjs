@@ -40,7 +40,9 @@ function runSuiteProcess(suitePath, timeoutMs = DEFAULT_SUITE_TIMEOUT_MS) {
   return new Promise((resolve) => {
     let child;
     try {
-      child = spawn(process.execPath, [suitePath], { stdio: 'inherit', windowsHide: true });
+      // POSIX: own process group, so a timeout killTree(-pid) reaches the
+      // suite's own children (e.g. headless Chrome), not just the suite.
+      child = spawn(process.execPath, [suitePath], { stdio: 'inherit', windowsHide: true, detached: process.platform !== 'win32' });
     } catch (e) {
       resolve({ ok: false, kind: 'spawn-error', error: e });
       return;
