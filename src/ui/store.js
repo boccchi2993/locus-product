@@ -789,8 +789,18 @@ function handleRuntimeEvent(event) {
 }
 
 // M2b: the agent session resolves through the HARNESS public entry.
-export const session = createAgentSession({
-  modelClient: wiredModelClient,
+export const session = (() => {
+  // Test/demo injection seam (same family as the hooks toolExecutor /
+  // modelClient ports): window.__LOCUS_HOOKS__.sessionFactory stands in
+  // for the REAL createAgentSession in Node suites that pin the STORE's
+  // event routing with a scriptable session fake. Production builds
+  // never set it — the real harness session below is the only path.
+  const h = hooks();
+  const createSession = (h && typeof h.sessionFactory === 'function')
+    ? h.sessionFactory
+    : createAgentSession;
+  return createSession({
+    modelClient: wiredModelClient,
   // M2b: the session consumes the PRODUCT ToolPort (definitions snapshot
   // + execution); the description port adapts the runtime's public
   // describeCommands(); the Locus behavior notes come from product-prompt.
@@ -802,7 +812,8 @@ export const session = createAgentSession({
   // inside it dies: globals/modules/tmp — verified assets and the session
   // object survive), the SAME session task preparation configured.
   onSessionReset: () => { const s = ensureRuntimeSession(); if (s) s.reset(); },
-});
+  });
+})();
 
 // ---------- harness task runner (M1a) ----------
 // Owns admission, the task-lifetime controller, prepare→run→settle
@@ -2050,3 +2061,11 @@ persistenceBootPromise.then(
   () => { persistenceBootComplete = true; },
   () => { persistenceBootComplete = true; },
 );
+
+// Test/e2e seam: resolves when the module-scope persistence boot has
+// settled (settings/credential hydration, durable conversation restore).
+// submit() already holds every task behind this barrier internally; Node
+// suites read it to capture post-boot state (e.g. the restored
+// conversations array) instead of racing it. Production page code never
+// needs it.
+export { persistenceBootPromise as whenBooted };

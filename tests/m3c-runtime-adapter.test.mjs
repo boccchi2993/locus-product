@@ -12,7 +12,9 @@
 //        under the runtimeWorkerAssets namespace;
 //   RA2  repo-wide specifier audit: no `locus-runtime` import outside
 //        runtime-api.js; A's files import nothing local (no src/runtime,
-//        no src/shell, no require);
+//        no src/shell, no require). M3c integration: tools.js imports
+//        EXACTLY the Product telemetry module (A's recorded §3 follow-up
+//        — D converted telemetry.js to ESM);
 //   RA3  executeTool stays the ONLY tool route: bash goes through the
 //        injected opts.runtimeSession.execute, never a local shell call;
 //   T1   real shell write + read back through executeTool (UTF-8 io
@@ -88,11 +90,13 @@ async function stayedUnsettled(flagObj, turns = 25) {
   return flagObj.settled === false;
 }
 
-// The REAL Product telemetry helpers, loaded exactly as the product page
-// loads them (src/telemetry.js publishes the two names used by tools.js).
-// No copy is created here — this binds tools.js's free identifiers to the
-// SAME Product-owned implementations the page uses.
-(0, eval)(readSrc('src', 'telemetry.js') + '\n;null');
+// The REAL Product telemetry module, imported the same way the product
+// graph now does (M3c integration: src/telemetry.js is an ES module and
+// tools.js imports { Telemetry, utf8ByteLength } from it statically —
+// A's recorded §3 follow-up, performed by D). No copy is created here —
+// this binds the page-default sink to the SAME Product-owned
+// implementations.
+await import('../src/telemetry.js');
 
 // ---------- the REAL production pieces under test ----------
 const runtimeApi = await import('../src/product/runtime-api.js');
@@ -185,20 +189,22 @@ async function run() {
   {
     const toolsSrc = codeOf(readSrc('src', 'tools.js'));
     const policySrc = codeOf(readSrc('src', 'mutation-policy.js'));
-    check('RA2 tools.js imports nothing (no core import, no local shell/core, no require)',
-      !/(^|\n)\s*import\s|\brequire\s*\(/.test(toolsSrc)
+    const toolImports = [...toolsSrc.matchAll(/(?:^|\n)\s*import\s+[^;]*?from\s+'([^']+)'/g)].map((m) => m[1]);
+    check('RA2 tools.js imports ONLY the Product telemetry module (no core import, no local shell/core, no require)',
+      !/\brequire\s*\(/.test(toolsSrc)
         && !toolsSrc.includes('locus-runtime') && !toolsSrc.includes('src/runtime')
-        && !toolsSrc.includes('runShellCommand'),
-      'free identifiers: utf8ByteLength/Telemetry (telemetry.js publishes), performance (platform)');
+        && !toolsSrc.includes('runShellCommand')
+        && toolImports.length === 1 && toolImports[0] === './telemetry.js',
+      'imports: ' + JSON.stringify(toolImports));
     check('RA2 mutation-policy.js imports nothing and references no core',
       !/(^|\n)\s*import\s|\brequire\s*\(/.test(policySrc)
         && !policySrc.includes('locus-runtime') && !policySrc.includes('src/runtime'),
       'the policy is self-contained Product knowledge');
     check('RA3 executeTool routes bash ONLY through the injected runtimeSession.execute',
       toolsSrc.includes('runtimeSession.execute')
-        && !toolsSrc.includes("from '")
+        && toolImports.every((spec) => spec === './telemetry.js')
         && /throw new Error\('bash: no runtime session injected'\)/.test(toolsSrc),
-      'no local shell shortcut, no import-based fallback');
+      'no local shell shortcut, no import-based fallback (the one telemetry import is RA2-pinned)');
 
     // Repo-wide: no product file may import the package outside the api file.
     const { readdirSync, statSync } = await import('node:fs');

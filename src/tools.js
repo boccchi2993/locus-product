@@ -17,17 +17,17 @@
 //  rename imports, never symbols:
 //    export AGENT_TOOL_DEFINITIONS   (store.js ToolPort definitions)
 //    export executeTool              (store.js / main.js e2e seam)
-//  Free-identifier audit (M3C-PARALLEL-HANDOFF §4/§6 item 6): the file
-//  imports NOTHING. Its only non-local references are
-//    utf8ByteLength, Telemetry — the Product-owned copies published by
-//      src/telemetry.js (same global bindings the classic chain used;
-//      when D converts telemetry.js to ESM these become static imports
-//      of it — never a third copy), and
-//    performance — the platform global.
+//  Import surface (M3c integration, agent D — A's recorded §3 follow-up):
+//  the file imports ONLY the Product telemetry module it already
+//  consumed as page globals (utf8ByteLength, Telemetry from
+//  ./telemetry.js — the same Product-owned copies, now static imports;
+//  never a third copy). performance remains the platform global.
 //  Runtime execution goes ONLY through the injected
 //  opts.runtimeSession.execute (M2a): there is no runtime/shell import
 //  and no local fallback here.
 // ============================================================
+
+import { Telemetry, utf8ByteLength } from './telemetry.js';
 
 export const AGENT_TOOL_DEFINITIONS = [
   {
@@ -140,8 +140,7 @@ export async function executeTool(name, input, workspace, opts) {
   // breaks the tool result and never surfaces as an unhandled
   // rejection. Exactly one record per execution (the Harness records
   // nothing per tool execution, so there is no double metering).
-  emitTelemetry((opts && opts.telemetry)
-    || (typeof Telemetry !== 'undefined' ? Telemetry : null), record);
+  emitTelemetry((opts && opts.telemetry) || Telemetry, record);
 
   return { output, success, backend, operation };
 }

@@ -8,8 +8,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview --port 4173 --strictPort",
-    "test": "node tests/run-unit.cjs",
-    "test:e2e": "node tests/e2e.cjs"
+    "test": "node tests/run-unit.cjs"
   },
   "dependencies": {
     "locus-harness": "github:boccchi2993/locus-harness#347eed99a415dc080b97d46d8a4271ceb19c5142",

@@ -7,9 +7,9 @@
 //        requirement deleted — and still rejects, BEFORE any side
 //        effect, unsupported contract/port versions and missing
 //        required capabilities; absent declarations are never compatible.
-//   PW2  the page assembly loads NO classic Runtime/Harness script:
-//        index.html has exactly two classic page scripts (Product
-//        telemetry + Product markdown) and ONE module entry.
+//   PW2  the page assembly loads NO classic script at all (M3c
+//        integration: telemetry.js + markdown.js are ESM too):
+//        index.html has ZERO classic page scripts and ONE module entry.
 //   PW3  the store carries no classic-global dependency anymore: no
 //        Model singleton, no __LOCUS_*_CORE__ table read, no deep
 //        '../runtime/*' or '../harness/*' import, no globalThis
@@ -137,15 +137,15 @@ try {
 }
 
 // ============================================================
-// PW2 — the page loads no classic Runtime/Harness script
+// PW2 — the page loads no classic script at all (M3c integration:
+// telemetry.js and ui/markdown.js are ES modules too — the page is
+// ONE module entry and nothing else)
 // ============================================================
 const html = read('index.html');
 const classicTags = [...html.matchAll(/<script src="([^"]+)"><\/script>/g)].map((m) => m[1]);
 const moduleTags = [...html.matchAll(/<script type="module" src="([^"]+)"><\/script>/g)].map((m) => m[1]);
-check('PW2.classic-scripts-product-only',
-  classicTags.length === 2
-  && classicTags.includes('./src/telemetry.js')
-  && classicTags.includes('./src/ui/markdown.js'),
+check('PW2.zero-classic-scripts',
+  classicTags.length === 0,
   JSON.stringify(classicTags));
 check('PW2.one-module-entry', moduleTags.length === 1 && moduleTags[0] === '/src/main.js',
   JSON.stringify(moduleTags));
@@ -331,8 +331,8 @@ check('PW5.projector-esm-export', !!LocusProjector && typeof LocusProjector.proj
 const vite = read('vite.config.js');
 const runScripts = [...vite.matchAll(/'([^']+)'/g)].map((m) => m[1])
   .filter((s) => s.startsWith('src/'));
-check('PW6.copy-list-shrunk',
-  runScripts.length === 2 && runScripts.includes('src/telemetry.js') && runScripts.includes('src/ui/markdown.js'),
+check('PW6.copy-list-empty',
+  runScripts.length === 0,
   JSON.stringify(runScripts));
 const buildInputs = read('vite.config.js');
 check('PW6.test-host-pages-still-built',

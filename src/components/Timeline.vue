@@ -47,8 +47,7 @@
 import ReasoningItem from './ReasoningItem.vue';
 import ToolCallItem from './ToolCallItem.vue';
 import ToolResultItem from './ToolResultItem.vue';
-
-/* global LocusMarkdown */
+import { LocusMarkdown } from '../ui/markdown.js';
 
 defineProps({ conversation: { type: Object, required: true } });
 

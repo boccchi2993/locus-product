@@ -120,6 +120,7 @@
 
 <script setup>
 import { reactive, computed, watch } from 'vue';
+import { Telemetry } from '../telemetry.js';
 import { store, activeConversation, mountFolder, reconnectWorkspace, refreshArtifacts, downloadArtifact } from '../ui/store.js';
 
 /* global Telemetry */
@@ -146,7 +147,7 @@ const statusLabel = computed(() => {
 // runtime-owned Telemetry.records (never copied, never reformatted here).
 const records = computed(() => {
   void store.telemetryVersion;
-  return (typeof Telemetry !== 'undefined' ? Telemetry.records.slice(-12).reverse() : []);
+  return Telemetry.records.slice(-12).reverse();
 });
 
 const apiHost = computed(() => {

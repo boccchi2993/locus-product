@@ -5,11 +5,12 @@
 //  HTML is escaped FIRST, then a small inline/block grammar is applied
 //  (bold, emphasis, inline code, unordered lists, ATX headers). No
 //  links, images or raw HTML — model output can never inject markup.
-//  Classic script like the rest of the non-bundled layer, so the Node
-//  suites can eval it directly.
+//  M3c integration (agent D): real ES module (named export, same
+//  symbol); Timeline.vue imports it directly and the page no longer
+//  loads it as a classic script.
 // ============================================================
 
-var LocusMarkdown = (function () {
+export const LocusMarkdown = (function () {
   'use strict';
 
   function escapeHtml(s) {

@@ -3,15 +3,23 @@
 //  In-memory execution telemetry. Every tool execution is recorded
 //  here; inspect via the "log" panel, the `telemetry` command, or
 //  window.__telemetry in the console.
+//
+//  M3c integration (agent D): real ES module. Consumers import the
+//  named exports (tools.js, ContextRail.vue) — no production code
+//  reads the classic globals anymore. The page-level handles STAY as
+//  documented observability accessors only: window.__telemetry (the
+//  live records array, also the e2e evidence read) and the
+//  globalThis.Telemetry alias the e2e suites read in page context.
+//  They are not load-bearing for any production import.
 // ============================================================
 
 // Real UTF-8 byte length of a string (NOT String.length, which counts
 // UTF-16 code units — e.g. "你好" is 6 bytes, not 2).
-function utf8ByteLength(text) {
+export function utf8ByteLength(text) {
   return new TextEncoder().encode(String(text)).byteLength;
 }
 
-const Telemetry = {
+export const Telemetry = {
   records: [],
 
   record(entry) {
@@ -40,9 +48,7 @@ const Telemetry = {
 
 if (typeof window !== 'undefined') window.__telemetry = Telemetry.records;
 
-// M2a review: explicit cross-file publish. On the ESM self-assembly path
-// (src/runtime/core.js) top-level definitions are module-scoped; these
-// aliases keep the classic bare-global cross-file references working in
-// BOTH load modes. Classic loading is unaffected (same bindings).
+// Page-level observability handle (e2e evidence reads, console access).
+// Production consumers import { Telemetry } — this publish is not part
+// of any module lexical chain.
 globalThis.Telemetry = Telemetry;
-globalThis.utf8ByteLength = utf8ByteLength;

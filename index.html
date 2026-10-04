@@ -8,22 +8,12 @@
 <body>
 <div id="app"></div>
 
-
-<!-- Product observability singleton (classic, stays): the telemetry panel
-     reads the window.Telemetry records. NOT a Runtime/Harness core — the
-     only classic script the page still loads besides the markdown
-     renderer below. -->
-<script src="./src/telemetry.js"></script>
-<!-- Product presentation markdown renderer (classic THIS round): its only
-     consumer (src/components/Timeline.vue) reads the LocusMarkdown
-     global; converting the pair is a D-integration item recorded in
-     docs/M3C-C-HANDOFF.md (the file's caller is outside C's ownership). -->
-<script src="./src/ui/markdown.js"></script>
-
 <!-- The ONE module entry (M3c): the whole graph — Runtime through
      src/product/runtime-api.js, Harness through src/product/harness-api.js,
-     Product modules through explicit imports — is bundled by Vite from
-     here. NO classic Runtime/Harness script is loaded or copied anymore. -->
+     Product modules (telemetry, markdown, tools, …) through explicit
+     imports — is bundled by Vite from here. ZERO classic scripts are
+     loaded or copied anymore (M3c integration: telemetry.js and
+     ui/markdown.js are ES modules too; their consumers import them). -->
 <script type="module" src="/src/main.js"></script>
 </body>
 </html>
