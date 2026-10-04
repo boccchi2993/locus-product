@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>M3c storage adapters — packaged host</title>
+</head>
+<body>
+<!--
+  M3c review round C: the PACKAGED-BUILD storage host — a REAL Vite build
+  input (vite.config.js rollupOptions.input.storageHost). Unlike the
+  source-ESM gate (tests/e2e-m3c-storage-adapters.cjs, which serves /src
+  and the installed packages raw through an import map), this page is
+  bundled by vite build and served ONLY out of dist/ by vite preview: the
+  five converted Product modules (persistence, attachments, extensions,
+  capability-package, conversation-history-workspace), the two product
+  public API re-export layers (src/product/runtime-api.js,
+  src/product/harness-api.js) and the shared scenario engine are compiled
+  into the chunk graph — no /src, /vendor or node_modules URL exists here.
+
+  The capability fixture tree rides Vite's asset pipeline: every fixture
+  file is < 4 KiB, so `?url` inlines each as a data: URL inside the chunk
+  (binary-safe, still a single build artifact). If a fixture ever exceeds
+  the inline limit it becomes a hashed dist asset fetched at runtime —
+  the driver's resource audit accepts hashed assets only, so any fallback
+  to source paths stays impossible. C1–C4 prove the bytes arrived intact
+  (the wheel bytes must survive hashing/build for the checks to pass).
+
+  The scenario engine and the driver-side check table are shared with the
+  source gate (tests/helpers/m3c-storage-shared.js +
+  m3c-storage-checks.cjs). Page errors, unhandled rejections and every
+  requested resource are recorded for the driver's assertions.
+-->
+<script type="module">
+import { installM3cStoragePage } from './helpers/m3c-storage-shared.js';
+import * as harnessApi from '../src/product/harness-api.js';
+import * as runtimeApi from '../src/product/runtime-api.js';
+import { ConversationHistoryWorkspace } from '../src/conversation-history-workspace.js';
+import * as persistenceMod from '../src/persistence.js';
+import * as attachmentsMod from '../src/attachments.js';
+import * as extensionsMod from '../src/extensions.js';
+import * as cpMod from '../src/capability-package.js';
+
+const FIXTURE_PREFIX = './fixtures/capability-package/minimal/';
+const FIXTURE_URLS = import.meta.glob('./fixtures/capability-package/minimal/**', {
+  query: '?url', import: 'default', eager: true,
+});
+
+(async () => {
+  const files = {};
+  for (const [rel, url] of Object.entries(FIXTURE_URLS)) {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('fixture fetch failed: ' + res.status + ' ' + rel + ' -> ' + url);
+    files[rel.slice(FIXTURE_PREFIX.length)] = new Uint8Array(await res.arrayBuffer());
+  }
+  installM3cStoragePage(
+    { harnessApi, runtimeApi, ConversationHistoryWorkspace, persistenceMod, attachmentsMod, extensionsMod, cpMod },
+    files,
+  );
+})().catch((e) => {
+  // Surface pre-install boot failures (e.g. a fixture the bundle lost)
+  // through the SAME channel the driver waits on — the gate fails, it
+  // never falls back.
+  window.__m3c = window.__m3c || { errors: [] };
+  window.__m3c.error = 'packaged host boot failed: ' + (e && e.message || e);
+  window.__m3c.ready = true;
+});
+</script>
+</body>
+</html>
