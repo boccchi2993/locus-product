@@ -4,40 +4,16 @@
 // the two cores through src/product/{runtime-api,harness-api}.js and the
 // Product modules explicitly; Vite bundles all of it. The old classic
 // Runtime/Harness scripts are NOT loaded and NOT copied anymore (the
-// in-repo duplicate cores stay on disk only until D deletes them).
-// Exactly two Product classic files remain page scripts (still copied
-// verbatim so `dist/` keeps the same layout): telemetry.js (Product
-// observability singleton; the panel reads window.Telemetry) and
-// ui/markdown.js (its caller Timeline.vue reads the LocusMarkdown global;
-// converting the pair is recorded for D in docs/M3C-C-HANDOFF.md).
+// in-repo duplicate cores were deleted at integration). M3c integration
+// (agent D): telemetry.js and ui/markdown.js are ES modules as well —
+// ZERO classic page scripts remain, so nothing is copied verbatim into
+// dist anymore.
 import { defineConfig } from 'vite';
 import vue from '@vitejs/plugin-vue';
-import { copyFileSync, mkdirSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-
-// Remaining classic page scripts referenced by index.html.
-const RUNTIME_SCRIPTS = [
-  'src/telemetry.js',
-  'src/ui/markdown.js',
-];
-
-function copyRuntimeScripts() {
-  return {
-    name: 'locus-copy-runtime-scripts',
-    apply: 'build',
-    closeBundle() {
-      for (const rel of RUNTIME_SCRIPTS) {
-        const dest = join(this.environment?.config?.root || process.cwd(), 'dist', rel);
-        mkdirSync(dirname(dest), { recursive: true });
-        copyFileSync(rel, dest);
-      }
-    },
-  };
-}
 
 export default defineConfig({
   base: './',
-  plugins: [vue(), copyRuntimeScripts()],
+  plugins: [vue()],
   build: {
     target: 'es2020',
     outDir: 'dist',
