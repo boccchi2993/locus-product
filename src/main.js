@@ -86,8 +86,8 @@ if (e2eMode) {
     window.__locusWire = { calls: [], responses: [] };
     // M3c integration: the wire fake itself is exposed so e2e suites can
     // WRAP it (capture/corrupt around the production fake) and reinstall
-    // through the same explicit transport port — the legacy
-    // `window.Model.transport` seam no longer exists.
+    // through the same explicit transport port — the legacy page-global
+    // transport holder no longer exists.
     const wireFake = async (url, init) => {
       const wire = window.__locusWire;
       const headers = {};
