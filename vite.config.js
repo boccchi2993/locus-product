@@ -27,6 +27,14 @@ export default defineConfig({
         main: 'index.html',
         runtimeHost: 'tests/runtime-host.html',
         harnessHost: 'tests/harness-host.html',
+        // M3c review round C: the storage-adapter PACKAGED-BUILD gate host
+        // (tests/e2e-m3c-storage-built.cjs drives dist/tests/
+        // m3c-storage-host.html through vite preview). The five converted
+        // Product storage modules + the two product API layers as a real
+        // build input, so that gate runs the bundled artifacts — its
+        // source-ESM counterpart (e2e-m3c-storage-adapters.cjs) stays
+        // independent of the build by design.
+        storageHost: 'tests/m3c-storage-host.html',
       },
     },
   },
