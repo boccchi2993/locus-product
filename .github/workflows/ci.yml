@@ -37,4 +37,8 @@ jobs:
       # the gates drive the PACKAGED page through real headless Chrome:
       # python gates boot the REAL verified Pyodide from the pinned CDN
       # (a real-network step, recorded distinctly from every faked hop)
-      - run: node tests/run-browser-gates.cjs
+      - name: run the browser gates
+        run: |
+          CHROME=$(which google-chrome || which chromium || true)
+          export CHROME
+          node tests/run-browser-gates.cjs
