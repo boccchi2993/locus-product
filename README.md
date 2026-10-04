@@ -5,6 +5,30 @@ split: Vue 3 presentation, browser storage, user configuration, capability
 catalogs, and the integration adapters that compose `locus-runtime` and
 `locus-harness` into the shipped product.
 
+## Branch `refactor/m3c-integration`: the M3c switch, verified (M3c-D)
+
+This branch completes the three-repository switch: the product page is ONE
+ESM entry over the two installed cores; the in-repo duplicate
+implementations are deleted; production core imports enter only through
+`src/product/{runtime-api,harness-api}.js`.
+
+This is a **verified set of candidate SHAs, locked through the lockfile**
+— NOT a claim that the cores' latest main is compatible:
+
+- source snapshot `2aec76e78431382873be1db8a6db6310cc89c782`
+- locus-runtime `2435a57ff7a66db3db88aa98a88d404c75133483` (PR #1 OPEN)
+- locus-harness `347eed99a415dc080b97d46d8a4271ceb19c5142` (PR #1 OPEN)
+
+Integration record + verification evidence:
+[docs/M3C-D-INTEGRATION.md](docs/M3C-D-INTEGRATION.md). The base and
+agent PRs (#1–#4) stay OPEN until M3c closeout; nothing is merged,
+published or deployed here.
+
+Verification on this branch (local AND clean checkout): `npm ci` →
+`npm run build` → `npm test` (24/24 suites) → `node
+tests/run-browser-gates.cjs` (14/14 packaged-build browser gates in real
+Chrome). CI runs the same gates from a from-scratch checkout.
+
 ## This branch: `refactor/m3c-base` (M3c-0 common baseline)
 
 This branch is the common baseline for the parallel M3c switch agents
