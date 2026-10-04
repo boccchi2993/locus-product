@@ -217,6 +217,16 @@ the worktree full-gate run predated the seam edit), fixed in `7654bba`
 and re-verified. CI (`.github/workflows/ci.yml`) runs the same two jobs
 on every push/PR from a from-scratch checkout.
 
+CI evidence on the integration head: both the push and the PR run are
+green from a from-scratch checkout
+(unit 14–17s; browser gates 1m27s/1m33s,
+runs 37181058575 / 37181060946). One earlier branch-push run hit the
+documented CDP cold-start readiness flake on its first two suites while
+the PR run of the SAME commit was fully green — environment, not
+product; the orchestrator now retries a failed suite once with the
+first failure preserved in the log, and CI exports the runner's Chrome
+explicitly (commit c0d1503).
+
 ## 6. Residuals / M4 (explicitly NOT done here)
 
 - No PR merged (base PR #1 and A/B/C PRs #2/#3/#4 stay OPEN), no npm
