@@ -63,6 +63,32 @@ exactly once. **PR relationship:** this integration branch carries #6, #7 and
 `refactor/m3c-integration`, #6/#7/#8 are superseded and should be closed
 (never merged individually on top).
 
+### How the branch was pushed (git transport was down; Data API fallback, tree-verified)
+
+The git HTTPS transport to github.com:443 was unreachable at push time (two
+connection failures; `gh api` on the same host worked). The branch was pushed
+through the Git Data API instead (blobs → trees → commits → ref), the same
+recipe the inputs themselves used. Fidelity was verified mechanically, not
+assumed: **every pushed tree SHA equals the local tree SHA**, and A's five
+commits reproduced their local SHAs exactly (same objects). B/C/D commit
+objects drifted in SHA only — local git stores a trailing newline in commit
+messages, the API form does not (the known GitHub commit-object pitfall;
+content is byte-identical, proven by the tree equality):
+
+| Local commit (above) | Remote commit on `refactor/m4a-integration` | Tree equality |
+|---|---|---|
+| `15f64ab` | `15f64abb027b1544f57f0c272a471c35f5542a0d` (identical) | ✓ |
+| `20402e9` | `20402e9ff516e1f38971f3c7eb0ba363ddaf784a` (identical) | ✓ |
+| `2ac1bcc` | `2ac1bcc42be6e19f602f3350e640e53d3ca391d0` (identical) | ✓ |
+| `be72261` | `be72261c90592e52df699a9ff8f6eb1319c24d19` (identical) | ✓ |
+| `5b6c004` | `5b6c004979d83fe6a3e4e84946a1180ead4d239f` (identical) | ✓ |
+| `52feb57` (B) | `1f6f040573120733960c4717a76b2c46efd0952c` | ✓ `81e8dba` |
+| `664e4e2` (C) | `c933c43c18c5b84ed5c60f3ebf1876b529fb8182` | ✓ `fe85286` |
+| `4565509` (D) | `b8e356a1ea9fc2a78bc7cd79d4ad7032f903c891` | ✓ `1815e46` |
+| `c94615b` (doc) | `c08142c1ed7a0f3ea260618fcabc2069a66ec52d` | ✓ `f1954e3` |
+
+Remote branch tip at PR creation: **`c08142c1ed7a0f3ea260618fcabc2069a66ec52d`**.
+
 ### Conflicts and their disposition
 
 **Zero conflicts.** Disjoint footprints made this expected, and it was
