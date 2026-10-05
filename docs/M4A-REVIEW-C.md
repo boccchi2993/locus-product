@@ -201,3 +201,30 @@ two-leg trace, sibling-run semantics), not extra unknowns.
    continue / blocked / insufficient / invalid config.
 5. The rollout doc's §0 banner supersedes its v1 §1 verdicts and §10
    taxonomy; the operational sequence (§3–§7, §9) is unchanged.
+
+## 8. Delivery record (amended after first push)
+
+- Push: git transport was down again (connect timeout); the commit was pushed
+  via the Git Data API with every object SHA verified byte-for-byte
+  (blobs → tree `c1e26819…` → commit → ref). Because the API strips ALL
+  trailing message newlines, the local commit was rebuilt without the
+  trailing-newline byte before pushing: local `d60523d` → delivered
+  `629a37923731ef3ee5fc721221a322c94c2bf32b` (identical tree/content).
+- Delivery PR: **#10** (base `refactor/m4a-integration`, head `629a3792…`).
+  PR #9 untouched (verified `updated_at` unchanged).
+- **CI on the delivery PR — first attempt FAILED, recorded as-is, not rerun
+  (rerun is outside this round's authorization):** run `37340129474`
+  (pull_request, attempt 1). `unit tests (Node, clean checkout)` **passed**;
+  `browser gates (packaged build, headless Chrome)` failed on exactly one
+  gate: `e2e-m3c-python-integration.cjs` — **B-PY1** ("python js.fetch denied
+  at the policy layer with the marker", `fail:true, delta:0`, the Pyodide
+  `eval_code_async` traceback surfaced instead of the policy marker),
+  54 passed / 1 failed; all other 15 gates passed. This matches the
+  **documented B-PY1 intermittent flake family** (previously observed
+  three-green-one-red across four runs, root cause undetermined, E3 family —
+  the security property itself held: `delta=0`). By construction this round's
+  diff cannot affect the packaged gates: the preflight script/tests are not
+  in the page or gate import graph (the unit job proves the clean-checkout
+  install+build+test path). The failure is recorded here and in the run
+  history; rerunning it is D's call, exactly like the runtime #1 disposition.
+
