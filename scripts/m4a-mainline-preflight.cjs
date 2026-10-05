@@ -1,21 +1,40 @@
 #!/usr/bin/env node
-// M4a-C: read-only preflight for landing the three-repo mainline
+// M4a mainline preflight (review round C revision) — read-only audit of the
+// verified candidate set for landing the three-repo mainline
 // (locus-runtime / locus-harness / locus-product).
 //
-// For each configured (repo, PR, accepted SHA) candidate it answers, from the
-// LIVE GitHub state:
-//   - is the PR merged, and is the accepted SHA traceable in main?
-//   - does the PR head still equal the accepted SHA (else: drift scope)?
-//   - is the merge clean or conflicting?
-//   - what did CI conclude on that exact head (including rerun evidence)?
-//   - are branch protection rules in force on main?
-// It also checks whether the Product integration-input PRs (#1–#4) are already
-// carried by the integration head, i.e. whether they need separate merges.
+// REVIEW-C CONTRACT: the preflight refuses to answer "ready" on missing or
+// unknown evidence. Status table (families):
+//
+//   ready              open PR, head == accepted, PR base == configured target,
+//                      mergeable explicitly true, main facts readable,
+//                      protection known (and satisfied if any rules exist),
+//                      CI evidence satisfies the EXPLICIT per-repo config.
+//   landed-traceable   merged AND accepted->mergeCommit AND
+//                      mergeCommit->current-main ancestry both proven
+//                      (or accepted already in current main by another route).
+//   landed-other-route unmerged but accepted is already an ancestor of
+//                      current main.
+//   ci-pending         evidence runs still executing (never treated as pass).
+//   blocked            explicit non-landable: head drift, base mismatch,
+//                      conflict, closed-unmerged, draft, ci-failed,
+//                      merged-untraceable (merge not in current main).
+//   insufficient-info  anything required but unreadable/missing/unexplainable:
+//                      no CI runs, unknown mergeable, unreadable protection,
+//                      truncated lists, workflow shape != config.
+//
+// summary.verdict, the text render, and the process exit code are ALL derived
+// from one aggregation of the same statuses (aggregateVerdict):
+//   any insufficient -> 'insufficient-info' (exit 2); never overall ready.
+//   else any blocked/pending -> 'blocked' (exit 1).
+//   else all landed -> 'landed' (0); all ready -> 'ready' (0);
+//   else ready+landed mix -> 'continue' (0).
+//   Invalid/empty config is rejected outright (ConfigError, CLI exit 3).
 //
 // READ-ONLY CONTRACT: every network call is a GET issued through the `gh` CLI
-// with no method/field flags. The script never merges, comments, labels, or
-// updates refs/releases. The injected-adapter seam (buildReport(config, api))
-// is what tests use; the default adapter wraps `gh api <path>` only.
+// with argv exactly ['api', <path>]. The script never merges, comments,
+// labels, reruns CI, or updates refs. Tests pin both the argv and an endpoint
+// allowlist.
 //
 // Usage:
 //   node scripts/m4a-mainline-preflight.cjs                 # text summary
@@ -23,20 +42,24 @@
 //   node scripts/m4a-mainline-preflight.cjs --out report.json
 //   node scripts/m4a-mainline-preflight.cjs --config my.json
 //
-// Exit code: 0 = every candidate is ready or landed; 1 = a concrete blocker
-// (drift / CI failed or pending / conflict / untraceable merge); 2 = some
-// state could not be determined (insufficient info / transport failure).
+// Exit codes: 0 ready/landed/continue · 1 blocked · 2 insufficient ·
+// 3 invalid configuration.
 
 'use strict';
 
 const { spawnSync } = require('child_process');
 
+const SHA_RE = /^[0-9a-f]{40}$/;
+
 // ---------------------------------------------------------------------------
-// Verified candidate set for the M4a mainline rollout (the reviewed, accepted
-// heads). Override with --config; the shape is the same JSON.
+// Verified candidate set for the M4a mainline rollout. This stays pinned to
+// the ACCEPTED (reviewed) heads — it must not silently follow M4a work-in-
+// progress commits. ciEvidence is the explicit statement of what counts as
+// "the project's required verification ran and succeeded" for each repo,
+// derived from each repo's real ci.yml job names. Override with --config.
 // ---------------------------------------------------------------------------
 const DEFAULT_CONFIG = {
-  // Core + integration PRs that should land on their repos' main.
+  targetBranch: 'main',
   candidates: [
     {
       repo: 'boccchi2993/locus-runtime',
@@ -54,10 +77,35 @@ const DEFAULT_CONFIG = {
       acceptedSha: 'd6a74a25a2b98293d9aa1f2a635022d8f5ed733b',
     },
   ],
-  // Product integration inputs: the work was cherry-picked into the
-  // integration head, so these PRs' exact commits are NOT ancestors of it.
-  // The preflight reports the factual containment so the rollout can state
-  // whether each input still needs a separate merge (it must not guess).
+  ciEvidence: {
+    'boccchi2993/locus-runtime': {
+      workflow: 'CI',
+      jobs: [
+        'build + package checks',
+        'unit tests (Node)',
+        'browser gates (headless Chrome)',
+        'out-of-repo tarball consumer (headless Chrome)',
+      ],
+    },
+    'boccchi2993/locus-harness': {
+      workflow: 'CI',
+      jobs: [
+        'build + package checks',
+        'unit tests (Node)',
+        'harness host browser gate (headless Chrome)',
+        'out-of-checkout tarball consumer (headless Chrome)',
+      ],
+    },
+    'boccchi2993/locus-product': {
+      workflow: 'CI',
+      jobs: [
+        'unit tests (Node, clean checkout)',
+        'browser gates (packaged build, headless Chrome)',
+      ],
+    },
+  },
+  // Product integration inputs: content cherry-picked into the #5 head, so
+  // their exact commits are not ancestors of it. Reported factually only.
   carriedInputs: {
     repo: 'boccchi2993/locus-product',
     carriedBy: { pr: 5, head: 'd6a74a25a2b98293d9aa1f2a635022d8f5ed733b' },
@@ -65,40 +113,49 @@ const DEFAULT_CONFIG = {
   },
 };
 
-const CLASSIFICATIONS = {
-  READY: 'ready-to-merge',
-  MERGED_TRACEABLE: 'merged-traceable',
-  MERGED_UNTRACEABLE: 'merged-untraceable',
-  ALREADY_IN_MAIN: 'already-in-main',
-  HEAD_DRIFTED: 'head-drifted',
-  CONFLICT: 'conflict',
+class ConfigError extends Error {}
+
+const STATUS = {
+  READY: 'ready',
+  LANDED_TRACEABLE: 'landed-traceable',
+  LANDED_OTHER_ROUTE: 'landed-other-route',
   CI_PENDING: 'ci-pending',
   CI_FAILED: 'ci-failed',
+  HEAD_DRIFTED: 'head-drifted',
+  BASE_MISMATCH: 'base-mismatch',
+  CONFLICT: 'conflict',
+  CLOSED_UNMERGED: 'closed-unmerged',
+  DRAFT: 'draft',
+  MERGED_UNTRACEABLE: 'merged-untraceable',
   INSUFFICIENT: 'insufficient-info',
 };
 
-const LANDED = new Set([
-  CLASSIFICATIONS.MERGED_TRACEABLE,
-  CLASSIFICATIONS.ALREADY_IN_MAIN,
-]);
-const BLOCKING = new Set([
-  CLASSIFICATIONS.HEAD_DRIFTED,
-  CLASSIFICATIONS.CONFLICT,
-  CLASSIFICATIONS.CI_PENDING,
-  CLASSIFICATIONS.CI_FAILED,
-  CLASSIFICATIONS.MERGED_UNTRACEABLE,
-]);
-// Anything else (insufficient-info) is undetermined, not a proven blocker.
+const FAMILIES = {
+  ready: new Set([STATUS.READY]),
+  landed: new Set([STATUS.LANDED_TRACEABLE, STATUS.LANDED_OTHER_ROUTE]),
+  pending: new Set([STATUS.CI_PENDING]),
+  blocked: new Set([
+    STATUS.CI_FAILED, STATUS.HEAD_DRIFTED, STATUS.BASE_MISMATCH,
+    STATUS.CONFLICT, STATUS.CLOSED_UNMERGED, STATUS.DRAFT,
+    STATUS.MERGED_UNTRACEABLE,
+  ]),
+  unknown: new Set([STATUS.INSUFFICIENT]),
+};
+
+const EXPLICIT_FAILURES = ['failure', 'timed_out', 'cancelled', 'action_required'];
+const NOT_EXECUTED = ['skipped', 'neutral'];
+const PENDING_STATES = ['expected', 'pending', 'in_progress', 'queued'];
 
 const DRIFT_COMMIT_CAP = 20;
+const MAX_EVIDENCE_RUNS = 4; // jobs fetched for the N latest runs of the required workflow
 
 // ---------------------------------------------------------------------------
 // Transport adapters. api(path) -> {status, body, error}; status is the HTTP
-// status code (0 = transport-level failure), body is parsed JSON or null.
+// status (0 = transport-level failure), body is parsed JSON or null.
 // ---------------------------------------------------------------------------
 
 // Default adapter: the `gh` CLI. GET only — the spawned argv is exactly
-// ['api', path] with no method/field flags (test pins this byte-for-byte).
+// ['api', path] with no method/field flags (tests pin this byte-for-byte).
 function ghApiAdapter(spawn) {
   const run = spawn || spawnSync;
   return function ghApi(path) {
@@ -126,14 +183,14 @@ function ghApiAdapter(spawn) {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Pure helpers (unit-tested with fake API responses).
-// ---------------------------------------------------------------------------
-
 function ok(res) { return res && res.status === 200 && res.body; }
 
+function errText(res) {
+  return (res && (res.error || `HTTP ${res.status}`)) || 'no data';
+}
+
 // compare API status -> is `base` commit an ancestor of `head` commit?
-// (compare/{base}...{head}: "ahead" = head contains base; "identical" = same.)
+// (compare/{base}...{head}: "ahead"/"identical" = head contains base.)
 function containedFromCompare(cmp) {
   if (!cmp || !cmp.body) return 'unknown';
   const s = cmp.body.status;
@@ -142,11 +199,30 @@ function containedFromCompare(cmp) {
   return 'unknown';
 }
 
-// CI runs for one head SHA -> factual status + rerun evidence.
+function asContainment(res) {
+  if (!res) return { state: 'unknown', detail: 'not fetched' };
+  if (!ok(res)) return { state: 'unknown', detail: errText(res) };
+  const b = res.body;
+  return {
+    state: containedFromCompare(res),
+    detail: `status=${b.status} ahead_by=${b.ahead_by} behind_by=${b.behind_by}`,
+  };
+}
+
+function truncatedList(body, listKey) {
+  if (!body) return false;
+  const total = typeof body.total_count === 'number' ? body.total_count : null;
+  const list = Array.isArray(body[listKey]) ? body[listKey] : null;
+  if (total === null || list === null) return false;
+  return total > list.length;
+}
+
+// Raw runs for one head SHA -> slim rows + pending/failed/rerun facts.
 // Runs rows carry the LATEST attempt's conclusion only; run_attempt > 1 is
-// the runs-API evidence that a rerun happened (the failed first attempt's
-// conclusion is not in this endpoint — it lives in the run's page/logs).
-function summarizeCi(runsBody, headSha) {
+// the runs-API evidence that a rerun happened (the first attempt's
+// conclusion is not in this endpoint — it lives in the run's page/logs and
+// is preserved in review records, not invented here).
+function summarizeRuns(runsBody, headSha) {
   const all = (runsBody && Array.isArray(runsBody.workflow_runs))
     ? runsBody.workflow_runs : [];
   const forHead = all.filter((r) => r.head_sha === headSha);
@@ -161,29 +237,127 @@ function summarizeCi(runsBody, headSha) {
     url: r.html_url,
   }));
   const incomplete = runs.filter((r) => r.status && r.status !== 'completed');
-  const failedConclusions = ['failure', 'timed_out', 'cancelled', 'action_required'];
-  const failed = runs.filter((r) => failedConclusions.includes(r.conclusion));
+  const failed = runs.filter((r) => EXPLICIT_FAILURES.includes(r.conclusion));
   const rerunDetected = runs.some((r) => (r.runAttempt || 1) > 1);
-  let status;
-  if (incomplete.length) status = 'pending';
-  else if (failed.length) status = 'failed';
-  else if (runs.length) status = 'success';
-  else status = 'none'; // no workflow run recorded for this head
   const notes = [];
-  if (status === 'failed' && rerunDetected) {
-    notes.push('still failing after a rerun (latest attempt recorded above)');
-  } else if (status === 'success' && rerunDetected) {
-    notes.push('green on a rerun; the first attempt conclusion is not in the runs API');
-  } else if (status === 'failed') {
-    notes.push('failed with no rerun recorded');
-  } else if (status === 'none') {
-    notes.push('no CI run for this head (workflow absent or not triggered)');
+  if (rerunDetected) {
+    notes.push('a rerun is recorded (run_attempt > 1); the runs API keeps only '
+      + 'the latest attempt conclusion — first-attempt outcomes stay in the review record');
   }
-  return { status, rerunDetected, notes, incomplete, failed, runs };
+  return { ok: true, error: null, runs, incomplete, failed, rerunDetected, notes, truncated: false };
 }
 
-// Protection rules for a repo's default branch. Permission gaps stay
-// "unknown" — the script never assumes absence from a 403.
+// The explicit evidence gate: does the configured required workflow have a
+// completed run on this head whose jobs prove every required job succeeded?
+// skipped/neutral conclusions are NOT success evidence. Missing jobs mean the
+// workflow shape no longer matches the configured requirement — that is
+// "unexplainable rule", answered insufficient, never guessed as satisfied.
+function evaluateRequiredEvidence(spec, runsForHead, jobsByRun) {
+  const wfRuns = runsForHead
+    .filter((r) => r.name === spec.workflow)
+    .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+    .slice(0, MAX_EVIDENCE_RUNS);
+  if (wfRuns.length === 0) {
+    return {
+      state: 'unknown-evidence',
+      detail: `required workflow "${spec.workflow}" has no run on this head — nothing proves the required verification executed`,
+    };
+  }
+  const perRun = [];
+  for (const run of wfRuns) {
+    if (run.status && run.status !== 'completed') {
+      perRun.push({ runId: run.id, state: 'pending', detail: `${run.name} run ${run.id} is ${run.status}` });
+      continue; // eslint-disable-line no-continue
+    }
+    const j = jobsByRun.get(run.id);
+    if (!j) {
+      perRun.push({ runId: run.id, state: 'unknown-evidence', detail: `job list for run ${run.id} not fetched/readable` });
+      continue; // eslint-disable-line no-continue
+    }
+    if (!j.ok) {
+      perRun.push({ runId: run.id, state: 'unknown-evidence', detail: `job list for run ${run.id} unreadable: ${j.error}` });
+      continue; // eslint-disable-line no-continue
+    }
+    if (j.truncated) {
+      perRun.push({ runId: run.id, state: 'unknown-evidence', detail: `job list for run ${run.id} truncated (total_count > fetched) — refusing to judge` });
+      continue; // eslint-disable-line no-continue
+    }
+    const byName = new Map(j.jobs.map((job) => [job.name, job.conclusion]));
+    const missing = spec.jobs.filter((n) => !byName.has(n));
+    if (missing.length) {
+      perRun.push({
+        runId: run.id, state: 'unknown-evidence',
+        detail: `workflow shape does not match the configured evidence requirement; missing job(s): ${missing.join(', ')}`,
+      });
+      continue; // eslint-disable-line no-continue
+    }
+    const failedJobs = spec.jobs.filter((n) => EXPLICIT_FAILURES.includes(byName.get(n)));
+    const notRunJobs = spec.jobs.filter((n) => byName.get(n) == null
+      || NOT_EXECUTED.includes(byName.get(n)));
+    // Non-configured jobs that explicitly failed stay visible but do not gate:
+    // the config defines the project's required evidence.
+    const failedOther = j.jobs
+      .filter((job) => !spec.jobs.includes(job.name) && EXPLICIT_FAILURES.includes(job.conclusion))
+      .map((job) => `${job.name}=${job.conclusion}`);
+    if (failedJobs.length) {
+      perRun.push({
+        runId: run.id, state: 'failed',
+        detail: `required job(s) explicitly failed: ${failedJobs.map((n) => `${n}=${byName.get(n)}`).join(', ')}`
+          + (failedOther.length ? `; non-required failures: ${failedOther.join(', ')}` : ''),
+      });
+    } else if (notRunJobs.length) {
+      perRun.push({
+        runId: run.id, state: 'not-executed',
+        detail: `required job(s) did not execute (skipped/neutral): ${notRunJobs.map((n) => `${n}=${byName.get(n)}`).join(', ')}`,
+      });
+    } else {
+      perRun.push({
+        runId: run.id, state: 'satisfied', runAttempt: run.runAttempt,
+        detail: `all required jobs succeeded on run ${run.id}`
+          + (failedOther.length ? ` (visible non-required failures: ${failedOther.join(', ')})` : ''),
+      });
+    }
+  }
+  const satisfied = perRun.filter((r) => r.state === 'satisfied');
+  const failedRuns = perRun.filter((r) => r.state === 'failed');
+  const pendings = perRun.filter((r) => r.state === 'pending');
+  // An explicit required-job failure STANDS until its own run is superseded
+  // by a rerun (the runs API then reports the latest attempt). A green
+  // sibling run (e.g. the push-event run) is additional evidence, but it
+  // does not erase an executed, unresolved failure — it is named alongside.
+  if (failedRuns.length) {
+    const via = Object.assign({}, failedRuns[0]);
+    if (satisfied.length) {
+      via.detail = `${via.detail}; sibling run(s) also satisfied the requirement (${satisfied.map((s) => `run ${s.runId}`).join(', ')}) — they do not supersede the failed run, only a rerun of it does`;
+    }
+    return { state: 'failed', via, perRun };
+  }
+  // Fail-closed: while any run of the required workflow is still executing,
+  // the evidence is pending — even if another run already satisfied the
+  // requirement — because the eventual outcome is not known yet.
+  if (pendings.length) {
+    return {
+      state: 'pending', via: pendings[0], perRun,
+      note: satisfied.length
+        ? 'another run already satisfied the requirement, but a required-workflow run is still executing'
+        : undefined,
+    };
+  }
+  if (satisfied.length) {
+    return { state: 'satisfied', via: satisfied[0], perRun };
+  }
+  const order = ['not-executed', 'unknown-evidence'];
+  for (const s of order) {
+    const hit = perRun.filter((r) => r.state === s);
+    if (hit.length) return { state: s, via: hit[0], perRun };
+  }
+  return { state: 'unknown-evidence', detail: 'no evaluable run', perRun };
+}
+
+// Branch protection rules for the target branch. Permission gaps stay
+// "unknown" — never assumed to mean absence. When rules exist, their
+// required contexts are CHECKED against the head commit (check-runs +
+// combined status), not merely displayed.
 function summarizeProtection(mainBranchRes, protectionRes) {
   const branchProtected = ok(mainBranchRes)
     ? !!mainBranchRes.body.protected
@@ -202,21 +376,69 @@ function summarizeProtection(mainBranchRes, protectionRes) {
     };
   }
   if (protectionRes && protectionRes.status === 404) {
-    // Definitive "not protected" only when the branch itself was readable.
     if (branchProtected === false) {
       return { state: 'not-protected', branchProtected, requiredStatusChecks: null, requiredReviews: null };
     }
-    return { state: 'unknown', branchProtected, requiredStatusChecks: null, requiredReviews: null,
-      note: 'protection endpoint 404 while branch readability unconfirmed' };
+    return {
+      state: 'unknown', branchProtected, requiredStatusChecks: null, requiredReviews: null,
+      note: 'protection endpoint 404 while branch readability unconfirmed',
+    };
   }
   const note = protectionRes && protectionRes.status === 403
-    ? 'permission denied reading protection rules; not assuming absence'
-    : ((protectionRes && protectionRes.error) || 'protection unreadable');
+    ? 'permission denied reading protection rules; refusing to assume absence'
+    : `protection unreadable: ${errText(protectionRes)}`;
   return { state: 'unknown', branchProtected, requiredStatusChecks: null, requiredReviews: null, note };
 }
 
+// Are the protected branch's required contexts satisfied on this head?
+function evaluateProtectionRequirements(protection, checkRunsRes, statusRes) {
+  if (protection.state === 'not-protected') {
+    return {
+      state: 'not-applicable',
+      detail: 'branch not protected — no GitHub-side required checks; the project evidence config still governs readiness',
+    };
+  }
+  if (protection.state === 'unknown') {
+    return { state: 'unknown', detail: protection.note || 'protection unreadable' };
+  }
+  const contexts = (protection.requiredStatusChecks && protection.requiredStatusChecks.contexts) || [];
+  if (!contexts.length) {
+    return { state: 'none-required', detail: 'protected but no required status checks configured' };
+  }
+  if (!ok(checkRunsRes) || !ok(statusRes)) {
+    return {
+      state: 'unknown',
+      detail: `required-check satisfaction unreadable: check-runs ${errText(checkRunsRes)}, status ${errText(statusRes)}`,
+    };
+  }
+  const crBody = checkRunsRes.body;
+  const stBody = statusRes.body;
+  if (truncatedList(crBody, 'check_runs') || truncatedList(stBody, 'statuses')) {
+    return { state: 'unknown', detail: 'check-runs/status list truncated (total_count > fetched) — refusing to judge satisfaction' };
+  }
+  const details = [];
+  let state = 'satisfied';
+  for (const ctx of contexts) {
+    const cr = (crBody.check_runs || []).find((r) => r.name === ctx);
+    const st = (stBody.statuses || []).find((s) => s.context === ctx);
+    const conc = cr ? cr.conclusion : null;
+    const stState = st ? st.state : null;
+    if (conc === 'success' || stState === 'success') {
+      details.push(`${ctx}: satisfied`);
+    } else if ((cr && cr.status && cr.status !== 'completed')
+      || (stState && PENDING_STATES.includes(stState))) {
+      if (state === 'satisfied') state = 'pending';
+      details.push(`${ctx}: pending`);
+    } else {
+      state = 'unsatisfied';
+      details.push(`${ctx}: ${conc || stState || 'required check not found on this head'}`);
+    }
+  }
+  return { state, detail: details.join('; ') };
+}
+
 function describeDrift(cmp) {
-  if (!cmp || !cmp.body) return { status: 'unknown', error: (cmp && cmp.error) || 'no compare body' };
+  if (!cmp || !cmp.body) return { status: 'unknown', error: errText(cmp) };
   const b = cmp.body;
   const commits = (b.commits || []).slice(0, DRIFT_COMMIT_CAP).map((c) => ({
     sha: c.sha,
@@ -224,8 +446,8 @@ function describeDrift(cmp) {
   }));
   return {
     status: b.status,
-    aheadBy: b.ahead_by, // commits on the PR head that accepted lacks
-    behindBy: b.behind_by, // commits on accepted that the PR head lacks
+    aheadBy: b.ahead_by,
+    behindBy: b.behind_by,
     totalCommits: b.total_commits,
     files: (b.files || []).length,
     fileList: (b.files || []).slice(0, DRIFT_COMMIT_CAP).map((f) => `${f.status}:${f.filename}`),
@@ -235,149 +457,257 @@ function describeDrift(cmp) {
   };
 }
 
-function asContainment(res) {
-  if (!res) return { state: 'unknown', detail: 'not fetched' };
-  if (!ok(res)) return { state: 'unknown', detail: res.error || `HTTP ${res.status}` };
-  const b = res.body;
-  return {
-    state: containedFromCompare(res),
-    detail: `status=${b.status} ahead_by=${b.ahead_by} behind_by=${b.behind_by}`,
-  };
-}
-
-// Classification of one candidate from already-fetched facts.
-// facts: {pr, repoMeta, mainBranch, protection, acceptedInMain, headInMain,
-//         drift, ci} — each a {ok, body, error} flavored record or null.
+// ---------------------------------------------------------------------------
+// The shared classifier. Every consumer (JSON, text, exit code) derives from
+// the status this returns. facts are pre-fetched; see fetchCandidateFacts.
+// ---------------------------------------------------------------------------
 function classifyCandidate(facts) {
   const reasons = [];
+  const unknowns = [];
+
   if (!ok(facts.pr)) {
-    reasons.push(`PR not readable: ${(facts.pr && (facts.pr.error || `HTTP ${facts.pr.status}`)) || 'no data'}`);
-    return { classification: CLASSIFICATIONS.INSUFFICIENT, reasons };
+    unknowns.push(`PR not readable: ${errText(facts.pr)}`);
+    return { status: STATUS.INSUFFICIENT, reasons, unknowns };
   }
   const pr = facts.pr.body;
   const headSha = pr.head && pr.head.sha;
   const acceptedSha = facts.acceptedSha;
+  const targetBranch = facts.baseBranch;
   const headMatchesAccepted = headSha === acceptedSha;
 
   if (pr.merged === true) {
-    const mergedState = facts.mergedInMain || { state: 'unknown' };
-    if (mergedState.state === 'contained') {
-      reasons.push(`merged (merge commit ${(pr.merge_commit_sha || '').slice(0, 12)}) and accepted SHA is an ancestor of the merge commit`);
-      return { classification: CLASSIFICATIONS.MERGED_TRACEABLE, reasons };
+    // Two independent ancestry legs; accepted->merge alone is NOT enough.
+    const leg1 = facts.acceptedToMerge || { state: 'unknown', detail: 'not fetched' };
+    const leg2 = facts.mergeToMain || { state: 'unknown', detail: 'not fetched' };
+    const inMain = facts.acceptedInMain || { state: 'unknown', detail: 'not fetched' };
+    if (leg1.state === 'contained' && leg2.state === 'contained') {
+      reasons.push(`merged (merge commit ${String(pr.merge_commit_sha || '').slice(0, 12)}); accepted -> merge commit and merge commit -> current main both proven (${leg1.detail}; ${leg2.detail})`);
+      return { status: STATUS.LANDED_TRACEABLE, reasons, unknowns };
     }
-    if (facts.acceptedInMain && facts.acceptedInMain.state === 'contained') {
-      reasons.push('PR shows merged but the accepted SHA reached main by another route; merge commit ancestry unverified');
-      return { classification: CLASSIFICATIONS.MERGED_TRACEABLE, reasons };
+    if (inMain.state === 'contained') {
+      reasons.push(`PR merged, and the accepted SHA is an ancestor of current main (${inMain.detail}); merge commit -> main leg: ${leg2.state}`);
+      return { status: STATUS.LANDED_TRACEABLE, reasons, unknowns };
     }
-    if (mergedState.state === 'unknown'
-      && (!facts.acceptedInMain || facts.acceptedInMain.state === 'unknown')) {
-      reasons.push(`merged but traceability could not be read: ${mergedState.detail || 'compare unavailable'}`);
-      return { classification: CLASSIFICATIONS.INSUFFICIENT, reasons };
+    if (leg1.state === 'unknown' || leg2.state === 'unknown' || inMain.state === 'unknown') {
+      if (leg1.state === 'contained' && leg2.state === 'unknown') {
+        unknowns.push(`accepted -> merge commit proven (${leg1.detail}) but merge commit -> current main unreadable: ${leg2.detail}`);
+      } else {
+        unknowns.push(`merge traceability unreadable: accepted->merge ${leg1.detail}; merge->main ${leg2.detail}; accepted->main ${inMain.detail}`);
+      }
+      return { status: STATUS.INSUFFICIENT, reasons, unknowns };
     }
-    reasons.push(`merged but accepted SHA is not traceable in main (${mergedState.detail || mergedState.state}) — squash/rebase merge or force-push suspected; content equivalence unproven`);
-    return { classification: CLASSIFICATIONS.MERGED_UNTRACEABLE, reasons };
+    if (leg1.state === 'contained' && leg2.state === 'not-contained') {
+      reasons.push(`the merge commit exists and contains the accepted SHA (${leg1.detail}) but is NOT an ancestor of current main (${leg2.detail}) — the landing is not in the current main line (main moved on or was rewritten)`);
+      return { status: STATUS.MERGED_UNTRACEABLE, reasons, unknowns };
+    }
+    reasons.push(`merged but accepted content is not traceable in current main (accepted->merge ${leg1.state}, merge->main ${leg2.state}, accepted->main ${inMain.state})`);
+    return { status: STATUS.MERGED_UNTRACEABLE, reasons, unknowns };
   }
 
-  if (facts.acceptedInMain && facts.acceptedInMain.state === 'contained') {
-    reasons.push('PR still open, but the accepted SHA is already an ancestor of main (landed by another route)');
-    return { classification: CLASSIFICATIONS.ALREADY_IN_MAIN, reasons };
+  // Not merged. First: has the accepted content landed by another route?
+  const inMain = facts.acceptedInMain || { state: 'unknown', detail: 'not fetched' };
+  if (inMain.state === 'contained') {
+    reasons.push(`PR still ${pr.state}, but the accepted SHA is already an ancestor of current main (${inMain.detail}) — landed by another route`);
+    return { status: STATUS.LANDED_OTHER_ROUTE, reasons, unknowns };
+  }
+  if (inMain.state === 'unknown') {
+    unknowns.push(`accepted -> current main containment unreadable: ${inMain.detail}`);
   }
 
+  if (pr.state === 'closed') {
+    reasons.push(`PR is closed without being merged (merged=${pr.merged}) — explicitly not landable through this PR`);
+    return { status: STATUS.CLOSED_UNMERGED, reasons, unknowns };
+  }
+  if (pr.draft === true) {
+    reasons.push('PR is a draft — cannot be ready');
+    return { status: STATUS.DRAFT, reasons, unknowns };
+  }
+  if (pr.base && pr.base.ref !== targetBranch) {
+    reasons.push(`PR base is "${pr.base.ref}" but the configured landing target is "${targetBranch}" — refused as mismatched`);
+    return { status: STATUS.BASE_MISMATCH, reasons, unknowns };
+  }
   if (!headMatchesAccepted) {
     reasons.push(`head ${String(headSha || '?').slice(0, 12)} != accepted ${String(acceptedSha || '?').slice(0, 12)}`);
     if (ok(facts.drift)) {
       const d = describeDrift(facts.drift);
       reasons.push(`drift scope: ${d.status}, +${d.aheadBy}/-${d.behindBy} commits, ${d.files} files${d.truncated ? ' (truncated list)' : ''}`);
     } else {
-      reasons.push(`drift scope unknown: ${(facts.drift && facts.drift.error) || 'compare unavailable'}`);
+      unknowns.push(`drift scope unreadable: ${errText(facts.drift)}`);
     }
-    return { classification: CLASSIFICATIONS.HEAD_DRIFTED, reasons };
+    return { status: STATUS.HEAD_DRIFTED, reasons, unknowns };
   }
-
-  if (pr.draft === true) {
-    reasons.push('PR is a draft');
-    return { classification: CLASSIFICATIONS.INSUFFICIENT, reasons };
+  if (!ok(facts.mainBranch)) {
+    unknowns.push(`target branch "${targetBranch}" unreadable: ${errText(facts.mainBranch)}`);
+    return { status: STATUS.INSUFFICIENT, reasons, unknowns };
   }
   if (pr.mergeable === false || pr.mergeable_state === 'dirty') {
     reasons.push(`merge conflict (mergeable=${pr.mergeable}, state=${pr.mergeable_state})`);
-    return { classification: CLASSIFICATIONS.CONFLICT, reasons };
+    return { status: STATUS.CONFLICT, reasons, unknowns };
   }
-  if (pr.mergeable_state === 'blocked') {
-    reasons.push('merge blocked by branch requirements (mergeable_state=blocked)');
-    return { classification: CLASSIFICATIONS.INSUFFICIENT, reasons };
+  // Unknown mergeability must not pass: GitHub may still be computing, and a
+  // failed read is indistinguishable from that here.
+  if (pr.mergeable !== true) {
+    unknowns.push(`mergeability unknown (mergeable=${JSON.stringify(pr.mergeable)}, state=${pr.mergeable_state}) — not treated as passable`);
+    return { status: STATUS.INSUFFICIENT, reasons, unknowns };
   }
 
-  if (!facts.ci || !facts.ci.ok) {
-    reasons.push(`CI runs unreadable: ${(facts.ci && facts.ci.error) || 'no data'}`);
-    return { classification: CLASSIFICATIONS.INSUFFICIENT, reasons };
+  // Protection: an unknown state cannot back a ready; existing rules must be
+  // CHECKED against the head, not merely displayed.
+  const protection = facts.protectionFacts
+    || summarizeProtection(facts.mainBranch, facts.protection);
+  const protReq = facts.protectionRequirements || { state: 'unknown', detail: 'not evaluated' };
+  if (protection.state === 'unknown') {
+    unknowns.push(`branch protection unreadable: ${protection.note || 'unknown'}`);
+    return { status: STATUS.INSUFFICIENT, reasons, unknowns };
   }
-  const ci = facts.ci;
-  if (ci.status === 'pending') {
-    reasons.push(`CI incomplete: ${ci.incomplete.map((r) => `${r.name} (${r.status})`).join(', ')}`);
-    return { classification: CLASSIFICATIONS.CI_PENDING, reasons };
+  if (protReq.state === 'unknown') {
+    unknowns.push(`protection requirement satisfaction unknown: ${protReq.detail}`);
+    return { status: STATUS.INSUFFICIENT, reasons, unknowns };
   }
-  if (ci.status === 'failed') {
-    reasons.push(`CI failed: ${ci.failed.map((r) => `${r.name} run ${r.id} (${r.conclusion})`).join(', ')}`);
-    for (const n of ci.notes) reasons.push(n);
-    return { classification: CLASSIFICATIONS.CI_FAILED, reasons };
+  if (protReq.state === 'unsatisfied') {
+    reasons.push(`protected branch requirements not satisfied: ${protReq.detail}`);
+    return { status: STATUS.CONFLICT, reasons, unknowns };
   }
-  if (ci.status === 'unknown') {
-    reasons.push('CI state undetermined');
-    return { classification: CLASSIFICATIONS.INSUFFICIENT, reasons };
+  if (protReq.state === 'pending') {
+    reasons.push(`protected branch requirements pending: ${protReq.detail}`);
+    return { status: STATUS.CI_PENDING, reasons, unknowns };
   }
-  if (ci.status === 'none') {
-    reasons.push('no CI run for this head — treating as landable by policy, noted for the record');
-    return { classification: CLASSIFICATIONS.READY, reasons };
+
+  // Project evidence: the explicit per-repo CI requirement.
+  const evidence = facts.requiredEvidence
+    || { state: 'unknown-evidence', detail: 'evidence requirement not evaluated' };
+  if (evidence.state === 'unknown-evidence') {
+    unknowns.push(`required CI evidence not provable: ${evidence.detail || (evidence.via && evidence.via.detail) || 'unknown'}`);
+    return { status: STATUS.INSUFFICIENT, reasons, unknowns };
   }
-  reasons.push(`CI green on the accepted head (${ci.runs.map((r) => `${r.name}/${r.event} run ${r.id}${r.runAttempt > 1 ? ` attempt ${r.runAttempt}` : ''}`).join(', ')})`);
-  if (pr.mergeable === true) reasons.push(`mergeable (state=${pr.mergeable_state})`);
-  return { classification: CLASSIFICATIONS.READY, reasons };
+  if (evidence.state === 'pending') {
+    reasons.push(`required CI evidence pending: ${evidence.via && evidence.via.detail}`);
+    return { status: STATUS.CI_PENDING, reasons, unknowns };
+  }
+  if (evidence.state === 'failed') {
+    reasons.push(`required CI evidence explicitly failed: ${evidence.via && evidence.via.detail}`);
+    return { status: STATUS.CI_FAILED, reasons, unknowns };
+  }
+  if (evidence.state === 'not-executed') {
+    unknowns.push(`required CI evidence did not execute (skipped/neutral is not success evidence): ${evidence.via && evidence.via.detail}`);
+    return { status: STATUS.INSUFFICIENT, reasons, unknowns };
+  }
+
+  reasons.push(`required CI evidence satisfied: ${evidence.via && evidence.via.detail}`);
+  if (facts.runs && facts.runs.rerunDetected) {
+    reasons.push('note: a rerun is on record for this head (run_attempt > 1) — the first-attempt outcome stays in the review record, not rewritten as first-try success');
+  }
+  reasons.push(`head == accepted ${String(acceptedSha).slice(0, 12)}; base ${pr.base.ref} == target; mergeable=true (${pr.mergeable_state}); protection=${protection.state} (${protReq.state})`);
+  return { status: STATUS.READY, reasons, unknowns };
 }
 
 // ---------------------------------------------------------------------------
-// Orchestration: fetch live facts, then classify. api is injectable (tests).
+// Fetch layer (GET-only). api is injectable; every path used here is in the
+// read allowlist the tests pin.
 // ---------------------------------------------------------------------------
-function fetchCandidateFacts(config_entry, api) {
-  const { repo, pr: prNumber, acceptedSha } = config_entry;
-  const facts = { acceptedSha, pr: null, repoMeta: null, mainBranch: null,
-    protection: null, acceptedInMain: null, mergedInMain: null,
-    drift: null, ci: null };
+function fetchCandidateFacts(entry, config, api) {
+  const { repo, pr: prNumber, acceptedSha } = entry;
+  const targetBranch = entry.baseBranch || config.targetBranch || 'main';
+  const spec = (config.ciEvidence || {})[repo];
+  const facts = {
+    acceptedSha, baseBranch: targetBranch, evidenceSpec: spec,
+    pr: null, repoMeta: null, mainBranch: null, protection: null,
+    acceptedInMain: null, acceptedToMerge: null, mergeToMain: null,
+    drift: null, runs: null, runsRes: null, jobsByRun: new Map(),
+    requiredEvidence: null, protectionRequirements: null,
+  };
 
   facts.pr = api(`/repos/${repo}/pulls/${prNumber}`);
   const prBody = ok(facts.pr) ? facts.pr.body : null;
   facts.repoMeta = api(`/repos/${repo}`);
-  const defaultBranch = ok(facts.repoMeta)
-    ? facts.repoMeta.body.default_branch
-    : 'main';
-
-  facts.mainBranch = api(`/repos/${repo}/branches/${defaultBranch}`);
-  facts.protection = api(`/repos/${repo}/branches/${defaultBranch}/protection`);
+  facts.mainBranch = api(`/repos/${repo}/branches/${targetBranch}`);
+  facts.protection = api(`/repos/${repo}/branches/${targetBranch}/protection`);
+  facts.protectionFacts = summarizeProtection(facts.mainBranch, facts.protection);
   const mainSha = ok(facts.mainBranch) ? facts.mainBranch.body.commit.sha : null;
 
-  if (mainSha && acceptedSha) {
+  if (mainSha && SHA_RE.test(acceptedSha)) {
     facts.acceptedInMain = asContainment(api(`/repos/${repo}/compare/${acceptedSha}...${mainSha}`));
   }
   if (prBody && prBody.merged === true && prBody.merge_commit_sha) {
-    // Traceability of the ACCEPTED content through the actual merge commit.
-    facts.mergedInMain = asContainment(api(`/repos/${repo}/compare/${acceptedSha}...${prBody.merge_commit_sha}`));
+    facts.acceptedToMerge = asContainment(api(`/repos/${repo}/compare/${acceptedSha}...${prBody.merge_commit_sha}`));
+    if (mainSha) {
+      facts.mergeToMain = asContainment(api(`/repos/${repo}/compare/${prBody.merge_commit_sha}...${mainSha}`));
+    }
   }
-  if (prBody && prBody.head && prBody.head.sha
-    && prBody.head.sha !== acceptedSha) {
+  if (prBody && prBody.head && prBody.head.sha && prBody.head.sha !== acceptedSha) {
     facts.drift = api(`/repos/${repo}/compare/${acceptedSha}...${prBody.head.sha}`);
   }
-  if (prBody && prBody.head && prBody.head.sha) {
-    facts.ciRaw = api(`/repos/${repo}/actions/runs?head_sha=${prBody.head.sha}&per_page=50`);
-    facts.ci = ok(facts.ciRaw)
-      ? summarizeCi(facts.ciRaw.body, prBody.head.sha)
-      : { ok: false, error: (facts.ciRaw && facts.ciRaw.error) || `HTTP ${facts.ciRaw && facts.ciRaw.status}`, status: 'unknown' };
-    if (facts.ci && facts.ci.ok !== false) facts.ci.ok = true;
+
+  // Evidence fetches matter for OPEN PRs (landed PRs are judged by ancestry).
+  const needsEvidence = prBody && prBody.merged !== true && prBody.head && prBody.head.sha;
+  if (needsEvidence) {
+    const headSha = prBody.head.sha;
+    facts.runsRes = api(`/repos/${repo}/actions/runs?head_sha=${headSha}&per_page=100`);
+    if (ok(facts.runsRes)) {
+      facts.runs = summarizeRuns(facts.runsRes.body, headSha);
+      if (truncatedList(facts.runsRes.body, 'workflow_runs')) {
+        facts.runs.truncated = true;
+      }
+      const wfRuns = spec
+        ? facts.runs.runs.filter((r) => r.name === spec.workflow)
+          .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+          .slice(0, MAX_EVIDENCE_RUNS)
+        : [];
+      for (const run of wfRuns) {
+        const jobsRes = api(`/repos/${repo}/actions/runs/${run.id}/jobs?per_page=100`);
+        facts.jobsByRun.set(run.id, ok(jobsRes)
+          ? {
+            ok: true, error: null,
+            truncated: truncatedList(jobsRes.body, 'jobs'),
+            jobs: (jobsRes.body.jobs || []).map((j) => ({ name: j.name, conclusion: j.conclusion })),
+          }
+          : { ok: false, error: errText(jobsRes), truncated: false, jobs: [] });
+      }
+      if (spec) {
+        facts.requiredEvidence = evaluateRequiredEvidence(spec, facts.runs.runs, facts.jobsByRun);
+        if (facts.runs.truncated) {
+          // Incomplete inventory: refuse, even if a satisfying run is visible —
+          // the page did not prove what else ran on this head.
+          facts.requiredEvidence = {
+            state: 'unknown-evidence',
+            detail: 'run list truncated (total_count > fetched) — required evidence cannot be judged from an incomplete inventory',
+            perRun: facts.requiredEvidence.perRun || [],
+          };
+        }
+      } else {
+        facts.requiredEvidence = {
+          state: 'unknown-evidence',
+          detail: `no explicit evidence requirement configured for ${repo}`,
+        };
+      }
+    } else {
+      facts.runs = { ok: false, error: errText(facts.runsRes), runs: [], incomplete: [], failed: [], rerunDetected: false, notes: [], truncated: false };
+      facts.requiredEvidence = { state: 'unknown-evidence', detail: `CI runs unreadable: ${errText(facts.runsRes)}` };
+    }
+
+    if (facts.protectionFacts.state === 'protected') {
+      const headSha = prBody.head.sha;
+      const checkRunsRes = api(`/repos/${repo}/commits/${headSha}/check-runs?per_page=100`);
+      const statusRes = api(`/repos/${repo}/commits/${headSha}/status`);
+      facts.protectionRequirements = evaluateProtectionRequirements(
+        facts.protectionFacts, checkRunsRes, statusRes);
+    }
+  }
+  if (!facts.protectionRequirements) {
+    facts.protectionRequirements = evaluateProtectionRequirements(facts.protectionFacts, null, null);
+  }
+  if (!facts.acceptedInMain) {
+    facts.acceptedInMain = {
+      state: 'unknown',
+      detail: mainSha ? 'not fetched' : `target branch unreadable: ${errText(facts.mainBranch)}`,
+    };
   }
   return facts;
 }
 
-function candidateRecord(entry, api) {
-  const facts = fetchCandidateFacts(entry, api);
-  const { classification, reasons } = classifyCandidate(facts);
+function candidateRecord(entry, config, api) {
+  const facts = fetchCandidateFacts(entry, config, api);
+  const { status, reasons, unknowns } = classifyCandidate(facts);
   const prBody = ok(facts.pr) ? facts.pr.body : null;
   const mainBranch = ok(facts.mainBranch) ? facts.mainBranch.body : null;
   const repoMeta = ok(facts.repoMeta) ? facts.repoMeta.body : null;
@@ -385,8 +715,14 @@ function candidateRecord(entry, api) {
     repo: entry.repo,
     pr: entry.pr,
     acceptedSha: entry.acceptedSha,
-    classification,
+    targetBranch: facts.baseBranch,
+    status,
+    family: FAMILIES.ready.has(status) ? 'ready'
+      : FAMILIES.landed.has(status) ? 'landed'
+        : FAMILIES.pending.has(status) ? 'pending'
+          : FAMILIES.blocked.has(status) ? 'blocked' : 'unknown',
     reasons,
+    unknowns,
     prState: prBody ? {
       state: prBody.state,
       merged: prBody.merged,
@@ -394,29 +730,50 @@ function candidateRecord(entry, api) {
       title: prBody.title,
       head: prBody.head ? { ref: prBody.head.ref, sha: prBody.head.sha } : null,
       base: prBody.base ? { ref: prBody.base.ref, sha: prBody.base.sha } : null,
+      baseMatchesTarget: !!(prBody.base && prBody.base.ref === facts.baseBranch),
       mergeable: prBody.mergeable,
       mergeableState: prBody.mergeable_state,
       mergeCommitSha: prBody.merge_commit_sha,
       headMatchesAccepted: !!(prBody.head && prBody.head.sha === entry.acceptedSha),
-    } : { error: (facts.pr && facts.pr.error) || 'unreadable' },
+    } : { error: errText(facts.pr) },
     main: {
       defaultBranch: repoMeta ? repoMeta.default_branch : 'main',
       sha: mainBranch && mainBranch.commit ? mainBranch.commit.sha : null,
-      protection: summarizeProtection(facts.mainBranch, facts.protection),
+      protection: facts.protectionFacts,
       tokenPermissions: repoMeta && repoMeta.permissions ? repoMeta.permissions : null,
     },
-    acceptedInMain: facts.acceptedInMain || { state: 'unknown', detail: 'not fetched' },
-    ci: facts.ci && facts.ci.ok ? {
-      status: facts.ci.status,
-      rerunDetected: facts.ci.rerunDetected,
-      notes: facts.ci.notes,
-      failed: facts.ci.failed,
-      incomplete: facts.ci.incomplete,
-      runs: facts.ci.runs,
-    } : { status: 'unknown', error: (facts.ci && facts.ci.error) || 'not fetched' },
+    acceptedInMain: facts.acceptedInMain,
   };
+  if (prBody && prBody.merged === true) {
+    record.mergeTrace = {
+      mergeCommitSha: prBody.merge_commit_sha,
+      acceptedToMerge: facts.acceptedToMerge || { state: 'unknown', detail: 'not fetched' },
+      mergeToMain: facts.mergeToMain || { state: 'unknown', detail: 'not fetched' },
+    };
+  }
   if (record.prState.headMatchesAccepted === false && facts.drift) {
-    record.drift = ok(facts.drift) ? describeDrift(facts.drift) : { status: 'unknown', error: facts.drift.error };
+    record.drift = ok(facts.drift) ? describeDrift(facts.drift) : { status: 'unknown', error: errText(facts.drift) };
+  }
+  if (facts.requiredEvidence) {
+    record.evidence = {
+      required: facts.evidenceSpec ? {
+        workflow: facts.evidenceSpec.workflow, jobs: facts.evidenceSpec.jobs,
+      } : null,
+      state: facts.requiredEvidence.state,
+      detail: facts.requiredEvidence.detail
+        || (facts.requiredEvidence.via && facts.requiredEvidence.via.detail) || null,
+      via: facts.requiredEvidence.via || null,
+      perRun: facts.requiredEvidence.perRun || [],
+      runs: facts.runs ? {
+        truncated: !!facts.runs.truncated,
+        rerunDetected: facts.runs.rerunDetected,
+        notes: facts.runs.notes,
+        incomplete: facts.runs.incomplete,
+        failed: facts.runs.failed,
+        runs: facts.runs.runs,
+      } : null,
+    };
+    record.protectionRequirements = facts.protectionRequirements;
   }
   return record;
 }
@@ -431,12 +788,12 @@ function carriedInputRecord(input, api) {
   }
   const containment = facts.containment;
   const contained = containedFromCompare(containment);
-  let classification;
-  if (!prBody) classification = 'insufficient-info';
-  else if (prBody.merged) classification = 'merged';
-  else if (contained === 'contained') classification = 'contained-by-integration-head';
-  else if (contained === 'not-contained') classification = 'not-contained-in-integration-head';
-  else classification = 'insufficient-info';
+  let status;
+  if (!prBody) status = 'insufficient-info';
+  else if (prBody.merged) status = 'merged';
+  else if (contained === 'contained') status = 'contained-by-integration-head';
+  else if (contained === 'not-contained') status = 'not-contained-in-integration-head';
+  else status = 'insufficient-info';
   return {
     repo,
     pr: input.pr,
@@ -449,12 +806,81 @@ function carriedInputRecord(input, api) {
     containmentDetail: containment && containment.body
       ? `status=${containment.body.status} ahead_by=${containment.body.ahead_by} behind_by=${containment.body.behind_by}`
       : ((containment && containment.error) || 'not fetched'),
-    classification,
+    status,
   };
 }
 
+// ---------------------------------------------------------------------------
+// Configuration validation. Invalid/empty config is rejected — never silently
+// treated as "zero candidates, everything fine".
+// ---------------------------------------------------------------------------
+function validateConfig(config) {
+  const problems = [];
+  if (!config || typeof config !== 'object' || Array.isArray(config)) {
+    throw new ConfigError('invalid preflight config: expected an object');
+  }
+  const candidates = config.candidates;
+  if (!Array.isArray(candidates) || candidates.length === 0) {
+    throw new ConfigError('invalid preflight config: candidates must be a non-empty array');
+  }
+  const seen = new Set();
+  candidates.forEach((c, i) => {
+    const at = `candidates[${i}]`;
+    if (!c || typeof c !== 'object') { problems.push(`${at} must be an object`); return; }
+    if (typeof c.repo !== 'string' || !c.repo.includes('/')) problems.push(`${at}.repo must be "owner/repo"`);
+    if (!Number.isInteger(c.pr) || c.pr <= 0) problems.push(`${at}.pr must be a positive integer`);
+    if (typeof c.acceptedSha !== 'string' || !SHA_RE.test(c.acceptedSha)) problems.push(`${at}.acceptedSha must be a 40-hex commit SHA`);
+    if (c.baseBranch !== undefined && (typeof c.baseBranch !== 'string' || !c.baseBranch)) problems.push(`${at}.baseBranch must be a non-empty string when present`);
+    if (typeof c.repo === 'string' && Number.isInteger(c.pr)) {
+      const key = `${c.repo}#${c.pr}`;
+      if (seen.has(key)) problems.push(`duplicate candidate ${key}`);
+      seen.add(key);
+    }
+  });
+  const ci = config.ciEvidence;
+  if (!ci || typeof ci !== 'object' || Array.isArray(ci)) {
+    problems.push('ciEvidence must map each candidate repo to {workflow, jobs} — the required verification evidence is explicit, never inferred');
+  } else {
+    for (const c of candidates) {
+      if (!c || typeof c.repo !== 'string') continue;
+      const spec = ci[c.repo];
+      if (!spec || typeof spec !== 'object'
+        || typeof spec.workflow !== 'string' || !spec.workflow
+        || !Array.isArray(spec.jobs) || spec.jobs.length === 0
+        || !spec.jobs.every((j) => typeof j === 'string' && j)) {
+        problems.push(`ciEvidence[${c.repo}] must be {workflow: non-empty string, jobs: [non-empty string, ...]}`);
+      }
+    }
+  }
+  if (config.carriedInputs) {
+    const ci2 = config.carriedInputs;
+    if (typeof ci2.repo !== 'string' || !ci2.repo.includes('/')) problems.push('carriedInputs.repo must be "owner/repo"');
+    if (!ci2.carriedBy || !SHA_RE.test(ci2.carriedBy.head || '')) problems.push('carriedInputs.carriedBy.head must be a 40-hex commit SHA');
+    if (!Array.isArray(ci2.prs) || !ci2.prs.every((n) => Number.isInteger(n) && n > 0)) problems.push('carriedInputs.prs must be positive integers');
+  }
+  if (problems.length) {
+    throw new ConfigError(`invalid preflight config:\n  - ${problems.join('\n  - ')}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Aggregation — the single source for verdict, summary lists, and exit code.
+// ---------------------------------------------------------------------------
+function aggregateVerdict(statuses) {
+  if (statuses.length === 0) {
+    return { verdict: 'insufficient-info', exitCode: 2 }; // defensive; validateConfig rejects empty
+  }
+  const inSet = (set) => statuses.some((s) => set.has(s));
+  if (inSet(FAMILIES.unknown)) return { verdict: 'insufficient-info', exitCode: 2 };
+  if (inSet(FAMILIES.pending) || inSet(FAMILIES.blocked)) return { verdict: 'blocked', exitCode: 1 };
+  if (statuses.every((s) => FAMILIES.landed.has(s))) return { verdict: 'landed', exitCode: 0 };
+  if (statuses.every((s) => s === STATUS.READY)) return { verdict: 'ready', exitCode: 0 };
+  return { verdict: 'continue', exitCode: 0 }; // ready+landed mix, no gaps
+}
+
 function buildReport(config, api, now) {
-  const candidates = (config.candidates || []).map((c) => candidateRecord(c, api));
+  validateConfig(config);
+  const candidates = (config.candidates || []).map((c) => candidateRecord(c, config, api));
   const carriedInputs = config.carriedInputs && config.carriedInputs.prs
     ? config.carriedInputs.prs.map((n) => carriedInputRecord({
       repo: config.carriedInputs.repo,
@@ -462,53 +888,64 @@ function buildReport(config, api, now) {
       pr: n,
     }, api))
     : [];
-  const blockers = candidates.filter((c) => BLOCKING.has(c.classification));
-  const undetermined = candidates.filter((c) => c.classification === CLASSIFICATIONS.INSUFFICIENT);
-  const landableNow = candidates.filter((c) => c.classification === CLASSIFICATIONS.READY);
-  const landed = candidates.filter((c) => LANDED.has(c.classification));
+  const by = (family) => candidates.filter((c) => c.family === family)
+    .map((c) => `${c.repo}#${c.pr}: ${c.status}`);
+  const { verdict, exitCode } = aggregateVerdict(candidates.map((c) => c.status));
   return {
-    schema: 'm4a-mainline-preflight/v1',
+    schema: 'm4a-mainline-preflight/v2',
     generatedAt: now || new Date().toISOString(),
     readonly: true,
     transport: 'gh api (GET only)',
+    evidencePolicy: 'explicit per-repo ciEvidence config; missing/unknown/skipped evidence is never ready',
     summary: {
-      landableNow: landableNow.map((c) => `${c.repo}#${c.pr}`),
-      landed: landed.map((c) => `${c.repo}#${c.pr}`),
-      blockers: blockers.map((c) => `${c.repo}#${c.pr}: ${c.classification}`),
-      undetermined: undetermined.map((c) => `${c.repo}#${c.pr}`),
-      verdict: undetermined.length ? 'insufficient-info'
-        : (blockers.length || !landableNow.length) ? 'blocked' : 'ready',
+      verdict,
+      exitCode,
+      ready: by('ready'),
+      landed: by('landed'),
+      pending: by('pending'),
+      blocked: by('blocked'),
+      undetermined: by('unknown'),
     },
     candidates,
     carriedInputs,
   };
 }
 
+// The exit code derives from the aggregated verdict only — it can never
+// disagree with what the summary reports.
+function exitCodeFor(report) {
+  return report.summary.exitCode;
+}
+
 // ---------------------------------------------------------------------------
 // Rendering + CLI.
 // ---------------------------------------------------------------------------
-const CLASS_MARK = {
-  'ready-to-merge': 'READY',
-  'merged-traceable': 'LANDED (traceable)',
-  'merged-untraceable': 'BLOCKER (merged, untraceable)',
-  'already-in-main': 'LANDED (already in main)',
-  'head-drifted': 'BLOCKER (head drifted)',
-  'conflict': 'BLOCKER (conflict)',
-  'ci-pending': 'BLOCKER (CI pending)',
-  'ci-failed': 'BLOCKER (CI failed)',
-  'insufficient-info': 'UNKNOWN (insufficient info)',
+const STATUS_MARK = {
+  'ready': 'READY',
+  'landed-traceable': 'LANDED (traceable: accepted->merge->main)',
+  'landed-other-route': 'LANDED (accepted already in main)',
+  'ci-pending': 'NOT READY (CI pending)',
+  'ci-failed': 'BLOCKED (CI failed)',
+  'head-drifted': 'BLOCKED (head drifted)',
+  'base-mismatch': 'BLOCKED (PR base != target)',
+  'conflict': 'BLOCKED (conflict / unsatisfied requirements)',
+  'closed-unmerged': 'NOT LANDABLE (closed without merge)',
+  'draft': 'NOT LANDABLE (draft)',
+  'merged-untraceable': 'BLOCKED (landing not traceable in current main)',
+  'insufficient-info': 'UNKNOWN (insufficient evidence — refused, not passed)',
 };
 
 function renderText(report) {
   const lines = [];
-  lines.push(`m4a-mainline-preflight — ${report.generatedAt} (read-only, live GitHub state)`);
+  lines.push(`m4a-mainline-preflight v2 — ${report.generatedAt} (read-only, live GitHub state)`);
+  lines.push(`evidence policy: ${report.evidencePolicy}`);
   lines.push('');
   for (const c of report.candidates) {
-    lines.push(`[${c.repo.replace('boccchi2993/', '')} #${c.pr}] ${CLASS_MARK[c.classification] || c.classification}`);
+    lines.push(`[${c.repo.replace('boccchi2993/', '')} #${c.pr}] ${STATUS_MARK[c.status] || c.status}`);
     if (c.prState && !c.prState.error) {
       const p = c.prState;
-      lines.push(`  head ${p.head ? `${p.head.ref} @ ${String(p.head.sha).slice(0, 12)}` : '?'} | accepted ${String(c.acceptedSha).slice(0, 12)} | match=${p.headMatchesAccepted}`);
-      lines.push(`  state=${p.state} merged=${p.merged} mergeable=${p.mergeable} (${p.mergeableState})`);
+      lines.push(`  head ${p.head ? `${p.head.ref} @ ${String(p.head.sha).slice(0, 12)}` : '?'} | accepted ${String(c.acceptedSha).slice(0, 12)} | match=${p.headMatchesAccepted} | base ${p.base ? p.base.ref : '?'} == target ${c.targetBranch}: ${p.baseMatchesTarget}`);
+      lines.push(`  state=${p.state} merged=${p.merged} draft=${p.draft} mergeable=${p.mergeable} (${p.mergeableState})`);
     } else {
       lines.push(`  PR unreadable: ${c.prState.error}`);
     }
@@ -517,32 +954,46 @@ function renderText(report) {
       lines.push(`  main ${String(c.main.sha || '?').slice(0, 12)} | protection=${prot.state}${prot.requiredStatusChecks ? ` requiredChecks=${JSON.stringify(prot.requiredStatusChecks.contexts)}` : ''}`);
       lines.push(`  accepted in main: ${c.acceptedInMain.state}${c.acceptedInMain.detail ? ` (${c.acceptedInMain.detail})` : ''}`);
     }
+    if (c.mergeTrace) {
+      lines.push(`  merge trace: accepted->merge ${c.mergeTrace.acceptedToMerge.state}; merge->main ${c.mergeTrace.mergeToMain.state}`);
+    }
     if (c.drift) {
       lines.push(`  drift: ${c.drift.status} +${c.drift.aheadBy ?? '?'}/-${c.drift.behindBy ?? '?'} commits, files=${c.drift.files ?? '?'}`);
     }
-    if (c.ci && c.ci.status) {
-      const failed = (c.ci.failed || []).map((f) => `${f.name}#${f.id} ${f.conclusion}`).join('; ');
-      const pend = (c.ci.incomplete || []).map((f) => `${f.name}#${f.id} ${f.status}`).join('; ');
-      const det = [failed && `failed: ${failed}`, pend && `pending: ${pend}`].filter(Boolean).join(' | ');
-      lines.push(`  CI: ${c.ci.status}${c.ci.rerunDetected ? ' (rerun detected)' : ''}${det ? ` — ${det}` : ''}`);
-      for (const n of c.ci.notes || []) lines.push(`    · ${n}`);
+    if (c.evidence) {
+      const e = c.evidence;
+      lines.push(`  required evidence: ${e.state}${e.detail ? ` — ${e.detail}` : ''}`);
+      const r = e.runs;
+      if (r) {
+        const det = [
+          r.failed.length && `failed: ${r.failed.map((f) => `${f.name}#${f.id} ${f.conclusion}`).join('; ')}`,
+          r.incomplete.length && `pending: ${r.incomplete.map((f) => `${f.name}#${f.id} ${f.status}`).join('; ')}`,
+          r.truncated && 'RUN LIST TRUNCATED',
+        ].filter(Boolean).join(' | ');
+        lines.push(`  runs: rerunDetected=${r.rerunDetected}${det ? ` — ${det}` : ''}`);
+        for (const n of r.notes) lines.push(`    · ${n}`);
+      }
+      if (c.protectionRequirements) {
+        lines.push(`  protection requirements: ${c.protectionRequirements.state}${c.protectionRequirements.detail ? ` — ${c.protectionRequirements.detail}` : ''}`);
+      }
     }
+    for (const u of c.unknowns) lines.push(`  ? unknown: ${u}`);
     for (const r of c.reasons) lines.push(`  → ${r}`);
     lines.push('');
   }
   if (report.carriedInputs.length) {
-    lines.push('Product integration inputs (are they already carried by #5?):');
+    lines.push('Product integration inputs (are they already carried by the integration head?):');
     for (const i of report.carriedInputs) {
-      lines.push(`  #${i.pr} ${i.title ? `"${String(i.title).slice(0, 60)}"` : ''} state=${i.state} merged=${i.merged} → ${i.classification}`);
+      lines.push(`  #${i.pr} ${i.title ? `"${String(i.title).slice(0, 60)}"` : ''} state=${i.state} merged=${i.merged} → ${i.status}`);
       lines.push(`    head ${i.head ? `${i.head.ref} @ ${String(i.head.sha).slice(0, 12)}` : '?'} vs integration head ${String(i.integrationHead).slice(0, 12)}: containment=${i.containedInIntegrationHead} (${i.containmentDetail})`);
     }
     lines.push('');
   }
-  lines.push(`verdict: ${report.summary.verdict}`);
-  if (report.summary.landableNow.length) lines.push(`  landable now: ${report.summary.landableNow.join(', ')}`);
-  if (report.summary.landed.length) lines.push(`  landed (traceable): ${report.summary.landed.join(', ')}`);
-  for (const b of report.summary.blockers) lines.push(`  blocker: ${b}`);
-  for (const u of report.summary.undetermined) lines.push(`  undetermined: ${u}`);
+  const s = report.summary;
+  lines.push(`verdict: ${s.verdict} (exit ${s.exitCode})`);
+  for (const key of ['ready', 'landed', 'pending', 'blocked', 'undetermined']) {
+    for (const item of s[key]) lines.push(`  ${key}: ${item}`);
+  }
   return lines.join('\n');
 }
 
@@ -559,15 +1010,6 @@ function parseArgs(argv) {
   return args;
 }
 
-// Exit-code contract: 0 all ready/landed; 1 concrete blockers; 2 undetermined.
-function exitCodeFor(report) {
-  const hasUnknown = report.candidates.some((c) => c.classification === CLASSIFICATIONS.INSUFFICIENT);
-  const hasBlocker = report.candidates.some((c) => BLOCKING.has(c.classification));
-  const allSettled = report.candidates.every((c) => LANDED.has(c.classification)
-    || c.classification === CLASSIFICATIONS.READY);
-  return allSettled ? 0 : (hasUnknown ? 2 : (hasBlocker ? 1 : 2));
-}
-
 function main(argv) {
   const args = parseArgs(argv);
   if (args.help) {
@@ -575,8 +1017,9 @@ function main(argv) {
       'Usage: node scripts/m4a-mainline-preflight.cjs [--json] [--out FILE] [--config FILE]',
       '',
       'Read-only live audit of the M4a mainline candidates. GET-only GitHub',
-      " access via the `gh` CLI. Exit 0 = all candidates ready/landed,",
-      ' 1 = concrete blockers, 2 = insufficient information.',
+      ' access via the `gh` CLI. Refuses "ready" on missing/unknown evidence.',
+      'Exit 0 = ready/landed/continue, 1 = blocked, 2 = insufficient info,',
+      ' 3 = invalid configuration.',
       '',
     ].join('\n'));
     return 0;
@@ -590,6 +1033,10 @@ function main(argv) {
     }
     report = buildReport(config, ghApiAdapter());
   } catch (err) {
+    if (err instanceof ConfigError) {
+      process.stderr.write(`${err.message}\n`);
+      return 3;
+    }
     process.stderr.write(`preflight failed: ${err && err.stack || err}\n`);
     return 2;
   }
@@ -609,13 +1056,19 @@ function main(argv) {
 
 module.exports = {
   DEFAULT_CONFIG,
-  CLASSIFICATIONS,
+  STATUS,
+  FAMILIES,
+  ConfigError,
+  validateConfig,
   buildReport,
   classifyCandidate,
-  summarizeCi,
+  summarizeRuns,
+  evaluateRequiredEvidence,
+  evaluateProtectionRequirements,
   summarizeProtection,
   containedFromCompare,
   describeDrift,
+  aggregateVerdict,
   renderText,
   ghApiAdapter,
   parseArgs,
