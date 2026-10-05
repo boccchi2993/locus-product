@@ -56,8 +56,13 @@ Supporting facts:
 
 - `PYTHON_BOOTSTRAP_MANIFEST` gained ONLY the exact micropip closure
   declared by the pinned pyodide-lock.json (`micropip-0.6.0`,
-  `packaging-23.2`), size/hash-pinned and verified by
-  `scripts/verify-python-bootstrap-manifest.mjs`. Plugin wheels themselves
+  `packaging-23.2`), size/hash-pinned. Since the three-repository switch
+  the manifest lives in the locus-runtime core's `src/shell.js`; the
+  product-side witness is `tests/helpers/python-manifest.cjs` (reads the
+  installed pinned package), the CDN-bytes verifier belongs to the
+  locus-runtime repository, and this product repo carries only the
+  provenance snapshot `tests/fixtures/pyodide-lock-snapshot.json`.
+  Plugin wheels themselves
   NEVER enter the manifest: bootstrap assets are the Locus runtime trusted
   base, plugin artifacts are extension payload delivered in the bootstrap
   MESSAGE.

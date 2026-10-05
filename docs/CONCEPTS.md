@@ -74,9 +74,9 @@ A persistent change to future agent workflow guidance. SkillInstance create/writ
 
 ## ModelCapabilityRegistry
 
-The image-input compatibility registry in `src/capabilities.js`.
+The image-input compatibility registry in the locus-harness core (`src/capabilities.js`).
 
-Despite the shared word, this is not the user-facing Capability composition registry in `src/extensions.js`.
+Despite the shared word, this is not the user-facing Capability composition registry in the Product-owned `src/extensions.js`.
 
 ## Workspace
 
