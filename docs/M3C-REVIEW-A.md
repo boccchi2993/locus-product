@@ -66,6 +66,20 @@ All six confirmed defects lived in the old single-file orchestrator:
    internal Python/CDP budgets, which this change does not shorten) is
    tree-killed and recorded as a timeout failure.
 
+   [Annotated 2026-10-05, second review round (F1): the cleanup semantics
+   above are superseded by a SHARED bounded, verified helper —
+   `tests/helpers/browser-gate-cleanup.cjs` — used by BOTH the suite
+   timeout and the preview shutdown. SIGTERM to the owned process group →
+   bounded grace → SIGKILL to the same group → bounded confirmation;
+   the timeout verdict settles WITHIN that bounded window (a suite
+   ignoring SIGTERM can no longer hang the orchestrator forever), stays
+   `timeout` even when the child exits 0 during the kill, and an
+   unconfirmed cleanup is attached to the verdict and fails the run.
+   Preview `kill()` no longer returns unconditional `ok` when the root
+   already exited: POSIX verifies (and if needed cleans) the group;
+   Windows reports an explicit unconfirmable-cleanup failure. `killTree`
+   survives only as the low-level signal primitive.]
+
 ## Tests (tests-first, red then green)
 
 New: `tests/browser-gate-orchestrator.test.cjs` (+ the three

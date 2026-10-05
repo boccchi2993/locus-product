@@ -7,7 +7,9 @@ map, the D wiring, the full verification sequence with first results and
 exit codes, and the corrections this round makes to
 [M3C-D-INTEGRATION.md](M3C-D-INTEGRATION.md) §5. It does not merge
 anything, publish anything, or deploy anything; after push the branch
-waits for review.
+waits for review. §8 records the SECOND review round (2026-10-05: F1
+bounded owned-process cleanup, F2 structured negative-self-proof judge,
+F3 Python E3 wording) on the same branch.
 
 Established: 2026-10-05. No AGENTS.md exists in locus-product (re-verified
 at the baseline via `git ls-tree`; also GitHub-404 per M3C-REVIEW-B.md §1)
@@ -309,6 +311,22 @@ correction markers, and a new §5a summarizes:
    did not exercise that runtime-internal scenario and no new occurrence
    appeared; the item stays independently tracked — no product-side
    resolution is claimed here.
+   **[RETRACTED 2026-10-05, second review round — the original text above
+   is kept for history and is superseded by the bracketed correction.**
+   Both of its conclusions are withdrawn: (a) the historical E3 root
+   cause is UNCONFIRMED — "rooted and fixed" claimed more than the
+   records establish; (b) "no new occurrence appeared" is CONTRADICTED by
+   this same round's clean-checkout browser round, which recorded a
+   marker-less Pyodide-traceback occurrence at B-PY1 (§4 step 6: honest
+   failure + zero dispatch held, policy marker absent, root cause
+   UNDETERMINED, failed round preserved). For that round the behavior
+   gate's verdict is 54/55 — one FAIL — and only the observed security
+   properties (honest failure, zero dispatch) are established; the
+   diagnostic 55/55 re-run is a separate observation that neither
+   overrides the first failure nor proves a root cause. Whether the
+   round-2 occurrence shares a root cause with the historical E3 is
+   unproven and requires a dedicated experiment; none has been run.
+   See §8.]
 
 ## 6. Push + CI record
 
@@ -377,4 +395,248 @@ runs). If the branch moves after review, newer runs supersede those.
   coverage.
 - Wheel-form payloads through the Product composition — frozen TPR
   boundary at the pinned harness; stays runtime-boundary coverage.
+- Nothing merged, published, or deployed; M4 not entered.
+
+## 8. Second review round (2026-10-05): F1 bounded cleanup, F2 self-proof judge, F3 E3 wording
+
+Round scope: Product TEST INFRASTRUCTURE and evidence wording ONLY — no
+production implementation change, no dependency change, no core-repo
+change, M4 not entered.
+
+Round start (all verified before any work): PR #5 OPEN, base `main`, head
+`refactor/m3c-integration` == `2008d90a1d745c521fbccffe3e6c47be572026c1`
+== the round's expected head (checked live via the GitHub API; git's
+HTTPS transport to github.com was down the whole session again — connect
+reset/timeouts — so all remote verification and the push went through the
+API, §9). Work done in a DEDICATED clean worktree
+(`locus-m3c-review-r2`, branch `fix/m3c-review-r2` cut from that exact
+head); no other worktree was touched, nothing was reset or cleaned.
+Dependencies re-verified pinned in package.json AND package-lock.json:
+runtime `2435a57f…`, harness `347eed99…` (§1); `npm ls` resolves exactly.
+
+### 8.1 F1 — timeout must be bounded; cleanup verified, not assumed
+
+Defects confirmed by the review and reproduced here:
+
+- `runSuiteProcess`'s timeout callback only fired the termination REQUEST
+  (POSIX: one group SIGTERM) while the promise kept waiting for the
+  child's exit event — a suite that ignores SIGTERM hangs the
+  orchestrator past its own timeout (review repro: real Node child with
+  an empty SIGTERM handler; `runSuiteProcess(fixture, 500)` still
+  unsettled at 1800 ms until an external SIGKILL).
+- `startPreview().kill()` returned `{ok:true}` UNCONDITIONALLY when the
+  root had already exited — zero verification that the rest of the owned
+  tree was gone.
+
+First-failure evidence, executed on the UNMODIFIED baseline:
+
+- Windows-executable slice (real vite preview, root killed root-only,
+  then `kill()`): `KILL-RESULT {"ok":true}` with `isAlive()=false` — the
+  unconditional branch, shown live (log `f1-repro-preview-root-exited.log`,
+  trimmed into the PR body).
+- The SIGTERM-hang is a POSIX behavior and this machine has no WSL — it
+  was NOT executable locally. Its committed proof is the POSIX-only test
+  below, which EXECUTES on Linux CI (the unit job runs it for real);
+  recorded as executed-on-CI, honestly distinguished from local
+  execution.
+
+Implementation — ONE termination algorithm, two consumers:
+
+- NEW `tests/helpers/browser-gate-cleanup.cjs`: `ownTreeIdentity`
+  (spawn-time identity — POSIX group id = root pid, every owned spawn is
+  `detached`); `terminateTree`: SIGTERM to the OWNED GROUP → bounded
+  grace → SIGKILL to the SAME group while members survive → bounded
+  confirmation → an explicit cleanup FAILURE if still unconfirmed. A root
+  that exited on its own never skips the group: POSIX verifies (and if
+  needed cleans) it; Windows — which has no group to signal after root
+  death — reports an explicit `win32-root-exited` FAILURE instead of a
+  silent ok. A taskkill-vs-natural-exit race (root verified alive at
+  attempt, gone when taskkill ran) is a COMPLETED attempt, kept distinct
+  from the never-attempted root-exited case. Strangers are never touched
+  (no port/name/machine scans; only explicitly spawned, identity-held
+  trees). `killTree` remains the low-level signal REQUEST only; its
+  taskkill call is now itself bounded (10 s) with visible errors.
+- `browser-gate-runner.cjs` `runSuiteProcess`: the timeout runs the shared
+  `terminateTree` and settles WITHIN the bounded terminate+confirm
+  window; the verdict STAYS `timeout` even when the child exits 0 during
+  the kill; an unconfirmed cleanup is ATTACHED (`result.cleanup`) and
+  named in the failure text — it can never swallow the timeout. Exactly
+  one settlement under exit/error/timeout/cleanup races; timers and
+  listeners released on settle.
+- `browser-gate-preview.cjs` `startPreview().kill()`: idempotent
+  (memoized first verdict), verified via the same helper; root-exited →
+  POSIX verifies group-gone / cleans survivors, Windows fails explicitly.
+
+Required-matrix tests, all in `tests/browser-gate-orchestrator.test.cjs`
+(the 13 prior tests are preserved; the suite is now 17):
+
+| Requirement | Test |
+|---|---|
+| A normal hung suite → timeout, killable | existing `runSuiteProcess: exit/signal/timeout classified, hung suite tree-killed (real)` |
+| B SIGTERM-ignoring suite: TERM received but survived, then SIGKILL + bounded settlement | `F1 timeout: a SIGTERM-ignoring suite still settles as timeout, bounded (POSIX; real)` — fixture records the TERM receipt to a file; the run survives the whole TERM grace (elapsed ≥ grace) proving it did not die on TERM; pid verified dead; POSIX-only → executes on Linux CI |
+| C root exited, group child still serving (ignores TERM, holds a test port) → cleaned, port rebinds | `F1 cleanup: root exited, owned group still serving — cleaned, port rebindable (POSIX; real)` — functional death proof: HTTP gone AND the port binds again (not `kill(pid,0)` alone); POSIX-only → executes on Linux CI |
+| preview root self-exit → verified, never unconditional ok (both platforms) | `F1 preview kill after root self-exit: verified, never unconditional ok (real vite preview)` — win32: explicit failure ("cannot verify"); posix: verified group-gone ok; repeated `kill()` safe; port released |
+| D all suites pass but cleanup incomplete → non-zero run | existing `cleanup failure: never reported as a clean success` + the runner folding `cleanup.ok=false` into a non-zero exit |
+| E timeout vs natural-exit race → one verdict, no unhandled rejection | `F1 race: timeout vs natural exit — exactly one verdict, no unhandled rejection (real)` — five deadlines around the fixture's exit moment |
+| F stranger service stays alive | existing `busy port: refuse to run, foreign fixture untouched (real)` |
+| G the 13 prior fault-path tests preserved | unchanged, still green |
+
+Fixture discipline: readiness via explicit ready-FILES the fixtures write
+at their own ready points (never "sleep and assume"); TERM receipts
+recorded to files; every fixture is hard-killed in `finally` — a failed
+test leaves no SIGTERM-ignoring orphan behind.
+
+CI wiring: the unit job now sets `BROWSER_GATE_ORCH_REAL_PREVIEW=1`
+(`.github/workflows/ci.yml`) — the real vite-preview lifecycle test and
+the two POSIX-only F1 tests execute in CI instead of being local-only
+evidence.
+
+Local results (Windows): plain → `17 passed, 3 skipped, no failures`;
+with `BROWSER_GATE_ORCH_REAL_PREVIEW=1` → `17 passed, 2 skipped, no
+failures` (only the POSIX-only F1 pair skips). Linux execution proof:
+CI unit job on the pushed head (§9).
+
+### 8.2 F2 — the negative self-proof judges evidence, not exceptions
+
+Defect: `selfProofCase` treated ANY `runBuiltGate` exception as the
+expected rejection (`!booted ⇒ PASS SELFPROOF`). Both review injections
+were reproduced on the UNMODIFIED baseline before any edit:
+
+- injection 1 — browser launch failure (`CHROME=C:/nonexistent/chrome.exe`):
+  `PASS SELFPROOF-A … driver error (as required): Chrome executable not
+  found` + `PASS SELFPROOF-B` (log `f2-repro1-launch-failure.log`);
+- injection 2 — the review's exact string (`chrome.waitForCdp` patched to
+  throw `CDP browser endpoint unavailable: readiness timeout (phase=cdp)`):
+  `PASS SELFPROOF-A/B` again (log `f2-repro2-cdp-injection.log`).
+
+Both proved only that the browser did not run — nothing about the gate's
+ability to detect a broken artifact.
+
+Implementation:
+
+- NEW `tests/helpers/m3c-storage-built-verdict.cjs` — THE judge, one
+  implementation shared by the driver and the unit tests.
+  `classifySelfProof(caseKind, expected, result)` consumes STRUCTURED
+  driver outcomes (`infrastructure` with phase `browser-launch`/`cdp`/
+  `navigation`, `no-boot`, `boot-error`, `assertion`, `completed`) plus
+  request-level observations — never exception strings. A pass requires
+  POSITIVE evidence: case A — the exact host URL requested by the
+  browser (CDP Network), an explicit 404, the host never booting, no
+  fallback load, and the throwaway server's own log corroborating;
+  case B — the host HTML served (200) first, the exact entry-chunk
+  request failed/404, the host never booting, no fallback, server log
+  corroborating. Infrastructure failures, unrelated ready timeouts
+  (all resources 200), fallback pages, and the full dist misfed as a
+  broken scenario all FAIL.
+- `tests/e2e-m3c-storage-built.cjs`: `runBuiltGate` returns classified
+  outcomes (it no longer throws for classified failures); the driver
+  attaches CDP to `about:blank` FIRST, wires Network listeners BEFORE
+  navigating (the target page's FIRST request is observed), then
+  navigates; a fallback is any 200 outside {the host page, hashed dist
+  assets}; the negative flow breaks TEMP COPIES only (the real dist/ is
+  never modified). The positive gate is unchanged: real dist via the
+  run's vite preview, the shared 23-check table, GA–GD audit, throwaway
+  profile, no dev server, no source fallback.
+- `tests/helpers/chrome.cjs` `connectToTarget`: ADDITIVE CDP event
+  subscription (`on(method, handler)`); the message pump and the
+  request/response API are unchanged (chrome-helper suite green).
+- NEW `tests/m3c-storage-built-verdict.test.cjs`, REGISTERED in
+  `tests/run-unit.cjs` (25 → 26 suites): the review's injections, the
+  real A/B observation shapes, the near-misses (chunk actually served,
+  chunk never requested, no server corroboration, unknown case kind,
+  null result), and a source pin that the driver uses THE shared judge.
+  21 checks.
+
+Verification (Windows, real Chrome):
+
+- Fixed orchestrator, packaged storage gate: 27 behavior/audit checks +
+  BOTH negative self-proofs PASS with request-level evidence, exit 0
+  (log `f2-orchestrator-storage-gate.log`). Case A evidence:
+  `hostRequest{status:404}` + serverLog 404, `pageBooted:false`,
+  `fallbackLoads:[]`. Case B: `hostRequest{status:200}`,
+  `chunkRequest{status:404,failed:true}` + serverLog 404, the sibling
+  hashed assets 200, no fallback.
+- The same two injections re-run on the FIXED gate: `FAIL SELFPROOF-A/B —
+  browser/CDP infrastructure failure (…)` with the phase named, counted
+  into `selfProofFailures`, gate exits non-zero (logs
+  `f2-fixed-injection1.log` / `f2-fixed-injection2.log`).
+- Judge unit suite: 21/21.
+
+### 8.3 F3 — Python E3 wording unified with the records
+
+No Python behavior changed, no marker assertion weakened, no history
+rewritten — the withdrawn sentences stay in place with explicit
+retraction annotations.
+
+- `tests/e2e-m3c-python-integration.cjs` (E3 comment): no longer claims
+  the historical glitch "is fixed at the pinned runtime". Now: E3-family
+  root cause UNDETERMINED; a failure WITHOUT the marker is a FAIL (single
+  attempt, no auto-retry); fail=true + zero dispatch establish only the
+  OBSERVED security properties; same-root-cause attribution with the
+  historical E3 requires a dedicated experiment. The withdrawn sentence
+  is quoted inside the retraction note.
+- `M3C-REVIEW-VERIFICATION.md` §5 item 5: original text kept, RETRACTED
+  inline — "rooted and fixed" and "no new occurrence appeared" are both
+  withdrawn; the latter was contradicted by this same record's §4 step 6
+  (B-PY1 marker-less traceback, root cause UNDETERMINED). The
+  behavior-gate verdict for that round remains 54/55 — one FAIL; the
+  diagnostic 55/55 re-run is a separate observation that neither
+  overrides the first failure nor proves a cause.
+- `M3C-D-INTEGRATION.md` §5a item 3: the "(rooted/fixed …)" parenthetical
+  annotated as withdrawn as unproven.
+- PR #5 body: the previous body was checked — it contained no
+  fixed/rooted E3 claim (its B-PY1 wording was already "root cause
+  UNDETERMINED"); the updated body states explicitly that the historical
+  E3 root cause is UNCONFIRMED and points at the §5 retraction.
+
+### 8.4 Round-2 verification sequence (results, in order)
+
+```
+npm ci                                             → exit 0; npm ls: both cores at the pinned SHAs
+npm run build                                      → exit 0
+node tests/m3c-storage-built-verdict.test.cjs      → all 21 judge checks passed
+node tests/browser-gate-orchestrator.test.cjs      → 17 passed, 3 skipped, no failures; exit 0
+BROWSER_GATE_ORCH_REAL_PREVIEW=1 node tests/browser-gate-orchestrator.test.cjs
+                                                   → 17 passed, 2 skipped, no failures; exit 0
+BROWSER_GATE_ORCH_REAL_PREVIEW=1 npm test          → all 26 suites passed; exit 0
+CHROME=C:/nonexistent/chrome.exe node tests/e2e-m3c-storage-built.cjs
+                                                   → FAIL SELFPROOF-A/B (infra), exit 1 — as required
+(injected waitForCdp) node <repro>                 → FAIL SELFPROOF-A/B (infra), exit 1 — as required
+node tests/run-browser-gates.cjs e2e-m3c-storage-built.cjs
+                                                   → 27 checks + 2 negative self-proofs passed; exit 0
+node tests/run-browser-gates.cjs   (all 16 registered gates, ONE round, no retry)
+                                                   → all 16 browser gates passed; exit 0
+```
+
+The final full round: 16/16 suites in a single single-retry-free round;
+the python gate 55/55 (B-PY1 green this run — one more observation, not a
+root-cause finding); B-CDN environment record `assets=12
+realCdnDownloads=0 cacheHits=12` (warm pinned-CDN cache — an environment
+observation, recorded separately from every gate assertion). Logs are
+kept worktree-adjacent during the session; only the trimmed evidence
+above enters the repo (oversized logs stay out of git).
+
+### 8.5 This round's first failures (all kept on record)
+
+1. **F2 injections (the round's assigned first failures):** reproduced on
+   the UNMODIFIED baseline BEFORE any edit (§8.2) — PASS SELFPROOF under
+   a launch failure and under the review's exact CDP failure; preserved,
+   then re-run green-to-red on the fixed gate as the corrected behavior.
+2. **F1 kill-race check failure during development (Windows):** the new
+   race test caught a REAL race — taskkill reported failure ("not found")
+   when the fixture exited during taskkill's own startup latency, which
+   the first terminateTree draft misreported as a cleanup failure (would
+   have failed whole runs for a Windows scheduling race). Fixed with the
+   completed-attempt semantics (§8.1); the committed race test now pins
+   exactly this contract and is green.
+3. No suite-level first failure occurred in the final verification runs
+   above; the two POSIX-only F1 tests have their FIRST EXECUTION on Linux
+   in CI (§9) — their result there is recorded as-is, whatever it is.
+
+### 8.6 Round-2 residuals
+
+- The POSIX-only F1 tests execute on Linux CI only (no WSL on this
+  machine) — platform execution is recorded per-platform, never implied.
+- B-PY1 error-text instability: root cause still UNDETERMINED (unchanged;
+  this round made no Python-behavior change and ran no experiment).
 - Nothing merged, published, or deployed; M4 not entered.

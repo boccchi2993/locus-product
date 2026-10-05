@@ -452,8 +452,16 @@ async function main() {
 
       // E3 discipline: single attempt, no auto-retry. The denial must carry
       // the policy marker; a failure WITHOUT the marker is a FAIL, not a
-      // re-observation (the historical Pyodide SystemError bridge glitch is
-      // fixed at the pinned runtime; if it reappears here it is evidence).
+      // re-observation. The E3-family error-text instability (a Pyodide
+      // traceback surfacing instead of the marker) has an UNDETERMINED
+      // root cause — no "fixed at the pinned runtime" claim is made here
+      // (this round's own verification recorded one such marker-less
+      // occurrence: fail=true and zero dispatch held, marker absent).
+      // Every occurrence is evidence; calling it the same root cause as
+      // the historical E3 requires a dedicated experiment, not wording.
+      // [Reworded 2026-10-05, second review round: the previous text said
+      // the historical Pyodide SystemError bridge glitch "is fixed at the
+      // pinned runtime" — withdrawn as unproven.]
       {
         const { verdict } = await pyDeny('B-PY1 js.fetch deny', 'm3c-py1',
           ['import js', "js.fetch('" + PROBE + "/probe-hit')"],

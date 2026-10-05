@@ -268,6 +268,12 @@ the full evidence lives in
    environment root cause was established. The E3 Pyodide SystemError
    stays independently tracked (rooted/fixed in the source repo during
    F04a; no product-side claim is made).
+   [Annotated 2026-10-05, second review round: the parenthetical
+   "rooted/fixed in the source repo" is WITHDRAWN as unproven — the
+   historical E3 root cause is UNCONFIRMED. This branch's own clean-
+   checkout round recorded a marker-less Pyodide-traceback occurrence at
+   B-PY1 (honest failure + zero dispatch held; root cause UNDETERMINED;
+   M3C-REVIEW-VERIFICATION.md §4 step 6 and §5 item 5 retraction, §8).]
 
 Post-integration verification on this branch: orchestrator fault-path
 13/13 (incl. the real-preview gated run), unit gate 25/25, all 16

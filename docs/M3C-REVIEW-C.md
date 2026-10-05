@@ -87,6 +87,19 @@ check table so storage semantics cannot drift:
     unexpected pass is a gate failure ("no fallback to a source page may
     pass").
 
+    [Annotated 2026-10-05, second review round (F2): "booted=false or any
+    check failure" proved too weak — ANY driver exception (a browser/CDP
+    infrastructure failure included) made `!booted` true and printed
+    "PASS SELFPROOF". The verdict is now a STRUCTURED judge
+    (`tests/helpers/m3c-storage-built-verdict.cjs`, one implementation
+    shared with the driver and unit-tested in
+    `tests/m3c-storage-built-verdict.test.cjs`): the self-proof passes
+    only with request-level evidence — the exact host/entry-chunk URL
+    observed (CDP Network wired before navigation), the explicit 404,
+    the host never booting, no fallback load, server log corroborating.
+    An infrastructure failure, an unrelated readiness timeout, or the
+    full dist misfed as broken now FAILS the self-proof and the gate.]
+
 ## 3. Evidence (this branch, Windows, Node v24.10.0, Chrome 154 headless)
 
 - `npm ci`: clean (github: git deps through the lockfile only).
