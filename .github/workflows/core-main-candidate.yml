@@ -1,0 +1,234 @@
+# M4a-A: candidate verification of the two cores' latest main, on Product's
+# own terms. A scheduled/dispatchable run that:
+#   1. captures one full 40-hex SHA per core main into a frozen snapshot;
+#   2. applies the captured SHAs in a THROWAWAY clone (never the workspace
+#      itself): manifest rewrite → lockfile regen → npm ci (node_modules is
+#      wiped, so a manifest-only edit can never ride on a stale install) →
+#      provenance verification (manifest spec / lockfile resolved / hidden
+#      lockfile resolved / installed package identity);
+#   3. builds and runs the full unit battery + the official browser gates
+#      (the existing single-run orchestrator, no auto-retry) against the
+#      candidate cores;
+#   4. uploads the snapshot, the applied manifest/lock, per-stage logs and a
+#      stage-mapped result — on success AND on failure.
+#
+# It never pushes, never opens PRs, never merges, and never touches the
+# verified dependency lock. A failed candidate dies in its throwaway checkout
+# plus its artifacts. Model transport is the gates' built-in fake (no model
+# credentials exist in this repo); the ONE other real-network hop is the
+# python gates' pinned-CDN Pyodide download, recorded as such below.
+#
+# SCHEDULE CAVEAT (read before assuming this pipeline is online): GitHub only
+# runs `on: schedule` from the DEFAULT branch, and workflow_dispatch likewise
+# requires the workflow to be REGISTERED from the default branch (until then
+# the REST API and `gh workflow run` both fail with "workflow not found on the
+# default branch"). Until this file reaches locus-product's default branch via
+# the merge chain, the whole pipeline is dormant by construction — no cron, no
+# manual trigger. See docs/M4A-A-CORE-CANDIDATE.md for the enablement path.
+
+name: core-main-candidate
+
+on:
+  schedule:
+    # Daily 03:30 UTC — inert until this file is on the default branch.
+    - cron: '30 3 * * *'
+  workflow_dispatch:
+    inputs:
+      source:
+        description: 'candidate source: observe each core main (main) or verify given SHAs (explicit)'
+        type: choice
+        default: main
+        options: [main, explicit]
+        required: true
+      runtime_sha:
+        description: 'explicit mode only: full 40-hex locus-runtime SHA'
+        type: string
+        default: ''
+      harness_sha:
+        description: 'explicit mode only: full 40-hex locus-harness SHA'
+        type: string
+        default: ''
+
+# Read-only: this pipeline's whole point is to never mutate anything.
+permissions:
+  contents: read
+
+concurrency:
+  group: core-main-candidate
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash # -eo pipefail: a stage failing through tee keeps its exit code
+
+jobs:
+  candidate:
+    name: candidate cores (capture → apply → build → unit → browser)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    outputs:
+      stage_capture: ${{ steps.capture.outcome }}
+      stage_install: ${{ steps.install.outcome }}
+      stage_build: ${{ steps.build.outcome }}
+      stage_unit: ${{ steps.unit.outcome }}
+      stage_browser: ${{ steps.browser.outcome }}
+    env:
+      ART: core-candidate-artifacts
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: dispatch inputs sanity (explicit mode demands two 40-hex SHAs)
+        run: |
+          if [ '${{ inputs.source }}' = 'explicit' ]; then
+            for sha in '${{ inputs.runtime_sha }}' '${{ inputs.harness_sha }}'; do
+              if ! printf '%s' "$sha" | grep -qE '^[0-9a-f]{40}$'; then
+                echo "explicit mode requires two full 40-hex SHAs (got: '$sha')" >&2
+                exit 2
+              fi
+            done
+          fi
+
+      - name: capture the candidate snapshot (each core main observed once)
+        id: capture
+        run: |
+          set -o pipefail
+          mkdir -p "$ART"
+          if [ '${{ inputs.source }}' = 'explicit' ]; then
+            node scripts/core-main-candidate.mjs capture --checkout . --source explicit \
+              --runtime-sha '${{ inputs.runtime_sha }}' --harness-sha '${{ inputs.harness_sha }}' \
+              --out "$ART/candidate.json" 2>&1 | tee "$ART/capture.log"
+          else
+            node scripts/core-main-candidate.mjs capture --checkout . --source main \
+              --out "$ART/candidate.json" 2>&1 | tee "$ART/capture.log"
+          fi
+
+      # The verified workspace is never the apply target: the tool refuses its
+      # own repo, and the candidate lives in this throwaway clone instead.
+      - name: clone a throwaway candidate checkout
+        if: always() && steps.capture.outcome == 'success'
+        run: git clone . "$RUNNER_TEMP/candidate-checkout"
+
+      - name: apply candidates + install (lock regen → npm ci → provenance)
+        id: install
+        if: always() && steps.capture.outcome == 'success'
+        run: |
+          set -o pipefail
+          node scripts/core-main-candidate.mjs apply \
+            --snapshot "$ART/candidate.json" \
+            --checkout "$RUNNER_TEMP/candidate-checkout" \
+            --result-file "$ART/apply-result.json" 2>&1 | tee "$ART/install.log"
+          # npm ≥7 extracts git deps without .git, so the provenance oracle is
+          # npm's hidden lockfile (verified inside `apply`), not a rev-parse.
+
+      - name: build the packaged page on the candidate cores
+        id: build
+        if: always() && steps.install.outcome == 'success'
+        working-directory: ${{ runner.temp }}/candidate-checkout
+        run: |
+          set -o pipefail
+          npm run build 2>&1 | tee "$GITHUB_WORKSPACE/$ART/build.log"
+
+      - name: unit battery on the candidate cores (fake model transport throughout)
+        id: unit
+        if: always() && steps.install.outcome == 'success'
+        working-directory: ${{ runner.temp }}/candidate-checkout
+        run: |
+          set -o pipefail
+          BROWSER_GATE_ORCH_REAL_PREVIEW=1 npm test 2>&1 | tee "$GITHUB_WORKSPACE/$ART/unit.log"
+
+      # Official browser gate, existing single-run orchestrator, no auto-retry.
+      # Real network hops, recorded distinctly: (1) npm/git fetches of the
+      # candidate cores themselves; (2) the python gates booting the REAL
+      # SHA-verified Pyodide from the pinned CDN. The model layer stays the
+      # gates' built-in fake transport — no model credentials are configured.
+      - name: browser gates on the candidate cores (single run, no retry)
+        id: browser
+        if: always() && steps.install.outcome == 'success'
+        working-directory: ${{ runner.temp }}/candidate-checkout
+        run: |
+          set -o pipefail
+          CHROME=$(which google-chrome || which chromium || true)
+          export CHROME
+          node tests/run-browser-gates.cjs 2>&1 | tee "$GITHUB_WORKSPACE/$ART/browser.log"
+
+      - name: advance-check (informational — a moved main is next round's input)
+        id: advance
+        if: always() && steps.capture.outcome == 'success'
+        continue-on-error: true
+        run: |
+          node scripts/core-main-candidate.mjs advance-check \
+            --snapshot "$ART/candidate.json" \
+            --result-file "$ART/advance-check.json" 2>&1 | tee "$ART/advance.log"
+
+      # Diagnostics: even on failure, ship the snapshot, the applied
+      # manifest/lock (the tool leaves them in the throwaway checkout on
+      # failure on purpose) and every stage log.
+      - name: collect applied manifest/lock for the artifact bundle
+        if: always() && steps.capture.outcome == 'success'
+        run: |
+          if [ -f "$RUNNER_TEMP/candidate-checkout/package.json" ]; then
+            cp "$RUNNER_TEMP/candidate-checkout/package.json" "$ART/applied-package.json"
+          fi
+          if [ -f "$RUNNER_TEMP/candidate-checkout/package-lock.json" ]; then
+            cp "$RUNNER_TEMP/candidate-checkout/package-lock.json" "$ART/applied-package-lock.json"
+          fi
+
+      - name: write the stage-mapped result (failures stay failures)
+        if: always()
+        run: |
+          node -e '
+            const fs = require("fs");
+            const stages = {
+              capture: process.env.ST_CAPTURE,
+              install: process.env.ST_INSTALL,
+              build: process.env.ST_BUILD,
+              unit: process.env.ST_UNIT,
+              browser: process.env.ST_BROWSER,
+            };
+            const advanced = (() => {
+              try { return JSON.parse(fs.readFileSync(process.env.ART + "/advance-check.json", "utf8")); }
+              catch { return null; }
+            })();
+            const result = {
+              schema: "core-main-candidate/result@1",
+              run: { url: process.env.GITHUB_SERVER_URL + "/" + process.env.GITHUB_REPOSITORY,
+                     ref: process.env.GITHUB_REF, sha: process.env.GITHUB_SHA },
+              source: process.env.CAND_SOURCE || null,
+              stages,
+              failedStages: Object.entries(stages).filter(([, v]) => v === "failure").map(([k]) => k),
+              ok: Object.values(stages).every((v) => v === "success"),
+              mainAdvancedSinceCapture: advanced,
+              notes: {
+                modelTransport: "gates built-in fake (no model credentials)",
+                pyodide: "real pinned-CDN download inside the python gates, SHA-verified",
+              },
+            };
+            fs.writeFileSync(process.env.ART + "/result.json", JSON.stringify(result, null, 2) + "\n");
+            const line = Object.entries(stages).map(([k, v]) => k + "=" + v).join(" ");
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY,
+              "## core-main candidate verification\n\n```\n" + line + "\n```\n" +
+              (result.ok ? "**candidate PASSES** against Product commit `" + process.env.GITHUB_SHA + "`\n"
+                         : "**candidate FAILS** — verified lock untouched; stages: " + result.failedStages.join(", ") + "\n"));
+          '
+        env:
+          ST_CAPTURE: ${{ steps.capture.outcome }}
+          ST_INSTALL: ${{ steps.install.outcome }}
+          ST_BUILD: ${{ steps.build.outcome }}
+          ST_UNIT: ${{ steps.unit.outcome }}
+          ST_BROWSER: ${{ steps.browser.outcome }}
+          CAND_SOURCE: ${{ inputs.source || 'main' }}
+
+      - name: upload candidate bundle (snapshot, applied manifest/lock, stage logs, result)
+        if: always()
+        continue-on-error: true # an artifact-upload hiccup must never mask a red run
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-main-candidate-${{ github.run_id }}
+          path: core-candidate-artifacts/
+          if-no-files-found: warn
+          retention-days: 14
