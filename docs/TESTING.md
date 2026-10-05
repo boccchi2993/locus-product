@@ -89,11 +89,14 @@ P40 proves the prepared FIXTURE is a real wheel; runtime installability
 of an author artifact is Trusted Plugin Runtime work (offline install +
 smoke import before READY).
 
-TPR v1A closes exactly that gap at the runtime layer:
-`tests/python-plugin-runtime.test.cjs` (unit: harness-side payload
+TPR v1A closes exactly that gap at the runtime layer, in the
+locus-runtime repository — the same-named suites live in its `tests/` at
+the pinned dependency SHA and are NOT carried in this product repo since
+the M3c switch:
+`python-plugin-runtime.test.cjs` (unit: harness-side payload
 validation, own-copy isolation, worker install lifecycle, integrity
 fail-closed against the REAL worker source) and
-`tests/e2e-python-plugin-runtime.cjs` (browser: the real fixture wheel
+`e2e-python-plugin-runtime.cjs` (browser: the real fixture wheel
 offline-installed in the real strict-CSP worker before READY, answer 42,
 integrity/smoke adversarial, crash/reset/cancellation recovery, and
 request-counter proof that boot, install, and every post-READY package
