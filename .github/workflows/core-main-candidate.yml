@@ -2,15 +2,22 @@
 # own terms. A scheduled/dispatchable run that:
 #   1. captures one full 40-hex SHA per core main into a frozen snapshot;
 #   2. applies the captured SHAs in a THROWAWAY clone (never the workspace
-#      itself): manifest rewrite → lockfile regen → npm ci (node_modules is
-#      wiped, so a manifest-only edit can never ride on a stale install) →
-#      provenance verification (manifest spec / lockfile resolved / hidden
-#      lockfile resolved / installed package identity);
+#      itself), first pinned to the snapshot's exact Product commit (review
+#      round 1, F2): manifest rewrite → lockfile regen → npm ci (node_modules
+#      is wiped, so a manifest-only edit can never ride on a stale install) →
+#      provenance verification (Product HEAD identity / manifest spec /
+#      lockfile resolved / hidden lockfile resolved / installed package
+#      identity / allowed-delta scope);
 #   3. builds and runs the full unit battery + the official browser gates
 #      (the existing single-run orchestrator, no auto-retry) against the
 #      candidate cores;
 #   4. uploads the snapshot, the applied manifest/lock, per-stage logs and a
 #      stage-mapped result — on success AND on failure.
+#
+# Dispatch inputs (source / runtime_sha / harness_sha) flow ONLY through the
+# step `env:` mapping into the tool — never interpolated into shell source
+# (review round 1, F1); validation happens in Node before any effect, and a
+# scheduled run with no inputs resolves to main mode.
 #
 # It never pushes, never opens PRs, never merges, and never touches the
 # verified dependency lock. A failed candidate dies in its throwaway checkout
@@ -82,36 +89,41 @@ jobs:
         with:
           node-version: 24
 
-      - name: dispatch inputs sanity (explicit mode demands two 40-hex SHAs)
-        run: |
-          if [ '${{ inputs.source }}' = 'explicit' ]; then
-            for sha in '${{ inputs.runtime_sha }}' '${{ inputs.harness_sha }}'; do
-              if ! printf '%s' "$sha" | grep -qE '^[0-9a-f]{40}$'; then
-                echo "explicit mode requires two full 40-hex SHAs (got: '$sha')" >&2
-                exit 2
-              fi
-            done
-          fi
-
+      # Review round 1, F1: dispatch inputs reach the tool as ENVIRONMENT
+      # VARIABLES, never as interpolated shell source — a hostile value here
+      # is plain data to Node, which rejects it (exit 2) before any network,
+      # npm, or filesystem effect. A scheduled run passes no inputs: the tool
+      # resolves empty CAND_* to main mode. The shell below is static; the
+      # structural test (tests/core-main-candidate-workflow.test.mjs) fails
+      # the build if '${{' or inputs.* ever reappear inside a run block.
       - name: capture the candidate snapshot (each core main observed once)
         id: capture
+        env:
+          CAND_SOURCE: ${{ inputs.source }}
+          CAND_RUNTIME_SHA: ${{ inputs.runtime_sha }}
+          CAND_HARNESS_SHA: ${{ inputs.harness_sha }}
         run: |
           set -o pipefail
           mkdir -p "$ART"
-          if [ '${{ inputs.source }}' = 'explicit' ]; then
-            node scripts/core-main-candidate.mjs capture --checkout . --source explicit \
-              --runtime-sha '${{ inputs.runtime_sha }}' --harness-sha '${{ inputs.harness_sha }}' \
-              --out "$ART/candidate.json" 2>&1 | tee "$ART/capture.log"
-          else
-            node scripts/core-main-candidate.mjs capture --checkout . --source main \
-              --out "$ART/candidate.json" 2>&1 | tee "$ART/capture.log"
-          fi
+          node scripts/core-main-candidate.mjs capture --checkout . \
+            --out "$ART/candidate.json" 2>&1 | tee "$ART/capture.log"
 
       # The verified workspace is never the apply target: the tool refuses its
       # own repo, and the candidate lives in this throwaway clone instead.
       - name: clone a throwaway candidate checkout
         if: always() && steps.capture.outcome == 'success'
         run: git clone . "$RUNNER_TEMP/candidate-checkout"
+
+      # Review round 1, F2: the throwaway clone must be pinned to the exact
+      # Product commit the snapshot was captured against — not "whatever HEAD
+      # the clone happened to get". apply re-verifies the real HEAD against
+      # the snapshot before writing or installing anything.
+      - name: check out the captured Product commit in the throwaway clone
+        if: always() && steps.capture.outcome == 'success'
+        run: |
+          set -o pipefail
+          PRODUCT_SHA=$(node -p "JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8')).product.commit" "$ART/candidate.json")
+          git -C "$RUNNER_TEMP/candidate-checkout" checkout --detach "$PRODUCT_SHA"
 
       - name: apply candidates + install (lock regen → npm ci → provenance)
         id: install
