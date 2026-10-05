@@ -14,6 +14,55 @@ move: **re-run the preflight (§10) immediately before executing §3.**
 
 ---
 
+## 0. Revision R1 (2026-10-05, M4a review round C) — superseding classification, same plan
+
+The first-round review reproduced **seven defects** in the v1 preflight
+classifier (evidence-free `ready`: no-CI-run policy, closed-unmerged passing,
+`mergeable=null` passing, all-skipped CI counted as success, single-leg merge
+traceability, verdict/exit divergence when everything landed, protection
+`unknown` not gating readiness). Full first-failure record, the corrected
+status table, and the fix details live in
+[docs/M4A-REVIEW-C.md](M4A-REVIEW-C.md); every defect is reproduced against
+the v1 implementation and pinned by `tests/m4a-mainline-preflight.test.cjs`.
+
+**Retraction of derived conclusions.** The v1 §1 table's per-PR verdicts were
+produced by that defective classifier. They are hereby retracted *as
+derivations*; the underlying facts recorded there (SHAs, run IDs, timestamps,
+containment numbers) were read correctly and stand as history. In particular:
+
+- v1 called locus-harness #1 and locus-product #5 "READY" without job-level
+  evidence, under a classifier in which `mergeable=null`, closed PRs, and
+  skipped CI could also pass. Under R1 both are READY again — now backed by
+  explicit job-level evidence (`ciEvidence` config mirroring each repo's real
+  ci.yml) — but that coincidence does not rehabilitate the v1 derivation.
+- v1's overall "blocked (runtime #1 ci-failed)" narrative happened to match
+  the honest state; R1 keeps runtime #1 BLOCKED with sharper evidence: the
+  required job `browser gates (headless Chrome)` explicitly failed on PR run
+  `36987973661` (attempt 1, no rerun), and the green sibling push run does
+  **not** supersede it — only a rerun of the failed run does.
+- The v1 exit-code contract (0/1/2) is extended with **exit 3 = invalid
+  configuration**, and the v1 §10 taxonomy is superseded by the R1 status
+  table (ready / landed-traceable / landed-other-route / ci-pending / six
+  blocked states / insufficient-info), aggregated by one `aggregateVerdict`
+  that drives the JSON summary, the text render, and the exit code together.
+  §10's v1 text is retained below as history.
+
+**R1 live re-run (2026-10-05T16:11:51Z, read-only, GET-only via `gh api`):**
+
+| PR | head == accepted | R1 status | evidence |
+|---|---|---|---|
+| locus-runtime #1 | yes (`2435a57ff7a66db3db88aa98a88d404c75133483`) | **ci-failed (BLOCKED)** | required job `browser gates (headless Chrome)` failed on PR run `36987973661` (a1, no rerun); sibling push run `36987967403` green — does not supersede |
+| locus-harness #1 | yes (`347eed99a415dc080b97d46d8a4271ceb19c5142`) | **ready** | all 4 required jobs succeeded on PR run `37036663781` |
+| locus-product #5 | yes (`d6a74a25a2b98293d9aa1f2a635022d8f5ed733b`) | **ready** | both required jobs succeeded on PR run `37293407034` (attempt 2; rerun kept on record, first attempt not rewritten) |
+
+verdict `blocked`, exit 1; carried-input containment unchanged from §2.
+The rollout sequence (§3), SHA semantics (§4), combo record (§5), rollback
+(§6), deployment surface (§7) and authorization asks (§9) are unchanged by
+this revision; Phase 0 now means running the R1 preflight.
+
+---
+
+
 ## 1. Live remote state (snapshot)
 
 Produced by `node scripts/m4a-mainline-preflight.cjs` (read-only, GET-only
