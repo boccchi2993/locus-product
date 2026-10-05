@@ -26,6 +26,10 @@ The repository keeps documentation beside code so architecture changes, tests, a
 | [CAPABILITY-PACKAGE.md](CAPABILITY-PACKAGE.md) | Capability project, bundle, validation, and import contract |
 | [CAPABILITY-AUTHORING.md](CAPABILITY-AUTHORING.md) | End-to-end authoring, Reference Capability, and self-hosting acceptance |
 | [TESTING.md](TESTING.md) | Test philosophy, gates, and adversarial proof |
+| [M4A-A-CORE-CANDIDATE.md](M4A-A-CORE-CANDIDATE.md) | Core-main candidate lane: capture/apply/verify tool, workflow contract, rehearsal record |
+| [M4A-B-OWNERSHIP-CLEANUP.md](M4A-B-OWNERSHIP-CLEANUP.md) | M4a-B audit: stale entries removed, kept-with-reason list, ownership gate |
+| [M4A-C-MAINLINE-ROLLOUT.md](M4A-C-MAINLINE-ROLLOUT.md) | Mainline rollout plan + read-only preflight tool for landing the three-repo switch |
+| [M4A-INTEGRATION.md](M4A-INTEGRATION.md) | M4a-D integration record: input SHAs, conflicts, verified combos, mainline landing checklist |
 | [CAPABILITY-BOUNDARIES.md](CAPABILITY-BOUNDARIES.md) | Detailed core-vs-extension admission rules |
 | [LINUX-LIKE-VFS.md](LINUX-LIKE-VFS.md) | Filesystem namespace and mount authority |
 | [NETWORK-RUNTIME.md](NETWORK-RUNTIME.md) | HTTP routing, retry, and approval semantics |
@@ -48,6 +52,30 @@ integration gates) records above remain the migration history. The stale
 planning snapshots `ROADMAP.md` / `TODO.md` (monorepo-era status that
 contradicted the completed split) were removed in the M4a-B ownership
 cleanup — see [M4A-B-OWNERSHIP-CLEANUP.md](M4A-B-OWNERSHIP-CLEANUP.md).
+
+### Two dependency lanes — do not conflate them
+
+1. **The verified fixed combo.** Every green gate run so far (M3c
+   acceptance and M4a-D integration) tested ONE pinned combination:
+   Product at its integration head consuming `locus-runtime`
+   `2435a57ff7a66db3db88aa98a88d404c75133483` and `locus-harness`
+   `347eed99a415dc080b97d46d8a4271ceb19c5142` (pins live in the
+   repository README and `package.json`). A green gate on this lane says
+   nothing about any other core SHA.
+2. **The core-main candidate lane.** The scheduled/manual pipeline
+   ([M4A-A-CORE-CANDIDATE.md](M4A-A-CORE-CANDIDATE.md)) captures the two
+   cores' *current* `main` SHAs into a snapshot and verifies Product
+   against exactly that combination in a throwaway checkout. It never
+   rewrites the verified pins, never auto-PRs. Until the extraction
+   implementation lands on both cores' `main`, candidate capture
+   honestly fails at install (both mains lack the implementation —
+   recorded in the M4a-D integration doc).
+
+A pass in one lane must never be reported as a pass in the other: the
+fixed combo is *verified history*, the candidate lane is *ongoing
+verification of latest main*. Until the candidate workflow reaches the
+default branch (schedule/dispatch are default-branch gated), it has not
+run automatically anywhere.
 
 ## What is normative?
 
