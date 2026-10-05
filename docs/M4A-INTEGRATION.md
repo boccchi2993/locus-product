@@ -309,12 +309,18 @@ commit trees identical; C's four files blob-identical; zero conflicts):
 | D — registration of A's workflow-shape suite (the only code change) | — | — | `7bd1e54` |
 
 The unit battery is now **31 suites** (A's workflow-shape suite added to §2's
-three). After this PR merges, PRs #10 and #11 join #6/#7/#8 as superseded.
-The re-verification record — real-execution input-injection tests, the two
-real-commit identity matrix, the preflight counterexample matrix plus a
-fresh live remote preflight, the clean-tree battery, and an honestly red
-main-mode candidate — is `docs/M4A-REVIEW-VERIFICATION.md`. §6's landing
-list above is reaffirmed there (§8) on 2026-10-06 evidence; the mainline
-remains blocked on locus-runtime #1's never-rerun failed run `36987973661`,
-and the candidate schedule/dispatch remain dormant until this merge chain
-reaches `main`.
+three). This round's push again went through the Git Data API (git transport
+down at push time; per-commit tree equality verified, commit SHAs drifted —
+full local→remote mapping in `docs/M4A-REVIEW-VERIFICATION.md` §7); PR #9's
+remote head after integration is **`7c294b53664d82fc71d596b5e21c6b3145a372b0`**,
+and the out-of-checkout drill (capture → apply → verify → build → unit →
+all 16 official browser gates) ran green against exactly that remote head
+consuming the same two verified core SHAs. After this PR merges, PRs #10
+and #11 join #6/#7/#8 as superseded. The re-verification record —
+real-execution input-injection tests, the two real-commit identity matrix,
+the preflight counterexample matrix plus a fresh live remote preflight, the
+clean-tree battery, and an honestly red main-mode candidate — is
+`docs/M4A-REVIEW-VERIFICATION.md`. §6's landing list above is reaffirmed
+there (§8) on 2026-10-06 evidence; the mainline remains blocked on
+locus-runtime #1's never-rerun failed run `36987973661`, and the candidate
+schedule/dispatch remain dormant until this merge chain reaches `main`.

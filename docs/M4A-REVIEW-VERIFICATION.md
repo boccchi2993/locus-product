@@ -232,13 +232,76 @@ before fix C are superseded by C's status table and this live run.
 
 ## 7. Clean drill on the pushed gate head (out-of-checkout)
 
-Recorded in the delivery commit of this branch: the drill must capture the
-**pushed remote head** it verifies, so it runs after this commit is pushed
-and its results land in the final docs commit. See §7 in the delivery
-commit's version of this file (capture → apply → verify → build → unit →
-official browser gates, all bound to one Product SHA + the two verified
-core SHAs, plus the post-apply identity scope checks: legal dependency
-delta verifies; source changes and HEAD moves cannot impersonate).
+**How this branch was pushed, and the SHA drift stated openly:** git
+transport to `github.com:443` failed twice at push time (`Recv failure` /
+connect timeout; `gh api` stayed reachable), so the seven commits were
+pushed through the Git Data API (blobs → trees with `base_tree` → commits →
+ref PATCH `force=false`, after GET-confirming the ref still sat at
+`da5bb09`). Fidelity gates held mechanically: **every remote tree SHA
+equals the local tree SHA**, and the compare API shows exactly the expected
+7 commits / 13 files. Commit objects drifted in SHA as the API always does
+(message trailing newlines stripped; dates stored as UTC):
+
+| Local commit | Remote commit on `refactor/m4a-integration` | Tree equality |
+|---|---|---|
+| `f49ddf9` (A-F1) | `05372138` | ✓ `d3b89021` |
+| `3052b35` (A-F2) | `cc3a2217` | ✓ `93243e14` |
+| `d62a036` (A-docs) | `94f7d4f9` | ✓ `0e6ae574` |
+| `447f3d9` (C-fix) | `bc4b909e` | ✓ `3caf5b16` |
+| `2396a66` (C-docs) | `ed6f4f70` | ✓ `db9a3f74` |
+| `7bd1e54` (D registration) | `abd4c594` | ✓ `42f6dbcb` |
+| `520074a` (D docs) | `7c294b53` | ✓ `1b3d75fc` |
+
+Because of that drift, the drill below was captured and run against the
+**final remote head** — not the local pre-push commit. The remote chain was
+additionally rebuilt locally (`git commit-tree`, stripped messages, UTC
+dates) and every rebuilt SHA matched the remote commit exactly, so the
+local checkout used for cloning is byte-identical to the remote branch.
+
+**The drill** (two throwaway clones outside every checkout, both
+`core.autocrlf=false`, at `7c294b53664d82fc71d596b5e21c6b3145a372b0`):
+
+| Step | Result | Binding |
+|---|---|---|
+| capture (`--source explicit`) | exit 0 | `product.commit = 7c294b53…`, runtime `2435a57f…`, harness `347eed99…` |
+| apply (real `npm ci` of both cores from GitHub) | exit 0 | provenance **6/6**: productIdentity, allowedDelta, manifest, lock, hiddenLock, installed |
+| verify | exit 0 | same snapshot |
+| `npm run build` | exit 0 (965 ms) | — |
+| `npm test` (`BROWSER_GATE_ORCH_REAL_PREVIEW=1`) | exit 0 | **all 31 suites** |
+| official browser gates (`tests/run-browser-gates.cjs`, single run) | exit 0 | **all 16 gates passed**, no retry |
+| legal dependency edit post-apply (devDependency + matching lock entry) | verify exit 0 | the applied/legal delta scope verifies |
+| source-file rider (`src/main.js` touch) | verify **exit 22** `changes outside the allowed candidate scope` | source changes cannot ride along |
+| HEAD moved after apply (empty commit) | verify **exit 22** `Product identity mismatch` | a moved HEAD cannot impersonate the captured Product commit |
+
+Every line above is bound to the same triple: Product commit
+`7c294b53664d82fc71d596b5e21c6b3145a372b0` + runtime
+`2435a57ff7a66db3db88aa98a88d404c75133483` + harness
+`347eed99a415dc080b97d46d8a4271ceb19c5142`. Logs are preserved in the
+review area (`drill-capture.log`, `drill-apply.log`, `drill-verify.log`,
+`drill-build.log`, `drill-unit.log`, `drill-browser.log`,
+`drill-scope-*.log`). **Gate head vs branch tip, stated explicitly:** the
+branch tip at delivery is this docs commit — its tree differs from the
+drilled head `7c294b53` only by these two documentation files; every
+gate-relevant file (sources, tests, workflow, pins) is byte-identical
+between the drilled head and the tip, which the tree hashes of the
+delivery commit's parent chain prove.
+
+### CI on the pushed head (PR run and push run reported separately)
+
+| Run | Event | Result |
+|---|---|---|
+| `37355783370` | pull_request (PR #9 check) | **success** (both jobs) |
+| `37355773953` | push | **failure**: exactly one suite, `e2e-ui.cjs`, died at Chrome boot with `CDP browser endpoint unavailable: readiness timeout`; every other suite passed on that run (including `e2e-m3c-python-integration` 55/55) |
+
+First failure kept, not rerun. Diagnosis, with the evidence stated: the
+identical commit passed the identical browser-gates job minutes later on
+the pull_request run, and the failure hit the run's very first Chrome boot
+— the known runner-side CDP readiness flake family recorded in earlier
+rounds, not a regression of this integration. No gate was weakened and no
+rerun was triggered (out of this round's authorization); the red push run
+stands on the record next to the green PR run. The candidate
+`core-main-candidate` workflow did NOT run anywhere on GitHub — it is not
+on the default branch (schedule/dispatch remain dormant, §8.5).
 
 ## 8. Corrected mainline landing checklist (reaffirmed on today's evidence)
 
@@ -285,6 +348,9 @@ Order matters; stop on any red.
 - Residual unknowns carried from fix C stand (user-level GitHub App
   integrations unauditable at 403 under the owner token).
 - First failures are kept: §3's two harness-side first runs, §4's
-  mis-ordered fixture run, §6.3's four transport-failed capture attempts.
-  Diagnostic reruns are listed alongside; nothing was retried into green
-  by weakening an assertion.
+  mis-ordered fixture run (which also exposed that a PATH-level npm shim
+  cannot intercept this tool — see §4), §6.3's four transport-failed
+  capture attempts, §7's two failed `git push` attempts (API fallback) and
+  the red push-event CI run `37355773953` (CDP readiness timeout, same
+  commit green on the PR run). Diagnostic reruns are listed alongside;
+  nothing was retried into green by weakening an assertion.
