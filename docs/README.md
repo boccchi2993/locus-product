@@ -34,15 +34,26 @@ The repository keeps documentation beside code so architecture changes, tests, a
 | [PERSISTENCE.md](PERSISTENCE.md) | IndexedDB/OPFS and recovery semantics |
 | [IMAGE-INPUT.md](IMAGE-INPUT.md) | Image/perception boundary |
 
-The three-repository split is a target architecture, not an implemented feature. The migration M0 audit and contract round, M1 (task assembly + interpreter lifecycle), M2a (Runtime independentization), M2b (Harness independentization) and M2c (public capability declarations + the Product compatibility gate + joint integration gates) are complete (see the REPOSITORY-SPLIT-\* documents above); M3 (repository extraction) and M4 (integration/lock) remain pending.
-
-Project status lives in [../ROADMAP.md](../ROADMAP.md). Implementation backlog lives in [../TODO.md](../TODO.md).
+The three-repository split is IMPLEMENTED: this repository consumes
+`locus-runtime` and `locus-harness` as pinned GitHub dependencies through
+`src/product/runtime-api.js` and `src/product/harness-api.js` — ONE ESM
+page entry, no in-repo core duplicates (the M3c switch; verified in
+[M3C-D-INTEGRATION.md](M3C-D-INTEGRATION.md) and
+[M3C-REVIEW-VERIFICATION.md](M3C-REVIEW-VERIFICATION.md), with the fixed
+dependency SHAs recorded in the repository README). The migration M0
+audit and contract round, M1 (task assembly + interpreter lifecycle), M2a
+(Runtime independentization), M2b (Harness independentization) and M2c
+(public capability declarations + the Product compatibility gate + joint
+integration gates) records above remain the migration history. The stale
+planning snapshots `ROADMAP.md` / `TODO.md` (monorepo-era status that
+contradicted the completed split) were removed in the M4a-B ownership
+cleanup — see [M4A-B-OWNERSHIP-CLEANUP.md](M4A-B-OWNERSHIP-CLEANUP.md).
 
 ## What is normative?
 
 1. **Code + tests** — evidence of what current `main` actually does.
 2. **Architecture / security / concept docs** — intended invariants; implementation changes should update them deliberately.
-3. **Roadmap / TODO** — status and future work, not permission to claim a future feature exists.
+3. **Branch / verification records** (repository `README`, `M3C-*.md`, `M4A-*.md`) — status and future work, not permission to claim a future feature exists.
 4. **Candidate studies** — `docs/plugins/` explores possibilities; none is selected merely because a requirements document exists.
 5. **Audit snapshots** — `Locus-audit-*.md` describes a historical commit and may intentionally contain facts later fixed.
 

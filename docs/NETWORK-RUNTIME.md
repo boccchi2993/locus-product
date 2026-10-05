@@ -1,8 +1,9 @@
 # Locus NetworkRuntime v1
 
 The unified, provider-neutral, tool-neutral HTTP/HTTPS execution substrate
-(src/network.js). All future HTTP consumers go through one interface; the
-first consumer is `curl`.
+(locus-runtime, `src/network.js`; consumed through
+`src/product/runtime-api.js`). All future HTTP consumers go through one
+interface; the first consumer is `curl`.
 
 **Core model experience invariant:**
 
@@ -24,9 +25,9 @@ connection failure, timeout).
 ## Position in the stack
 
 ```
-curl CLI (src/shell.js)         — CLI parsing, stdout/stderr, -o, exit behavior
+curl CLI (locus-runtime src/shell.js) — CLI parsing, stdout/stderr, -o, exit behavior
         ↓ NetworkRuntime.request(spec)
-NetworkRuntime (src/network.js) — validate, classify, approve, route, bound
+NetworkRuntime (locus-runtime src/network.js) — validate, classify, approve, route, bound
         ↓ backend chosen BEFORE the request starts
 browser fetch  |  edge relay (/fetch, functions/fetch.js)
 ```
@@ -209,7 +210,8 @@ Relay guardrails (server-side mirror of the client policy, defense in depth):
   WHATWG-canonical spelling `[::ffff:7f00:1]` are both loopback, and scalar
   IPv4 spellings (`127.1`, `2130706433`, `0x7f000001`, `0177.0.0.1`) are
   normalized before classification. Both the client and the relay carry the
-  SAME classifier (src/network.js + functions/fetch.js, kept in sync and
+  SAME classifier (locus-runtime src/network.js + this repo's
+  functions/fetch.js edge relay, kept in sync and
   tested against the SAME attack-vector tables); the client pre-checks
   before choosing the relay (`network_private_address_blocked`), so the
   model gets the same deterministic error without a wasted round-trip. Every
@@ -358,7 +360,7 @@ sees the deterministic message and, where useful, the target origin and HTTP
 status. It never sees "CORS", "browser fetch", "relay", or advice to switch
 tools. Debug/telemetry surfaces record the backend.
 
-## curl migration (src/shell.js)
+## curl migration (locus-runtime src/shell.js)
 
 The shell is CLI-only: parsing, stdout/stderr, `-o`, exit semantics. It calls
 `NetworkRuntime.request()` and formats the normalized result. Supported:
