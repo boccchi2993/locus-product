@@ -61,10 +61,15 @@ function runSuiteProcess(suitePath, timeoutMs = DEFAULT_SUITE_TIMEOUT_MS, cleanu
     const identity = cleanup.ownTreeIdentity(child.pid);
     let timedOut = false;
     let settled = false;
+    // Test-only narrow seam (round 3): the termination implementation can
+    // be substituted so caller-side verdict handling is testable on every
+    // platform. Default is the real shared helper; settlement, the
+    // timeout verdict and failure attachment are NOT affected by this.
+    const terminate = cleanupOpts.cleanupImpl || cleanup.terminateTree;
     const timer = setTimeout(() => {
       timedOut = true;
       clearTimeout(timer);
-      cleanup.terminateTree(identity, cleanupOpts).then((r) => {
+      terminate(identity, cleanupOpts).then((r) => {
         if (settled) return;
         settled = true;
         detach();
@@ -225,4 +230,4 @@ async function runBrowserGates(opts = {}) {
   return gateFailed ? 1 : 0;
 }
 
-module.exports = { DEFAULT_SUITE_TIMEOUT_MS, runSuiteProcess, runBrowserGates };
+module.exports = { DEFAULT_SUITE_TIMEOUT_MS, runSuiteProcess, runBrowserGates, describeResult };

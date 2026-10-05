@@ -757,7 +757,18 @@ tests.push(['F1 race: timeout vs natural exit — exactly one verdict, no unhand
       if (r.kind === 'exit') {
         check('natural exit kept its identity (' + timeoutMs + ')', r.code === 0, JSON.stringify(r));
       } else {
-        check('timeout verdict kept, no cleanup failure (' + timeoutMs + ')', r.ok === false && r.timeoutMs === timeoutMs && r.cleanup === undefined, JSON.stringify(r));
+        // Round-3 correction of this assertion: it previously required
+        // cleanup === undefined here, which PINNED the old wrong success —
+        // on win32 a taskkill that races the fixture's natural exit can
+        // legitimately FAIL (non-zero exit / ETIMEDOUT) with the root
+        // already gone; that is now an ATTACHED cleanup failure (with the
+        // rootExited diagnostic), and the verdict itself must still be a
+        // timeout. On POSIX a group signal hitting an already-empty group
+        // is REAL completion evidence, so no cleanup entry appears there.
+        const cleanupVerifiedOrHonestFailure = r.cleanup === undefined
+          || (process.platform === 'win32' && r.cleanup.ok === false && r.cleanup.rootExited === true && !!r.cleanup.error);
+        check('timeout verdict kept; cleanup either verified or honestly failed (' + timeoutMs + ')',
+          r.ok === false && r.timeoutMs === timeoutMs && cleanupVerifiedOrHonestFailure, JSON.stringify(r));
         const pid = Number(fs.readFileSync(myPidFile, 'utf8').trim());
         const gone = await preview.waitForPidExit(pid, 5000);
         check('process dead after timeout settlement (' + timeoutMs + ')', gone.exited === true);
@@ -771,6 +782,63 @@ tests.push(['F1 race: timeout vs natural exit — exactly one verdict, no unhand
     delete process.env.EXIT_AFTER_MS;
     process.env.PID_FILE = pidFile;
   }
+}]);
+
+tests.push(['r3: a taskkill-shaped cleanup failure stays ATTACHED to a timeout verdict (injected impl)', async () => {
+  const myPidFile = path.join(fixtureDir, 'pid-r3-timeout-cleanup.json');
+  process.env.PID_FILE = myPidFile;
+  try {
+    const r = await withTimeout(
+      runner.runSuiteProcess(path.join(fixtureDir, 'hang.cjs'), 500, {
+        termGraceMs: 300,
+        killConfirmMs: 500,
+        cleanupImpl: async () => ({ ok: false, stage: 'taskkill', rootExited: true, error: Object.assign(new Error('taskkill /T /F exited 128'), { status: 128 }) }),
+      }),
+      15000,
+      'timeout with an attached taskkill-shaped cleanup failure',
+    );
+    check('the verdict STAYS timeout — never flipped to success', r && r.ok === false && r.kind === 'timeout' && r.timeoutMs === 500, JSON.stringify(r));
+    check('the cleanup failure is attached in its ORIGINAL shape (status preserved)',
+      r.cleanup && r.cleanup.ok === false && r.cleanup.stage === 'taskkill' && r.cleanup.rootExited === true && r.cleanup.error.status === 128, JSON.stringify(r.cleanup));
+    check('the failure text names the cleanup problem', runner.describeResult(r).includes('CLEANUP ALSO FAILED'), runner.describeResult(r));
+    check('settled exactly once, bounded (result observed; no unhandled rejection tracked globally)', !!r);
+  } finally {
+    process.env.PID_FILE = pidFile;
+    // The injected impl does not terminate anything — the fixture is OURS:
+    // hard-clean it so this test can never leave an orphan.
+    if (fs.existsSync(myPidFile)) {
+      const pid = Number(fs.readFileSync(myPidFile, 'utf8').trim());
+      if (Number.isFinite(pid) && pid > 0) {
+        try { preview.killTree(pid); } catch (e) { /* gone */ }
+        await preview.waitForPidExit(pid, 5000);
+      }
+    }
+  }
+}]);
+
+tests.push(['r3: a taskkill-shaped preview cleanup failure fails the whole run even with all gates green', async () => {
+  const errors = [];
+  const code = await runner.runBrowserGates({
+    requested: ['pass-a.cjs'],
+    registry: ['pass-a.cjs'],
+    suiteDir: fixtureDir,
+    rootDir: fixtureDir,
+    port: await freePort(),
+    build: async () => ({ ok: true, output: '' }),
+    readBuildToken: () => null,
+    startPreview: async () => ({
+      pid: 0,
+      isAlive: () => true,
+      waitReady: async () => {},
+      kill: async () => ({ ok: false, stage: 'taskkill', rootExited: true, error: Object.assign(new Error('taskkill /T /F exited 128'), { status: 128 }) }),
+    }),
+    runSuite: async () => ({ ok: true }),
+    log: () => {},
+    error: captureErrors(errors),
+  });
+  check('the run is non-zero despite every gate passing', code !== 0, 'got ' + code);
+  const joined = errors.join('\n');
+  check('CLEANUP FAILED names the original taskkill error', joined.includes('CLEANUP FAILED') && joined.includes('taskkill /T /F exited 128'), joined);
 }]);
 
 tests.push(['waitHealthy: build identity + aliveness, bounded (real HTTP)', async () => {

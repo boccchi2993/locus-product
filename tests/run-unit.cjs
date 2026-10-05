@@ -31,6 +31,10 @@ const SUITES = [
   // M3c review A: browser-gate orchestrator fault-path suite (real-preview
   // test stays gated behind BROWSER_GATE_ORCH_REAL_PREVIEW=1).
   'browser-gate-orchestrator.test.cjs',
+  // M3c review round 3: the cleanup helper's platform branches under
+  // scripted OS calls (isolated VM — the Windows branch executes on any
+  // platform, the POSIX algorithm is pinned unchanged).
+  'browser-gate-cleanup-branch.test.cjs',
   // M3c integration: the three parallel agents' dedicated gates (D wiring).
   'm3c-runtime-adapter.test.mjs',
   'm3c-storage-adapters.test.mjs',

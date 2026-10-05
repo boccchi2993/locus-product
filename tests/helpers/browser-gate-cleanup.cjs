@@ -64,13 +64,19 @@ function waitForCondition(fn, ms, pollMs = POLL_MS) {
 // AND the root itself is alive (a root that never became a group leader —
 // a spawn-contract violation — is then the honest best effort). Windows:
 // taskkill /T /F on the root, the platform's real tree kill, with a
-// bounded call so a wedged taskkill cannot hang cleanup.
+// bounded call so a wedged taskkill cannot hang cleanup. A failed call
+// reports its ORIGINAL error — the exit status and any error code
+// (ETIMEDOUT included) survive verbatim for the caller.
 function signalTree(identity, signal) {
   if (identity.platform === 'win32') {
     const r = spawnSync('taskkill', ['/pid', String(identity.rootPid), '/T', '/F'],
       { stdio: 'ignore', windowsHide: true, timeout: TASKKILL_TIMEOUT_MS });
     if (r.error) return { ok: false, error: r.error };
-    if (r.status !== 0) return { ok: false, error: new Error('taskkill /T /F exited ' + r.status) };
+    if (r.status !== 0) {
+      const e = new Error('taskkill /T /F exited ' + r.status);
+      e.status = r.status;
+      return { ok: false, error: e };
+    }
     return { ok: true };
   }
   try {
@@ -109,16 +115,15 @@ async function terminateTree(identity, opts = {}) {
     }
     const k = signalTree(identity, 'SIGKILL');
     if (!k.ok) {
-      // taskkill races natural exits: it reports failure ("not found")
-      // when the root died between our aliveness check and the kill. If
-      // the root is verifiably dead NOW, this is a COMPLETED attempt
-      // (taskkill ran while the root was verified alive) — unlike the
-      // never-attempted root-exited case below, which stays an explicit
-      // failure. Real taskkill failures on a live tree stay visible.
-      if (!pidAlive(identity.rootPid)) {
-        return { ok: true, how: 'root exited during the kill race (taskkill reported it gone); win32 cannot enumerate anything beyond the root' };
-      }
-      return { ok: false, stage: 'taskkill', error: k.error };
+      // A taskkill-level failure is a FAILURE, full stop (round 3 — this
+      // corrects the round-2 exception that answered ok:true whenever the
+      // root was gone after a failed call). The call itself did not prove
+      // the subtree is clean: a root that exits around the kill says
+      // nothing about survivors, and an ETIMEDOUT call proves even less.
+      // Whether the root is verifiably gone NOW is recorded as the
+      // rootExited diagnostic only — it never converts the verdict; the
+      // original error (exit status, ETIMEDOUT, other) survives verbatim.
+      return { ok: false, stage: 'taskkill', rootExited: !pidAlive(identity.rootPid), error: k.error };
     }
     const rootGone = await waitForCondition(() => !pidAlive(identity.rootPid), killConfirmMs);
     if (!rootGone) {
