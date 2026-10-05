@@ -295,3 +295,26 @@ Rollback and stop rules: `docs/M4A-C-MAINLINE-ROLLOUT.md`.
 `tmp-m4ad-drill/` is an out-of-checkout diagnostics directory kept outside
 the repository on purpose (the candidate tool hard-refuses to apply into the
 tool's own workspace; nothing above requires it in-repo).
+
+## 8. Review round 1 integration (fix D, 2026-10-06) — see M4A-REVIEW-VERIFICATION.md
+
+The first review round's fixes are now carried on this branch, cherry-picked
+in A → C order onto `da5bb09` with byte-level fidelity proofs (A's three
+commit trees identical; C's four files blob-identical; zero conflicts):
+
+| Review fix | PR | Remote branch @ integrated head | → Integration commit |
+|---|---|---|---|
+| A — candidate lane: F1 env input channel, F2 Product identity binding | #11 | `fix/m4a-review-candidate` @ `17098cd3c60707387a97bba9f820f4e646263e1f` | `f49ddf9`, `3052b35`, `d62a036` |
+| C — preflight refuses `ready` without sufficient evidence | #10 | `fix/m4a-review-preflight` @ `db2be6ac3914883cafdd127397d74dfe7bca30d8` | `447f3d9`, `2396a66` |
+| D — registration of A's workflow-shape suite (the only code change) | — | — | `7bd1e54` |
+
+The unit battery is now **31 suites** (A's workflow-shape suite added to §2's
+three). After this PR merges, PRs #10 and #11 join #6/#7/#8 as superseded.
+The re-verification record — real-execution input-injection tests, the two
+real-commit identity matrix, the preflight counterexample matrix plus a
+fresh live remote preflight, the clean-tree battery, and an honestly red
+main-mode candidate — is `docs/M4A-REVIEW-VERIFICATION.md`. §6's landing
+list above is reaffirmed there (§8) on 2026-10-06 evidence; the mainline
+remains blocked on locus-runtime #1's never-rerun failed run `36987973661`,
+and the candidate schedule/dispatch remain dormant until this merge chain
+reaches `main`.
