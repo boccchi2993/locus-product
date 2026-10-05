@@ -408,7 +408,7 @@ Round start (all verified before any work): PR #5 OPEN, base `main`, head
 == the round's expected head (checked live via the GitHub API; git's
 HTTPS transport to github.com was down the whole session again — connect
 reset/timeouts — so all remote verification and the push went through the
-API, §9). Work done in a DEDICATED clean worktree
+API, see §8.7). Work done in a DEDICATED clean worktree
 (`locus-m3c-review-r2`, branch `fix/m3c-review-r2` cut from that exact
 head); no other worktree was touched, nothing was reset or cleaned.
 Dependencies re-verified pinned in package.json AND package-lock.json:
@@ -494,7 +494,7 @@ evidence.
 Local results (Windows): plain → `17 passed, 3 skipped, no failures`;
 with `BROWSER_GATE_ORCH_REAL_PREVIEW=1` → `17 passed, 2 skipped, no
 failures` (only the POSIX-only F1 pair skips). Linux execution proof:
-CI unit job on the pushed head (§9).
+CI unit job on the pushed head (§8.7).
 
 ### 8.2 F2 — the negative self-proof judges evidence, not exceptions
 
@@ -631,7 +631,7 @@ above enters the repo (oversized logs stay out of git).
    exactly this contract and is green.
 3. No suite-level first failure occurred in the final verification runs
    above; the two POSIX-only F1 tests have their FIRST EXECUTION on Linux
-   in CI (§9) — their result there is recorded as-is, whatever it is.
+   in CI (§8.7) — their result there is recorded as-is, whatever it is.
 
 ### 8.6 Round-2 residuals
 
@@ -640,3 +640,37 @@ above enters the repo (oversized logs stay out of git).
 - B-PY1 error-text instability: root cause still UNDETERMINED (unchanged;
   this round made no Python-behavior change and ran no experiment).
 - Nothing merged, published, or deployed; M4 not entered.
+
+### 8.7 Round-2 push + CI record
+
+Push mechanism: git's HTTPS transport to github.com was down for the whole
+session again (connect reset/timeouts; `gh api` worked). The three round-2
+commits were normalized locally to the API's byte-blueprint form (message
+trailing newlines stripped — `git commit -m` appends one; the UTC
+`<unix> +0000` dates were already right), then uploaded object-by-object
+through the Git Data API with EVERY object's SHA verified equal to the
+local git object before the ref moved: 15 blobs, 3 trees (base_tree +
+changed entries), 3 commits, and finally a NON-FORCED ref update
+(`PATCH … force:false`, `2008d90a` → `358f3cca`). Nothing on the remote
+was rebuilt or rewritten; the branch only moved forward; the local branch
+was set to the pushed chain before uploading (no local/remote divergence).
+
+Round-2 pushed commits (SHAs as on the remote — identical to the local
+byte-blueprints):
+
+| Pushed commit | Content |
+|---|---|
+| `9dcd05bb` | F1: shared bounded verified owned-process cleanup + orchestrator tests + CI real-preview wiring |
+| `0ef46071` | F2: structured negative-self-proof judge + driver + unit suite (run-unit 25→26) + chrome.cjs additive event subscription |
+| `358f3cca` | F3: Python E3 wording unified + this round's verification record (§8) |
+
+CI on the pushed head `358f3cca…` — both runs GREEN, and this is the
+FIRST Linux execution of the POSIX-only F1 tests:
+
+- PR run **37275926584 — success** (unit job: all 26 suites passed; the
+  orchestrator suite reported **17 passed, 0 skipped, no failures** on
+  ubuntu — the SIGTERM-ignoring-timeout test and the orphaned-group
+  cleanup test EXECUTED for real there, as did the real vite preview
+  lifecycle via the new `BROWSER_GATE_ORCH_REAL_PREVIEW=1` wiring;
+  browser job: all 16 gates green on ubuntu).
+- Push run **37275921233 — success**.
