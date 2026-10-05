@@ -463,6 +463,7 @@ async function connectToTarget(target) {
   });
   let id = 0;
   const pending = new Map();
+  const eventListeners = new Map();
   const rejectPending = (error) => {
     for (const entry of pending.values()) {
       clearTimeout(entry.timer);
@@ -472,6 +473,11 @@ async function connectToTarget(target) {
   };
   ws.addEventListener('message', (event) => {
     const message = JSON.parse(event.data);
+    if (message.method && eventListeners.has(message.method)) {
+      for (const handler of [...eventListeners.get(message.method)]) {
+        try { handler(message.params); } catch (e) { /* a listener never breaks the pump */ }
+      }
+    }
     if (!message.id || !pending.has(message.id)) return;
     const entry = pending.get(message.id);
     pending.delete(message.id);
@@ -482,6 +488,15 @@ async function connectToTarget(target) {
   ws.addEventListener('error', (event) => rejectPending(new Error('CDP websocket error: ' + (event?.message || 'unknown error'))));
   return {
     ws,
+    // CDP event subscription (additive, m3c review round 2 F2): the
+    // packaged-storage gate wires Network listeners BEFORE navigating so
+    // the target page's first request is observed. Unsubscribing is
+    // optional — connections are per-run and short-lived.
+    on(method, handler) {
+      if (!eventListeners.has(method)) eventListeners.set(method, new Set());
+      eventListeners.get(method).add(handler);
+      return () => eventListeners.get(method).delete(handler);
+    },
     send(method, params = {}) {
       const requestTimeoutMs = Number.isFinite(params.timeout)
         ? Math.max(10000, params.timeout + 5000)

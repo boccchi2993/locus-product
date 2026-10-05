@@ -25,6 +25,9 @@ const SUITES = [
   'attachments.test.cjs',
   'capabilities.test.cjs',
   'chrome-helper.test.cjs',
+  // M3c review round 2 F2: the negative self-proof judge (one
+  // implementation shared with the packaged storage gate's driver).
+  'm3c-storage-built-verdict.test.cjs',
   // M3c review A: browser-gate orchestrator fault-path suite (real-preview
   // test stays gated behind BROWSER_GATE_ORCH_REAL_PREVIEW=1).
   'browser-gate-orchestrator.test.cjs',
