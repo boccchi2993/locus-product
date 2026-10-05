@@ -2,6 +2,10 @@
 
 Status: implemented on `feat/m4a-core-main-candidate` (base: `refactor/m3c-integration`,
 Product baseline `d6a74a25a2b98293d9aa1f2a635022d8f5ed733b`), 2026-10-05.
+Review round 1 fixes (F1 input channel, F2 Product identity binding) landed on
+`fix/m4a-review-candidate` (base: `refactor/m4a-integration`, Product baseline
+`da5bb09526e61e75925c44cba8907257398eaf56`), 2026-10-05 — see
+`docs/M4A-REVIEW-A.md` for findings, evidence and the review rehearsal.
 
 Product ships with an **exact, verified dependency lock** on the two cores
 (`locus-runtime`, `locus-harness` pinned to full 40-hex SHAs in
@@ -45,6 +49,18 @@ node scripts/core-main-candidate.mjs capture --checkout <dir> \
   `--runtime-sha` and `--harness-sha` required); per-core `ref` is `null` and
   `source` is `"explicit"`, so an explicit run can never masquerade as a
   main observation. Use this to re-verify an accepted combination.
+- **Workflow input channel (review F1)**: in CI the three inputs never touch
+  shell source — they arrive as env vars `CAND_SOURCE`, `CAND_RUNTIME_SHA`,
+  `CAND_HARNESS_SHA` and are validated by this same code path. An empty or
+  unset env value means "not provided", so a scheduled run (no dispatch
+  inputs) resolves to main mode. Validation happens before any network, npm
+  or filesystem effect, and a rejected value is never echoed back — the
+  error states only its shape (e.g. length).
+- **Exact-commit snapshots (review F2)**: capture requires a **clean** tree —
+  uncommitted source must never be recorded as if it were the Product
+  commit's content — and a readable HEAD. All tool output (`--out`,
+  `--result-file`) goes to caller-provided paths *outside* the checkout, so
+  the tool never pollutes the tree it is judging.
 - Output: the snapshot JSON on stdout, plus `--out <file>` when given.
   "Latest main" means *observed at capture time* — everything downstream
   reads only the captured SHAs; a main that moves mid-run is next round's
@@ -85,6 +101,13 @@ verified workspace is never a valid target; it is also what makes a failed
 apply structurally unable to rewrite the verified deps: the original
 workspace is simply never a write target).
 
+**Product identity binding (review F2)**: after preflight and *before a
+single byte is written or npm is invoked*, apply reads the checkout's REAL
+git HEAD and requires it to equal `snapshot.product.commit` — a snapshot
+captured on Product A must never be applied to Product B, however clean B's
+tree is, and a caller-supplied "current SHA" string is never trusted. A
+mismatch is a preflight refusal (exit 20) carrying `{expected, actual}`.
+
 Then, inside the temp checkout only:
 
 1. rewrite both dependency specs to `github:boccchi2993/<repo>#<captured-sha>`
@@ -103,6 +126,10 @@ workspace is untouched because it was never addressed.
 
 Provenance verification — what "installed really means installed" checks:
 
+- the real Product HEAD equals `snapshot.product.commit`, and the working
+  tree differs from it **only** in `package.json` / `package-lock.json`
+  (the allowed candidate delta; any other tested-source change or stray
+  untracked file is a rejection — there is no dirty bypass);
 - `package.json` dependency spec equals `github:<repo>#<sha>` exactly;
 - `package-lock.json` `packages["node_modules/<pkg>"].resolved` ends with
   `#<sha>`;
@@ -125,8 +152,8 @@ node scripts/core-main-candidate.mjs verify --snapshot <file> --checkout <dir> \
   [--result-file <file>]
 ```
 
-Runs step 4 alone. Non-zero when the checkout's manifest/lock/install no
-longer match the snapshot.
+Runs step 4 alone. Non-zero when the checkout's Product HEAD, allowed delta,
+manifest/lock/install no longer match the snapshot.
 
 ### `advance-check` — did main move on? (informational, never fails a run)
 
@@ -144,11 +171,11 @@ For `main` snapshots: re-observes each core main and reports
 | code | meaning |
 | ---- | ------- |
 | 0    | success |
-| 2    | usage / invalid input (bad flags, malformed or tampered snapshot) |
-| 10   | capture failure (transport error, non-conforming ref value, unreadable Product HEAD) |
-| 20   | preflight refusal (missing/dirty/not-a-checkout, tool's own workspace) |
+| 2    | usage / invalid input (bad flags or env inputs, malformed or tampered snapshot); rejected values are never echoed |
+| 10   | capture failure (transport error, non-conforming ref value, dirty tree, unreadable Product HEAD) |
+| 20   | preflight refusal (missing/dirty/not-a-checkout, tool's own workspace, Product identity mismatch) |
 | 21   | install failure (lock regeneration or `npm ci` non-zero) |
-| 22   | provenance verification failure |
+| 22   | verification failure (Product HEAD identity, delta outside the allowed scope, provenance mismatch) |
 | 30   | unexpected internal error |
 
 Safety invariants, enforced in code: repo names come from an allowlisted
@@ -163,15 +190,21 @@ constant or a validated SHA).
 ## 2. The workflow — `.github/workflows/core-main-candidate.yml`
 
 - **Triggers**: `schedule` (`30 3 * * *` daily, UTC) and `workflow_dispatch`
-  with inputs `source` (`main`/`explicit`), `runtime_sha`, `harness_sha`
-  (explicit mode validates both inputs as 40-hex before anything runs).
+  with inputs `source` (`main`/`explicit`), `runtime_sha`, `harness_sha`.
+  All three flow ONLY through the capture step's `env:` mapping into the tool
+  (review F1) — no `inputs.*` interpolation exists in any run block, and a
+  structural test (`tests/core-main-candidate-workflow.test.mjs`) fails CI if
+  one ever reappears. Validation happens inside the tool before any effect;
+  a scheduled run passes no inputs and resolves to main mode.
 - **Permissions**: `contents: read` — nothing else. No token write, no PR,
   no push, no merge, no release, no deployment anywhere in the file.
 - **Stages**, each its own step with its own log and outcome:
   1. `capture` — snapshot via the tool; artifact `candidate.json`;
   2. `install` — clone the workspace into a throwaway
-     `$RUNNER_TEMP/candidate-checkout`, then `apply` (lock regen → `npm ci` →
-     provenance verification);
+     `$RUNNER_TEMP/candidate-checkout`, **check out the captured Product
+     commit** (review F2 — not "whatever HEAD the clone happened to get"),
+     then `apply` (identity preflight → lock regen → `npm ci` → provenance
+     verification);
   3. `build` — `npm run build` on the candidate cores;
   4. `unit` — `npm test` (the full unit battery, including the real-preview
      orchestrator test);
@@ -235,21 +268,21 @@ before that point.
 
 ## 3. Wiring for agent D (integration)
 
-- **Tests**: add one line to the `SUITES` array in `tests/run-unit.cjs`:
-  `'core-main-candidate.test.mjs',` (suggested position: next to the other
-  M4a suites). The suite is self-contained (`node
-  tests/core-main-candidate.test.mjs`), needs no network and no model — all
-  transports are fakes. It was **not** registered here: registration belongs
-  to the integrator, so parallel agents don't collide on `run-unit.cjs`.
+- **Tests**: `core-main-candidate.test.mjs` is already registered in
+  `tests/run-unit.cjs` (line 44 at baseline `da5bb09`). Review round 1 adds a
+  second suite — add one line to the `SUITES` array:
+  `'core-main-candidate-workflow.test.mjs',`. Both are self-contained, need
+  no network and no model — all transports are fakes; the workflow suite only
+  reads the real workflow file and spawns the real tool with hostile env
+  values. Registration belongs to the integrator, so parallel agents don't
+  collide on `run-unit.cjs`.
 - **Workflow**: no further wiring — the file is self-contained and read-only.
   Nothing in existing CI (`ci.yml`) changes.
-- **Merge order**: this branch is based directly on the Product baseline
-  `d6a74a25` (PR #5 head). Merge as-is on top of `refactor/m3c-integration`;
-  no rebase choreography is expected. `run-unit.cjs` is the only file both
-  this PR and D's registration touch, and only that one line.
 - **Review pointers**: the snapshot schema is frozen at `schemaVersion: 1`
   (validation is strict/exact-key); if a future change needs new fields, bump
-  the version and teach `validateSnapshot` both shapes.
+  the version and teach `validateSnapshot` both shapes. The F2 allowed-delta
+  set (`package.json`, `package-lock.json`) is intentionally a hard constant;
+  widening it is a reviewable change, not a flag.
 
 ---
 

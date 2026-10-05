@@ -144,10 +144,22 @@ function headAt(dir) {
 export function defaultIo() {
   return {
     now: () => new Date().toISOString(),
+    env: process.env,
     listMainSha: listMainShaDefault,
     runNpm: runNpmDefault,
-    productHead: (checkout) => headAt(checkout),
   };
+}
+
+// Dispatch inputs reach the workflow as environment variables, never as
+// interpolated shell source (review round 1, F1): a hostile value arrives as
+// plain data in Node, where the shared validation in captureCandidate rejects
+// it before any network, npm, or filesystem effect. An empty/unset value
+// means "not provided" — a scheduled run with no dispatch inputs resolves to
+// main mode.
+function envInput(value) {
+  if (value === undefined || value === null) return undefined;
+  const s = String(value);
+  return s === '' ? undefined : s;
 }
 
 let toolRepoRootCache;
@@ -171,11 +183,14 @@ export async function captureCandidate({
 }) {
   if (checkout) checkout = String(checkout);
   if (!SOURCES.includes(source)) {
-    throw new CandidateError(EXIT.USAGE, `--source must be "main" or "explicit", got ${JSON.stringify(source)}`);
+    // Rejected input values are never echoed back (review round 1, F1) —
+    // only their shape, so hostile bytes can neither execute nor reach logs.
+    throw new CandidateError(EXIT.USAGE,
+      `--source must be "main" or "explicit" (rejected a value of length ${String(source).length})`);
   }
   if (source === 'main' && (runtimeSha !== undefined || harnessSha !== undefined)) {
     throw new CandidateError(EXIT.USAGE,
-      'explicit SHA flags are not allowed with --source main (capture modes must not be mixed)');
+      'explicit SHA inputs are not allowed with main mode (capture modes must not be mixed)');
   }
   const explicit = {
     'locus-runtime': runtimeSha,
@@ -188,12 +203,27 @@ export async function captureCandidate({
         throw new CandidateError(EXIT.USAGE, `--source explicit requires --${pkg === 'locus-runtime' ? 'runtime' : 'harness'}-sha (missing for ${pkg})`);
       }
       if (typeof v !== 'string' || !SHA_RE.test(v)) {
-        throw new CandidateError(EXIT.USAGE, `${pkg} candidate must be a full 40-char lowercase hex SHA, got ${JSON.stringify(v)}`);
+        throw new CandidateError(EXIT.USAGE, `${pkg} candidate must be a full 40-char lowercase hex SHA (rejected a value of length ${String(v).length})`);
       }
     }
   }
 
-  const productCommit = await io.productHead(checkout);
+  // An exact-commit snapshot requires an exact-commit checkout: no
+  // uncommitted source may be recorded as if it were the commit's content.
+  // Diagnostic output always goes to caller-provided paths OUTSIDE the
+  // checkout, so the tool never pollutes the tree it is judging.
+  const clean = gitRun(checkout, ['status', '--porcelain']);
+  if (clean.status !== 0) {
+    throw new CandidateError(EXIT.CAPTURE,
+      `could not read the checkout state of ${checkout} (not a git checkout?)`,
+      clean.stderr.trim().slice(-200));
+  }
+  if (clean.stdout.trim() !== '') {
+    throw new CandidateError(EXIT.CAPTURE,
+      'capture requires a clean checkout — uncommitted changes cannot be recorded as part of an exact Product commit',
+      clean.stdout.trim().split(/\r?\n/).slice(0, 10));
+  }
+  const productCommit = headAt(checkout);
   if (!productCommit) {
     throw new CandidateError(EXIT.CAPTURE,
       `could not read the Product commit being verified from ${checkout} (not a git checkout or detached HEAD unreadable)`);
@@ -285,6 +315,49 @@ function readSnapshotFile(file) {
 }
 
 // ---------------------------------------------------------------------------
+// Product identity binding (review round 1, F2)
+
+// A snapshot is only meaningful for the ONE Product commit it was captured
+// against. The check reads the REAL HEAD from git — a caller-supplied SHA
+// string is never trusted — and reports expected vs actual on mismatch.
+function assertProductIdentity(checkout, expectedCommit, stage) {
+  const actual = headAt(checkout);
+  if (actual === null || actual !== expectedCommit) {
+    throw new CandidateError(stage,
+      'Product identity mismatch: the checkout HEAD does not match the snapshot product commit',
+      { expected: expectedCommit, actual: actual === null ? null : actual });
+  }
+}
+
+// After a successful apply exactly two tracked files may differ from HEAD:
+// the two dependency files this tool rewrites. Anything else — tested source
+// riding along, stray untracked files — must not impersonate the Product
+// commit, and there is deliberately no blanket dirty bypass to weaken this.
+function assertAllowedCandidateDelta(checkout) {
+  const ALLOWED = new Set(['package.json', 'package-lock.json']);
+  const st = gitRun(checkout, ['status', '--porcelain']);
+  if (st.status !== 0) {
+    throw new CandidateError(EXIT.VERIFY, 'git status failed while scoping the candidate delta',
+      st.stderr.trim().slice(-200));
+  }
+  const violations = [];
+  for (const line of st.stdout.split(/\r?\n/)) {
+    if (line.trim() === '') continue;
+    const code = line.slice(0, 2);
+    const rawPath = line.slice(3);
+    const path = rawPath.startsWith('"') && rawPath.endsWith('"') ? rawPath.slice(1, -1) : rawPath;
+    if (path.includes(' -> ') || !ALLOWED.has(path) || !/^ ?M$/.test(code)) {
+      violations.push(`${code} ${rawPath}`);
+    }
+  }
+  if (violations.length) {
+    throw new CandidateError(EXIT.VERIFY,
+      'working tree contains changes outside the allowed candidate scope (only package.json and package-lock.json may differ from HEAD)',
+      violations);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // apply (temporary checkout) + provenance verification
 
 function preflight(checkout) {
@@ -339,6 +412,11 @@ function resolvedMatches(resolved, repo, sha) {
 
 export async function verifyProvenance(checkout, snapshot, io = defaultIo()) {
   validateSnapshot(snapshot);
+  // F2: identity first — the real HEAD must be the snapshot's Product commit,
+  // and the working tree may differ from it only by the candidate dependency
+  // files this tool writes. Then the two-core provenance checks.
+  assertProductIdentity(checkout, snapshot.product.commit, EXIT.VERIFY);
+  assertAllowedCandidateDelta(checkout);
   const problems = [];
   const manifest = JSON.parse(readFileSync(join(checkout, 'package.json'), 'utf8'));
   const lock = JSON.parse(readFileSync(join(checkout, 'package-lock.json'), 'utf8'));
@@ -393,12 +471,20 @@ export async function verifyProvenance(checkout, snapshot, io = defaultIo()) {
   if (problems.length) {
     throw new CandidateError(EXIT.VERIFY, 'candidate provenance verification failed', problems);
   }
-  return { manifest: true, lock: true, hiddenLock: hidden !== null, installed: true };
+  return {
+    productIdentity: true, allowedDelta: true,
+    manifest: true, lock: true, hiddenLock: hidden !== null, installed: true,
+  };
 }
 
 export async function applyCandidate({ snapshot, checkout, io = defaultIo() }) {
   validateSnapshot(snapshot);
   const pre = preflight(checkout);
+  // F2: bind the snapshot to THIS checkout before a single byte is written or
+  // npm is invoked — a snapshot captured on Product A must never be applied
+  // to Product B, however clean B's tree is.
+  assertProductIdentity(pre.checkout, snapshot.product.commit, EXIT.PREFLIGHT);
+  console.log(`[stage:preflight] product identity ok @ ${snapshot.product.commit.slice(0, 12)}`);
   const result = {
     stage: 'apply', checkout: pre.checkout, source: snapshot.source,
     product: snapshot.product, cores: snapshot.cores, verified: null,
@@ -490,14 +576,16 @@ function emitResult(resultFile, payload) {
 
 export async function runCli(argv, io = defaultIo()) {
   const [cmd, ...rest] = argv;
+  const env = io.env || process.env;
   try {
     if (cmd === 'capture') {
       const out = argValue(rest, '--out');
+      const flagSource = argValue(rest, '--source');
       const snapshot = await captureCandidate({
         checkout: requireValue(rest, '--checkout'),
-        source: argValue(rest, '--source') || 'main',
-        runtimeSha: argValue(rest, '--runtime-sha'),
-        harnessSha: argValue(rest, '--harness-sha'),
+        source: flagSource !== undefined ? flagSource : (envInput(env.CAND_SOURCE) || 'main'),
+        runtimeSha: argValue(rest, '--runtime-sha') ?? envInput(env.CAND_RUNTIME_SHA),
+        harnessSha: argValue(rest, '--harness-sha') ?? envInput(env.CAND_HARNESS_SHA),
         io,
       });
       if (out) writeFileSync(out, `${JSON.stringify(snapshot, null, 2)}\n`);
