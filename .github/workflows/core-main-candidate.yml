@@ -18,11 +18,13 @@
 # credentials exist in this repo); the ONE other real-network hop is the
 # python gates' pinned-CDN Pyodide download, recorded as such below.
 #
-# SCHEDULE CAVEAT (do not "fix" by moving this file early): GitHub only runs
-# `on: schedule` from the DEFAULT branch. Until this workflow lands on
-# locus-product's default branch, the cron line below is inert; runs happen
-# via workflow_dispatch on whichever branch carries this file. See
-# docs/M4A-A-CORE-CANDIDATE.md for the enablement path.
+# SCHEDULE CAVEAT (read before assuming this pipeline is online): GitHub only
+# runs `on: schedule` from the DEFAULT branch, and workflow_dispatch likewise
+# requires the workflow to be REGISTERED from the default branch (until then
+# the REST API and `gh workflow run` both fail with "workflow not found on the
+# default branch"). Until this file reaches locus-product's default branch via
+# the merge chain, the whole pipeline is dormant by construction — no cron, no
+# manual trigger. See docs/M4A-A-CORE-CANDIDATE.md for the enablement path.
 
 name: core-main-candidate
 
