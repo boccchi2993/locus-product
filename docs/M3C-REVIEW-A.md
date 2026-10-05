@@ -80,6 +80,17 @@ All six confirmed defects lived in the old single-file orchestrator:
    Windows reports an explicit unconfirmable-cleanup failure. `killTree`
    survives only as the low-level signal primitive.]
 
+   [Annotated 2026-10-05, third review round: one round-2 detail was
+   WRONG and is fixed — on Windows, a FAILED taskkill (non-zero exit or
+   ETIMEDOUT) used to be reported as cleanup success whenever the root
+   pid was gone afterwards ("completed attempt"); it is now always an
+   explicit cleanup failure carrying the original error, with only a
+   `rootExited` diagnostic. The race test that had pinned the old
+   success was corrected, not deleted. This corrects a defect round 2
+   introduced — no contract was raised or changed. Counterexamples,
+   fix and cross-platform branch tests:
+   M3C-REVIEW-VERIFICATION.md §9.]
+
 ## Tests (tests-first, red then green)
 
 New: `tests/browser-gate-orchestrator.test.cjs` (+ the three

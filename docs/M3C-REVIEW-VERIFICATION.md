@@ -9,7 +9,9 @@ exit codes, and the corrections this round makes to
 anything, publish anything, or deploy anything; after push the branch
 waits for review. §8 records the SECOND review round (2026-10-05: F1
 bounded owned-process cleanup, F2 structured negative-self-proof judge,
-F3 Python E3 wording) on the same branch.
+F3 Python E3 wording) on the same branch; §9 records the THIRD review
+round (2026-10-05: one Windows cleanup-branch defect corrected + the
+wedged-CI-run record put on factual footing).
 
 Established: 2026-10-05. No AGENTS.md exists in locus-product (re-verified
 at the baseline via `git ls-tree`; also GitHub-404 per M3C-REVIEW-B.md §1)
@@ -456,6 +458,14 @@ Implementation — ONE termination algorithm, two consumers:
   (no port/name/machine scans; only explicitly spawned, identity-held
   trees). `killTree` remains the low-level signal REQUEST only; its
   taskkill call is now itself bounded (10 s) with visible errors.
+  **[RETRACTED 2026-10-05, third review round: the "COMPLETED attempt"
+  sentence described an ok:true return that this round withdrew — a
+  failed taskkill (non-zero exit or ETIMEDOUT) is now ALWAYS a cleanup
+  failure with the original error preserved and only a `rootExited`
+  diagnostic; the race test that pinned the old success was corrected
+  accordingly. Round 2 introduced the wrong success verdict; round 3
+  fixes it — no requirement was raised and no contract changed. See
+  §9.1.]**
 - `browser-gate-runner.cjs` `runSuiteProcess`: the timeout runs the shared
   `terminateTree` and settles WITHIN the bounded terminate+confirm
   window; the verdict STAYS `timeout` even when the child exits 0 during
@@ -629,6 +639,10 @@ above enters the repo (oversized logs stay out of git).
    have failed whole runs for a Windows scheduling race). Fixed with the
    completed-attempt semantics (§8.1); the committed race test now pins
    exactly this contract and is green.
+   **[Annotated 2026-10-05, third review round: the fix above over-
+   corrected — it returned ok:true on that race, i.e. the wrong success
+   this round withdrew; the race test now pins the honest attached
+   failure instead. See §9.1.]**
 3. No suite-level first failure occurred in the final verification runs
    above; the two POSIX-only F1 tests have their FIRST EXECUTION on Linux
    in CI (§8.7) — their result there is recorded as-is, whatever it is.
@@ -674,3 +688,149 @@ FIRST Linux execution of the POSIX-only F1 tests:
   lifecycle via the new `BROWSER_GATE_ORCH_REAL_PREVIEW=1` wiring;
   browser job: all 16 gates green on ubuntu).
 - Push run **37275921233 — success**.
+
+## 9. Third review round (2026-10-05): one Windows cleanup-branch defect + one CI-record correction
+
+Scope kept deliberately narrow: ONE code defect in the round-2 cleanup
+work, plus correcting an over-strong root-cause label in the CI record.
+No production code, no dependency change, no core-repo change; the
+storage negative self-proofs, the POSIX cleanup algorithm and the Python
+gate were NOT re-worked. Round start re-verified live: PR #5 OPEN, base
+`main`, remote head == local == `96fbc9dabd7d1b920e74653ac480c73fa0019ca4`;
+work in the same dedicated clean worktree, new branch
+`fix/m3c-review-r3`; AGENTS.md still absent. No other worktree touched.
+
+### 9.1 The defect: a failed taskkill must not become a cleanup success
+
+Round 2 introduced an exception in `terminateTree`'s Windows branch: when
+`signalTree` reported failure (taskkill non-zero exit OR the spawnSync
+call itself timing out with ETIMEDOUT) but the root pid was verifiably
+gone afterwards, the helper answered `{ ok: true, how: '… taskkill
+reported it gone …' }`. Both halves of that are wrong: "taskkill ran" is
+not "the subtree is clean" (the root can exit before taskkill has any
+subtree information while children survive), and the ETIMEDOUT case is
+worse — the message rewrote a timed-out call into "reported it gone".
+This round's review demonstrated both shapes against the round-2 code.
+
+**Counterexamples first (evidence kept):** the new suite
+`tests/browser-gate-cleanup-branch.test.cjs` loads the REAL helper source
+into an isolated VM with the OS boundary scripted (`child_process.spawnSync`,
+`process.kill`/`process.platform` — no algorithm copied, no host platform
+change, no require-cache pollution), so the Windows branch executes
+deterministically on ANY platform. Run against the UNMODIFIED `96fbc9da`:
+
+```
+node tests/browser-gate-cleanup-branch.test.cjs   (log r3-branch-test-ON-OLD-IMPL.log)
+  CHECK FAIL: CE1 … — {"ok":true,"how":"root exited during the kill race
+    (taskkill reported it gone); win32 cannot enumerate anything beyond
+    the root"}
+  CHECK FAIL: CE2 … — {"ok":true, …same wrong success…}
+  8 check(s) FAILED (25 total); exit 1
+```
+
+CE1 (taskkill exit 128, root vanishing) and CE2 (taskkill ETIMEDOUT,
+root vanishing) were answered `ok:true` with the error rewritten; the
+other 17 checks (CE3 failed-taskkill-on-live-root, CE4 healthy control,
+CE5 root-exited-before-cleanup, and the five POSIX checks pinning
+TERM→KILL→confirm) were already correct and stayed green throughout.
+
+**Fix (minimal, "cannot prove completion → fail honestly"):** the
+exception is DELETED. A failed `signalTree` now always returns
+`{ ok: false, stage: 'taskkill', rootExited, error }` — the original
+error survives verbatim (the non-zero status is now also attached as
+`error.status`; ETIMEDOUT keeps `error.code`), whether the root is
+verifiably gone afterwards is recorded as the `rootExited` DIAGNOSTIC
+only, and no success shape exists on this path. The taskkill-success +
+confirmed-exit path, the POSIX algorithm, the preview cleanup-failure
+folding and the timeout classification are untouched. No Job Objects, no
+WMI process management, no machine-wide scans — out of scope by design.
+
+**Caller-side contract tests (new, cross-platform):**
+`runSuiteProcess` gained a test-only narrow seam (`cleanupOpts.cleanupImpl`,
+default the real helper) and `describeResult` is exported; new
+orchestrator tests feed the taskkill-shaped failure
+(`{ ok:false, stage:'taskkill', rootExited:true, error.status:128 }`)
+through both callers:
+
+- timeout caller: the main result STAYS `timeout` (never flipped), the
+  failure stays attached, and the failure text names it
+  (`CLEANUP ALSO FAILED: taskkill /T /F exited 128`).
+- preview caller: a `kill()` returning that shape makes the whole
+  orchestrator run non-zero (`CLEANUP FAILED …`) even with every gate
+  green.
+
+**Existing race test corrected, not deleted:** the round-2 race
+assertion required `cleanup === undefined` whenever the timeout fired —
+which pinned the old wrong success (it was GREEN on `96fbc9da`; on the
+fixed code it went red 3× in the real Windows race with
+`{"ok":false,"kind":"timeout","cleanup":{"ok":false,"stage":"taskkill",
+"rootExited":true,"error":{"status":128}}}` — both runs kept on record).
+The corrected assertion requires: the verdict STAYS `timeout`; the
+cleanup entry is either absent (POSIX — a group signal hitting an
+already-empty group is real completion evidence) or an honest attached
+failure with `rootExited` and the original error (win32). Exactly-once
+settlement, bounded return and no-unhandled-rejection assertions are
+kept; a natural exit before the timeout still succeeds; a fired timeout
+is always a timeout. Reason recorded in the test comment.
+
+### 9.2 CI-record correction: the wedged push run loses its root-cause label
+
+The round-2 record (PR body) called the first attempt of push run
+37276517617 "an infrastructure stall on that runner". The available
+evidence — ~44 minutes with no new output; the last visible log line is
+`capability-package.test.cjs`'s "all 59 checks passed" (the next
+suite's output never appeared; whether its child ever started cannot be
+confirmed from the logs); the operator cancelled it; the same commit's
+PR run and the manual re-run both passed — does NOT exclude a test-side
+intermittent deadlock and does not establish a runner-infrastructure
+cause. Factual wording everywhere: **the run stalled without output at
+that point, was cancelled by the operator; the sibling runs and the
+manual re-run passed; the root cause is UNDETERMINED.** No hang
+function is named beyond the last visible log position. The run ID,
+the cancellation and the manual re-run all stay on record; no retry was
+added; the suite in question was not touched. The historical
+Python E3 / B-PY1 UNDETERMINED conclusions are unchanged.
+
+### 9.3 Round-3 verification (results, in order)
+
+```
+node tests/browser-gate-cleanup-branch.test.cjs  ON UNMODIFIED 96fbc9da
+                                                 → 8 FAILED / 17 passed; exit 1  (first-failure evidence)
+node tests/browser-gate-orchestrator.test.cjs    ON UNMODIFIED 96fbc9da
+                                                 → race test GREEN (pinned the wrong success); 17/3 skip/0 fail
+  [fix applied to browser-gate-cleanup.cjs]
+node tests/browser-gate-cleanup-branch.test.cjs  → all 25 checks passed; exit 0
+node tests/browser-gate-orchestrator.test.cjs    (race assertion still old)
+                                                 → race 3× CHECK FAIL (real win32 race now attaches the
+                                                   honest failure) — second kept evidence
+  [race assertion corrected + caller-side tests added + run-unit registration]
+BROWSER_GATE_ORCH_REAL_PREVIEW=1 node tests/browser-gate-orchestrator.test.cjs
+                                                 → 19 passed, 2 skipped (POSIX F1 pair), no failures; exit 0
+npm ci → npm run build                           → exit 0 / exit 0 (cores at the pinned SHAs)
+BROWSER_GATE_ORCH_REAL_PREVIEW=1 npm test        → all 27 suites passed (26 + cleanup-branch); exit 0
+node tests/run-browser-gates.cjs e2e-m3c-storage-built.cjs
+                                                 → 27 behavior/audit checks + 2 negative self-proofs passed;
+                                                   exit 0; port released (proves the normal
+                                                   suite → preview cleanup → process exit path)
+```
+
+### 9.4 Platform verification boundaries (recorded, never implied)
+
+- The deterministic Windows-branch tests execute the REAL helper under
+  scripted OS calls inside a VM — they run on ANY platform including
+  Linux CI; this is NOT a Windows-on-metal verification and is never
+  described as one.
+- The REAL Windows taskkill path (an actual `taskkill /T /F` against
+  real processes) is exercised on this Windows machine by the existing
+  real-process tests (busy-port refusal, the corrected race test, the
+  preview root-self-exit test, the real preview lifecycle, and the
+  packaged storage gate run above).
+- Linux execution of the same deterministic suite + POSIX regressions
+  comes from CI on the pushed head.
+
+### 9.5 Round-3 residuals
+
+- The root cause of the wedged 37276517617 first attempt: UNDETERMINED
+  (this round records it factually; no investigation was required or
+  performed).
+- Nothing merged, published, or deployed; M4 not entered.
