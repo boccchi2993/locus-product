@@ -199,25 +199,37 @@ constant or a validated SHA).
 
 ### Schedule status — read this before assuming the cron is live
 
-**The schedule is NOT live yet.** GitHub Actions only executes `on: schedule`
-from the repository's **default branch**. Until this workflow file reaches
-`locus-product`'s default branch via the PR merge chain, the cron line is
-inert; the runnable path today is `workflow_dispatch` on a branch that
-carries this file. Do not read a green dispatch run as "scheduled following
-is online" — it becomes online only when the enablement conditions below are
-met.
+**Neither the schedule nor dispatch is live yet.** GitHub has two default-branch
+gates here:
+
+1. `on: schedule` only ever executes from the repository's **default branch**.
+2. `workflow_dispatch` needs the workflow to be **registered**, and
+   registration comes from the default branch — until the file is there, both
+   the REST API and `gh workflow run` fail with "workflow … not found on the
+   default branch" (verified on 2026-10-05 while this branch was still
+   unmerged), and the Actions UI shows no "Run workflow" button for it.
+
+So on this PR branch the file is **dormant by construction**: no cron, no
+manual trigger. That is deliberate — the candidate lane must not exist as a
+half-armed pipeline. It becomes operational exactly when the merge chain
+(PR #8 → `refactor/m3c-integration` → Product default branch) completes; see
+the enablement conditions below. Do not describe the mechanism as "online"
+before that point.
 
 ### Formal enablement conditions
 
 1. This PR merges into `refactor/m3c-integration` (agent D's line), and that
-   branch reaches `main` (the Product default branch).
+   branch reaches `main` (the Product default branch) — only then does
+   GitHub register the workflow, enabling **both** `workflow_dispatch` and
+   the daily cron.
 2. After the merge, one manual `workflow_dispatch` (source `main`) is green —
    note that until both cores' extraction branches merge to their mains, the
    expected main-mode outcome is an **install-stage failure** (see the
    rehearsal record below); that is the mechanism working as designed, not a
    blocker for enabling it.
-3. Only then does the daily cron actually fire on the default branch, and
-   "scheduled candidate following" is real.
+3. Only then is "scheduled candidate following" actually live: the daily cron
+   fires on the default branch and every run's verdict lands in the Actions
+   tab plus the `core-main-candidate-<run_id>` artifact bundle.
 
 ---
 
