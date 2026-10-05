@@ -13,6 +13,7 @@ const net = require('net');
 const http = require('http');
 const path = require('path');
 const fs = require('fs');
+const cleanup = require('./browser-gate-cleanup.cjs');
 
 const KILL_GRACE_MS = 10000;
 
@@ -92,9 +93,13 @@ function httpGet(url, timeoutMs = 2000) {
   });
 }
 
-// Kill a process TREE we own (the pid and everything it spawned). On
-// Windows spawn() without a shell gives us the real root pid, so
-// taskkill /T is exact — and it is per-tree, never per-port.
+// LOW-LEVEL termination REQUEST for a tree we own (the pid and everything
+// it spawned) — no waiting and no verdict; callers own the bounded
+// confirmation (see browser-gate-cleanup.cjs terminateTree for the shared
+// verified algorithm used by the suite timeout and preview shutdown).
+// On Windows spawn() without a shell gives us the real root pid, so
+// taskkill /T is exact — and it is per-tree, never per-port; the call
+// itself is bounded so a wedged taskkill cannot hang cleanup.
 // On POSIX the whole tree shares the group of the spawned root (every
 // spawn in this module sets detached, making the root its own group
 // leader), so a negative pid reaches the tree; the single-process
@@ -103,7 +108,7 @@ function httpGet(url, timeoutMs = 2000) {
 // effort and the caller's verified-exit check still reports the truth.
 function killTree(pid) {
   if (process.platform === 'win32') {
-    const r = spawnSync('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+    const r = spawnSync('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true, timeout: cleanup.TASKKILL_TIMEOUT_MS });
     return !r.error && r.status === 0;
   }
   try { process.kill(-pid, 'SIGTERM'); } catch (groupErr) {
@@ -162,10 +167,13 @@ function startPreview({ cwd, port, buildToken = null } = {}) {
   const child = spawn(
     process.execPath,
     [viteEntry(cwd), 'preview', '--port', String(port), '--strictPort', '--host', '127.0.0.1'],
-    // POSIX: own process group, so killTree's negative pid reaches the
+    // POSIX: own process group, so the owned identity below reaches the
     // whole tree. Windows keeps the reviewed flags (taskkill /T is exact).
     { cwd, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, detached: process.platform !== 'win32' },
   );
+  // The owned identity is captured NOW, at spawn time: on POSIX the group
+  // id (= root pid) stays valid and cleanable even after the root exits.
+  const identity = cleanup.ownTreeIdentity(child.pid);
   let output = '';
   const tail = (c) => {
     output = (output + String(c)).split(/\r?\n/).slice(-40).join('\n');
@@ -176,6 +184,22 @@ function startPreview({ cwd, port, buildToken = null } = {}) {
   const exited = new Promise((resolve) => {
     child.once('exit', (code, signal) => { exitInfo = { code, signal }; resolve({ code, signal }); });
   });
+
+  // Idempotent: repeated kill() calls reuse the first verified result.
+  let killPromise = null;
+  async function killOnce() {
+    // Verified bounded cleanup of OUR tree (shared algorithm with the
+    // suite timeout — browser-gate-cleanup.cjs). A root that exited on
+    // its own never short-circuits to ok: POSIX verifies the group is
+    // gone (and cleans surviving members); Windows, which cannot verify
+    // an orphaned tree after root exit, reports an explicit failure.
+    const r = await cleanup.terminateTree(identity);
+    // Settle the handle's aliveness from the child's own exit event (the
+    // verified cleanup already confirmed the death; this only lets the
+    // listener record exitInfo), with a bounded pid-poll guard.
+    await Promise.race([exited, waitForPidExit(child.pid, KILL_GRACE_MS)]);
+    return r;
+  }
 
   const handle = {
     pid: child.pid,
@@ -195,18 +219,10 @@ function startPreview({ cwd, port, buildToken = null } = {}) {
         throw new Error(e.message + '\n--- preview output ---\n' + (output.trim() || '(none captured)'));
       }
     },
-    // Idempotent, verified shutdown of OUR tree only. { ok: false } means
-    // the caller must NOT report a clean pass. Waits for the child's own
-    // exit event (pid-poll as the timeout guard) so the handle's aliveness
-    // is settled when this resolves.
+    // { ok: false } means the caller must NOT report a clean pass.
     async kill() {
-      if (exitInfo !== null) return { ok: true };
-      killTree(child.pid);
-      const r = await Promise.race([exited, waitForPidExit(child.pid, KILL_GRACE_MS).then((x) => (x.exited ? { code: null, signal: null } : null))]);
-      if (!r) {
-        return { ok: false, error: new Error('preview pid ' + child.pid + ' still alive ' + KILL_GRACE_MS + 'ms after kill') };
-      }
-      return { ok: true };
+      if (!killPromise) killPromise = killOnce();
+      return killPromise;
     },
   };
   return handle;

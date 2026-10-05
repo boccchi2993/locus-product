@@ -20,6 +20,7 @@ const path = require('path');
 
 const runner = require('./helpers/browser-gate-runner.cjs');
 const preview = require('./helpers/browser-gate-preview.cjs');
+const cleanup = require('./helpers/browser-gate-cleanup.cjs');
 const { SUITES } = require('./helpers/browser-gate-suites.cjs');
 
 const ROOT_DIR = path.join(__dirname, '..');
@@ -38,9 +39,18 @@ function track(child, label) {
   return child;
 }
 
+// Emergency backstop: SIGKILL the OWNED groups/pids this file spawned (test
+// fixtures only — never strangers). TERM alone cannot be trusted: F1's
+// fixtures deliberately ignore it.
+function sweepTracked() {
+  for (const t of trackedChildren) {
+    try { cleanup.forceKillIdentity(cleanup.ownTreeIdentity(t.pid)); } catch (e) { /* gone */ }
+  }
+}
+
 const watchdog = setTimeout(() => {
   console.error('WATCHDOG: test run exceeded ' + WATCHDOG_MS + 'ms — killing tracked children, failing hard');
-  for (const t of trackedChildren) { try { preview.killTree(t.pid); } catch (e) { /* gone */ } }
+  sweepTracked();
   setTimeout(() => process.exit(9), 500);
 }, WATCHDOG_MS);
 
@@ -79,11 +89,33 @@ function freePort() {
 const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bg-orch-fixtures-'));
 const invFile = path.join(fixtureDir, 'invocations.log');
 const pidFile = path.join(fixtureDir, 'pids.json');
+const termLog = path.join(fixtureDir, 'terms.log');
 process.env.INV_LOG = invFile;
 process.env.PID_FILE = pidFile;
+process.env.TERM_LOG = termLog;
 
 function pidAlive(pid) {
   try { process.kill(pid, 0); return true; } catch (e) { return false; }
+}
+
+function resetTermLog() {
+  try { fs.rmSync(termLog, { force: true }); } catch (e) { /* fresh anyway */ }
+}
+
+function termReceipts() {
+  if (!fs.existsSync(termLog)) return [];
+  return fs.readFileSync(termLog, 'utf8').split(/\r?\n/).filter(Boolean);
+}
+
+// Wait for an explicit readiness barrier (a ready FILE the fixture writes
+// at its own ready point) — never "sleep a bit and assume it started".
+async function waitForReadyFile(file, timeoutMs, label) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (fs.existsSync(file)) return;
+    if (Date.now() > deadline) throw new Error('ready barrier not reached: ' + label);
+    await new Promise((r) => setTimeout(r, 50));
+  }
 }
 
 // On Windows the child 'exit' event can lag a completed taskkill by a few
@@ -109,13 +141,26 @@ function resetInvocations() {
 
 const SERVER_SRC = `
 const http = require('http');
+const fs = require('fs');
 const port = Number(process.env.FIX_PORT);
 const token = process.env.FIX_TOKEN_MODE === 'foreign' ? 'assets/index-foreignhash.js' : 'assets/index-fakehash.js';
+// F1 fixtures: a server that IGNORES SIGTERM (recording the receipt), and
+// an explicit ready-file barrier written at ITS OWN ready point.
+if (process.env.FIX_IGNORE_TERM && process.env.TERM_LOG) {
+  process.on('SIGTERM', () => {
+    try { fs.appendFileSync(process.env.TERM_LOG, 'term:' + process.pid + '\\n'); } catch (e) { /* best effort */ }
+  });
+}
 const srv = http.createServer((req, res) => {
   res.writeHead(200, { 'content-type': 'text/html' });
   res.end('<html><body><script type="module" src="/' + token + '"></script></body></html>');
 });
-srv.listen(port, '127.0.0.1', () => console.log('fixture server up on ' + port));
+srv.listen(port, '127.0.0.1', () => {
+  console.log('fixture server up on ' + port);
+  if (process.env.FIX_READY_FILE) {
+    try { fs.writeFileSync(process.env.FIX_READY_FILE, String(process.pid)); } catch (e) { /* best effort */ }
+  }
+});
 `;
 
 function writeFixture(name, src) {
@@ -148,6 +193,28 @@ fs.appendFileSync(process.env.INV_LOG, 'hang\\n');
 fs.writeFileSync(process.env.PID_FILE, String(process.pid));
 setInterval(() => {}, 1000);
 `);
+// F1 test B fixture: a REAL suite process that RECEIVES SIGTERM and keeps
+// running (empty-ish handler records the receipt and stays alive) — the
+// exact shape that hung the old timeout path forever on POSIX.
+writeFixture('term-ignore-stubborn.cjs', `
+const fs = require('fs');
+fs.appendFileSync(process.env.INV_LOG, 'term-ignore-stubborn\\n');
+fs.writeFileSync(process.env.PID_FILE, String(process.pid));
+if (process.env.TERM_LOG) {
+  process.on('SIGTERM', () => {
+    try { fs.appendFileSync(process.env.TERM_LOG, 'term:' + process.pid + '\\n'); } catch (e) { /* keep running */ }
+  });
+}
+setInterval(() => {}, 1000);
+`);
+// F1 test E fixture: natural exit after a bounded delay (timeout vs exit
+// race).
+writeFixture('exit-after-ms.cjs', `
+const fs = require('fs');
+fs.appendFileSync(process.env.INV_LOG, 'exit-after:' + String(process.env.EXIT_AFTER_MS) + '\\n');
+fs.writeFileSync(process.env.PID_FILE, String(process.pid));
+setTimeout(() => process.exit(0), Number(process.env.EXIT_AFTER_MS || 300));
+`);
 // Parent that spawns a listening child and stays alive: the REAL tree-kill
 // target (proves cleanup reaches grandchildren, not just the root pid).
 writeFixture('parent-with-child.cjs', `
@@ -160,10 +227,31 @@ const child = spawn(process.execPath, [path.join(__dirname, 'fixture-server.cjs'
 fs.writeFileSync(process.env.PID_FILE, JSON.stringify({ parent: process.pid, child: child.pid }));
 setInterval(() => {}, 1000);
 `);
+// F1 test C fixture: the root EXITS ITSELF after its (SIGTERM-ignoring,
+// port-holding) child is ready — the owned group outlives the root, which
+// must NOT shortcut cleanup to ok.
+writeFixture('group-orphan-parent.cjs', `
+const { spawn } = require('child_process');
+const fs = require('fs');
+const path = require('path');
+const child = spawn(process.execPath, [path.join(__dirname, 'fixture-server.cjs')], {
+  env: process.env, stdio: 'ignore',
+});
+const t0 = Date.now();
+(function waitReadyThenExit() {
+  const ready = process.env.FIX_READY_FILE && fs.existsSync(process.env.FIX_READY_FILE);
+  if (ready || Date.now() - t0 > 10000) {
+    try { fs.writeFileSync(process.env.PID_FILE, JSON.stringify({ parent: process.pid, child: child.pid })); } catch (e) { /* best effort */ }
+    process.exit(ready ? 0 : 7);
+  }
+  setTimeout(waitReadyThenExit, 50);
+})();
+`);
 
 // A "preview" handle backed by a REAL child process (the fixture server),
-// wired through the same primitives the real startPreview uses
-// (waitHealthy readiness incl. build token, killTree + verified exit).
+// wired through the SAME verified cleanup the real startPreview uses now
+// (waitHealthy readiness incl. build token; browser-gate-cleanup.cjs
+// bounded terminate + confirm — never a bare signal).
 function makeRealServerPreview(port, tokenMode) {
   const child = track(spawn(process.execPath, [path.join(fixtureDir, 'fixture-server.cjs')], {
     env: { ...process.env, FIX_PORT: String(port), FIX_TOKEN_MODE: tokenMode },
@@ -171,10 +259,12 @@ function makeRealServerPreview(port, tokenMode) {
     windowsHide: true,
     detached: process.platform !== 'win32',
   }), 'fixture-server(port ' + port + ')');
+  const identity = cleanup.ownTreeIdentity(child.pid);
   let exitInfo = null;
   const exited = new Promise((resolve) => {
     child.once('exit', (code, signal) => { exitInfo = { code, signal }; resolve({ code, signal }); });
   });
+  let killPromise = null;
   const handle = {
     pid: child.pid,
     isAlive: () => exitInfo === null,
@@ -188,10 +278,14 @@ function makeRealServerPreview(port, tokenMode) {
       });
     },
     async kill() {
-      if (exitInfo !== null) return { ok: true };
-      preview.killTree(child.pid);
-      const r = await Promise.race([exited, preview.waitForPidExit(child.pid, 5000).then((x) => (x.exited ? { code: null, signal: null } : null))]);
-      return r ? { ok: true } : { ok: false, error: new Error('fixture server survived kill') };
+      if (!killPromise) {
+        killPromise = (async () => {
+          const r = await cleanup.terminateTree(identity, { termGraceMs: 3000, killConfirmMs: 5000 });
+          await Promise.race([exited, preview.waitForPidExit(child.pid, 5000)]);
+          return r;
+        })();
+      }
+      return killPromise;
     },
   };
   return handle;
@@ -492,6 +586,193 @@ tests.push(['real tree-kill: grandchild port released (real cleanup)', async () 
   check('parent pid consistent with fixture record', pp === parent.pid);
 }]);
 
+// ---------------------------------------------------------------------------
+// F1 (m3c review round 2): bounded, verified owned-process cleanup.
+// The POSIX-signal behaviors (SIGTERM receipt/ignoral, group survival past
+// the root) can only EXECUTE where POSIX signals exist — those cases run
+// for real on Linux CI and are skipped on Windows with that label; the
+// Windows-specific taskkill behavior is executed by the other tests here.
+
+tests.push(['F1 timeout: a SIGTERM-ignoring suite still settles as timeout, bounded (POSIX; real)', async () => {
+  if (process.platform === 'win32') {
+    skipped++;
+    console.log('  SKIP (POSIX signals only — executes on Linux CI): SIGTERM-ignoring timeout settlement');
+    return;
+  }
+  const myPidFile = path.join(fixtureDir, 'pid-stubborn.json');
+  process.env.PID_FILE = myPidFile;
+  resetTermLog();
+  resetInvocations();
+  try {
+    const t0 = Date.now();
+    const r = await withTimeout(
+      runner.runSuiteProcess(path.join(fixtureDir, 'term-ignore-stubborn.cjs'), 700, { termGraceMs: 700, killConfirmMs: 3000 }),
+      20000,
+      'stubborn suite timeout settlement',
+    );
+    const elapsed = Date.now() - t0;
+    check('settled as timeout (the old code hung here forever)', r && r.ok === false && r.kind === 'timeout' && r.timeoutMs === 700, JSON.stringify(r));
+    check('no cleanup failure attached', r.cleanup === undefined, JSON.stringify(r.cleanup || null));
+    check('SIGTERM was actually DELIVERED (receipt recorded by the fixture)', termReceipts().length >= 1, JSON.stringify(termReceipts()));
+    check('the fixture SURVIVED the polite phase (alive through the whole TERM grace)', elapsed >= 700, 'elapsed ' + elapsed + 'ms');
+    check('settlement stayed bounded', elapsed < 15000, 'elapsed ' + elapsed + 'ms');
+    const pid = Number(fs.readFileSync(myPidFile, 'utf8').trim());
+    check('stubborn pid recorded', Number.isFinite(pid) && pid > 0);
+    const gone = await preview.waitForPidExit(pid, 5000);
+    check('SIGKILL escalation finished it (pid gone, not just signaled)', gone.exited === true);
+  } finally {
+    process.env.PID_FILE = pidFile;
+    // Fixture兜底: hard-kill the recorded pid (OUR fixture) so a failed
+    // test never leaves a SIGTERM-ignoring orphan behind.
+    if (fs.existsSync(myPidFile)) {
+      const pid = Number(fs.readFileSync(myPidFile, 'utf8').trim());
+      if (Number.isFinite(pid) && pid > 0) {
+        try { cleanup.forceKillIdentity(cleanup.ownTreeIdentity(pid)); } catch (e) { /* gone */ }
+      }
+    }
+  }
+}]);
+
+tests.push(['F1 cleanup: root exited, owned group still serving — cleaned, port rebindable (POSIX; real)', async () => {
+  if (process.platform === 'win32') {
+    skipped++;
+    console.log('  SKIP (POSIX process groups only — executes on Linux CI): orphaned group cleanup');
+    return;
+  }
+  const port = await freePort();
+  const readyFile = path.join(fixtureDir, 'ready-orphan-' + Date.now() + '.txt');
+  const myPidFile = path.join(fixtureDir, 'pid-orphan.json');
+  process.env.PID_FILE = myPidFile;
+  process.env.FIX_READY_FILE = readyFile;
+  process.env.FIX_IGNORE_TERM = '1';
+  resetTermLog();
+  let parent = null;
+  try {
+    parent = track(spawn(process.execPath, [path.join(fixtureDir, 'group-orphan-parent.cjs')], {
+      env: { ...process.env, FIX_PORT: String(port), FIX_TOKEN_MODE: 'match' },
+      stdio: 'ignore',
+      windowsHide: true,
+      detached: true,
+    }), 'group-orphan-parent(port ' + port + ')');
+    await withTimeout(waitForReadyFile(readyFile, 10000, 'orphan fixture child ready'), TEST_TIMEOUT_MS, 'orphan child ready');
+    const rootGone = await preview.waitForPidExit(parent.pid, 10000);
+    check('root exited on its own (before any cleanup)', rootGone.exited === true);
+    const { parent: pp, child: cp } = JSON.parse(fs.readFileSync(myPidFile, 'utf8'));
+    check('fixture pid record consistent', pp === parent.pid && Number.isFinite(cp) && cp > 0);
+    const pre = await preview.httpGet('http://127.0.0.1:' + port + '/', 2000);
+    check('group child still SERVING after the root is gone', pre !== null && pre.status === 200, JSON.stringify(pre));
+
+    const identity = cleanup.ownTreeIdentity(parent.pid);
+    const t0 = Date.now();
+    const r = await withTimeout(cleanup.terminateTree(identity, { termGraceMs: 700, killConfirmMs: 3000 }), 20000, 'orphaned group cleanup');
+    const elapsed = Date.now() - t0;
+    check('cleanup succeeded despite the dead root', r && r.ok === true, JSON.stringify(r));
+    check('the child ignored SIGTERM (receipt) and had to be escalated', termReceipts().length >= 1 && elapsed >= 700,
+      'receipts=' + JSON.stringify(termReceipts()) + ' elapsed=' + elapsed + 'ms');
+
+    // Functional proof of death — not just kill(pid, 0): the child no
+    // longer serves, and the port can be bound again.
+    const post = await preview.httpGet('http://127.0.0.1:' + port + '/', 2000);
+    check('orphaned child no longer serves', post === null, JSON.stringify(post));
+    let rebound = false;
+    try {
+      await new Promise((resolve, reject) => {
+        const srv = net.createServer();
+        srv.once('error', reject);
+        srv.listen({ port, host: '127.0.0.1' }, () => { srv.close(() => resolve()); });
+      });
+      rebound = true;
+    } catch (e) { /* port still held */ }
+    check('port is rebindable (the process is truly gone, not a zombie)', rebound === true);
+  } finally {
+    delete process.env.FIX_IGNORE_TERM;
+    delete process.env.FIX_READY_FILE;
+    process.env.PID_FILE = pidFile;
+    // Fixture兜底: the recorded child (if somehow alive) is OUR fixture —
+    // hard-kill it so a failed test never leaves an orphan behind.
+    if (fs.existsSync(myPidFile)) {
+      try { cleanup.forceKillIdentity(cleanup.ownTreeIdentity(JSON.parse(fs.readFileSync(myPidFile, 'utf8')).child)); } catch (e) { /* gone */ }
+    }
+    try { fs.rmSync(readyFile, { force: true }); } catch (e) { /* gone */ }
+  }
+}]);
+
+tests.push(['F1 preview kill after root self-exit: verified, never unconditional ok (real vite preview)', async () => {
+  if (!fs.existsSync(path.join(ROOT_DIR, 'dist', 'index.html'))) {
+    skipped++;
+    console.log('  SKIP (needs npm run build first): real preview root-exit verification');
+    return;
+  }
+  const port = await freePort();
+  const token = preview.readDistAssetToken({ cwd: ROOT_DIR });
+  const handle = preview.startPreview({ cwd: ROOT_DIR, port, buildToken: token });
+  try {
+    await withTimeout(handle.waitReady(30000, token), 45000, 'preview up (root-exit test)');
+  } catch (e) {
+    await handle.kill().catch(() => {});
+    throw e;
+  }
+  // Kill ONLY the root, bypassing the handle — the shape the old code
+  // answered with an unconditional { ok: true } and zero verification.
+  if (process.platform === 'win32') {
+    spawnSync('taskkill', ['/PID', String(handle.pid), '/F'], { stdio: 'ignore', windowsHide: true });
+  } else {
+    try { process.kill(handle.pid, 'SIGKILL'); } catch (e) { /* gone */ }
+  }
+  const deadline = Date.now() + 10000;
+  while (handle.isAlive() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
+  check('root exited before kill() was called', handle.isAlive() === false);
+  const k = await withTimeout(handle.kill(), 30000, 'kill after root self-exit');
+  if (process.platform === 'win32') {
+    check('win32: root-exited cleanup is an explicit FAILURE (tree unverifiable), not a silent ok',
+      k.ok === false && /cannot verify/.test(String(k.error && k.error.message || '')), JSON.stringify({ ok: k.ok, error: String(k.error && k.error.message || '') }));
+  } else {
+    check('posix: root-exited cleanup VERIFIED the group is gone (not assumed)',
+      k.ok === true && /gone/.test(String(k.how || '')), JSON.stringify(k));
+  }
+  check('repeated kill() is safe (memoized verdict)', (await handle.kill()).ok === k.ok);
+  const still = await preview.httpGet('http://127.0.0.1:' + port + '/', 1500);
+  check('port released after verified cleanup', still === null, JSON.stringify(still));
+}]);
+
+tests.push(['F1 race: timeout vs natural exit — exactly one verdict, no unhandled rejection (real)', async () => {
+  const myPidFile = path.join(fixtureDir, 'pid-race.json');
+  process.env.PID_FILE = myPidFile;
+  process.env.EXIT_AFTER_MS = '300';
+  resetInvocations();
+  const unhandled = [];
+  const warnings = [];
+  const onUnhand = (reason) => unhandled.push(String(reason && reason.message || reason));
+  const onWarning = (w) => warnings.push(String(w && w.message || w));
+  process.on('unhandledRejection', onUnhand);
+  process.on('warning', onWarning);
+  try {
+    for (const timeoutMs of [200, 260, 300, 340, 400]) {
+      const r = await withTimeout(
+        runner.runSuiteProcess(path.join(fixtureDir, 'exit-after-ms.cjs'), timeoutMs, { termGraceMs: 500, killConfirmMs: 2000 }),
+        20000,
+        'timeout/exit race at ' + timeoutMs,
+      );
+      check('settled to exactly one verdict (' + timeoutMs + ')', !!r && (r.kind === 'exit' || r.kind === 'timeout'), JSON.stringify(r));
+      if (r.kind === 'exit') {
+        check('natural exit kept its identity (' + timeoutMs + ')', r.code === 0, JSON.stringify(r));
+      } else {
+        check('timeout verdict kept, no cleanup failure (' + timeoutMs + ')', r.ok === false && r.timeoutMs === timeoutMs && r.cleanup === undefined, JSON.stringify(r));
+        const pid = Number(fs.readFileSync(myPidFile, 'utf8').trim());
+        const gone = await preview.waitForPidExit(pid, 5000);
+        check('process dead after timeout settlement (' + timeoutMs + ')', gone.exited === true);
+      }
+    }
+    check('no unhandled rejections across the race', unhandled.length === 0, unhandled.join(' | '));
+    check('no process warnings (double settlement / listener leaks)', warnings.length === 0, warnings.join(' | '));
+  } finally {
+    process.off('unhandledRejection', onUnhand);
+    process.off('warning', onWarning);
+    delete process.env.EXIT_AFTER_MS;
+    process.env.PID_FILE = pidFile;
+  }
+}]);
+
 tests.push(['waitHealthy: build identity + aliveness, bounded (real HTTP)', async () => {
   const foreignPort = await freePort();
   const foreign = makeRealServerPreview(foreignPort, 'foreign');
@@ -599,8 +880,9 @@ async function handleCleanup(handle) {
   console.log(passed + ' passed, ' + skipped + ' skipped, ' + (failed ? failed + ' FAILED' : 'no failures'));
   process.exitCode = failed ? 1 : 0;
 })().finally(() => {
-  // Kill anything this file spawned, then remove the fixture dir.
-  for (const t of trackedChildren) { try { preview.killTree(t.pid); } catch (e) { /* gone */ } }
+  // Kill anything this file spawned (SIGKILL-grade backstop — some F1
+  // fixtures ignore SIGTERM by design), then remove the fixture dir.
+  sweepTracked();
   setTimeout(() => {
     try { fs.rmSync(fixtureDir, { recursive: true, force: true }); } catch (e) { /* best effort */ }
     clearTimeout(watchdog);

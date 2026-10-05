@@ -23,6 +23,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 const { SUITES, resolveSuites } = require('./browser-gate-suites.cjs');
 const preview = require('./browser-gate-preview.cjs');
+const cleanup = require('./browser-gate-cleanup.cjs');
 
 // Per-suite wall clock. Generous on purpose: the suites own their internal
 // budgets (CDP readiness windows, Python bootstrap cold/ready phases) and
@@ -34,46 +35,86 @@ const DEFAULT_SUITE_TIMEOUT_MS = 15 * 60 * 1000;
 //   { ok: true }
 //   { ok: false, kind: 'exit', code }        — non-zero exit
 //   { ok: false, kind: 'signal', signal }    — killed by a signal
-//   { ok: false, kind: 'timeout', timeoutMs } — wall clock exceeded (tree-killed)
+//   { ok: false, kind: 'timeout', timeoutMs, cleanup? } — wall clock exceeded
 //   { ok: false, kind: 'spawn-error', error } — could not even start
-function runSuiteProcess(suitePath, timeoutMs = DEFAULT_SUITE_TIMEOUT_MS) {
+// Timeout handling (m3c review round 2, F1): the timeout requests
+// termination via the SHARED bounded owned-tree cleanup
+// (browser-gate-cleanup.cjs — SIGTERM to the owned group, bounded grace,
+// SIGKILL escalation, bounded confirmation; never a bare fire-and-forget
+// signal). The promise settles exactly once, within the bounded
+// terminate+confirm window, and the verdict STAYS timeout even when the
+// child exits 0 afterwards; a confirmed cleanup failure is attached as
+// extra information and never swallows it.
+function runSuiteProcess(suitePath, timeoutMs = DEFAULT_SUITE_TIMEOUT_MS, cleanupOpts = {}) {
   return new Promise((resolve) => {
     let child;
     try {
-      // POSIX: own process group, so a timeout killTree(-pid) reaches the
+      // POSIX: own process group, so the owned identity (group) reaches the
       // suite's own children (e.g. headless Chrome), not just the suite.
       child = spawn(process.execPath, [suitePath], { stdio: 'inherit', windowsHide: true, detached: process.platform !== 'win32' });
     } catch (e) {
       resolve({ ok: false, kind: 'spawn-error', error: e });
       return;
     }
+    // Captured at spawn time: on POSIX the group id stays valid and
+    // cleanable even after the suite root itself has exited.
+    const identity = cleanup.ownTreeIdentity(child.pid);
     let timedOut = false;
     let settled = false;
     const timer = setTimeout(() => {
       timedOut = true;
-      preview.killTree(child.pid);
+      clearTimeout(timer);
+      cleanup.terminateTree(identity, cleanupOpts).then((r) => {
+        if (settled) return;
+        settled = true;
+        detach();
+        const out = { ok: false, kind: 'timeout', timeoutMs };
+        // A cleanup that could not be confirmed is surfaced, never swallowed;
+        // it cannot turn the verdict into anything but a timeout failure.
+        if (!r.ok) out.cleanup = r;
+        resolve(out);
+      }, (e) => {
+        if (settled) return;
+        settled = true;
+        detach();
+        resolve({ ok: false, kind: 'timeout', timeoutMs, cleanup: { ok: false, error: e } });
+      });
     }, timeoutMs);
-    child.once('error', (err) => {
-      if (settled) return;
+    function detach() {
+      child.removeListener('error', onError);
+      child.removeListener('exit', onExit);
+    }
+    function onError(err) {
+      if (settled || timedOut) return;
       settled = true;
       clearTimeout(timer);
+      detach();
       resolve({ ok: false, kind: 'spawn-error', error: err });
-    });
-    child.once('exit', (code, signal) => {
-      if (settled) return;
+    }
+    function onExit(code, signal) {
+      // After a timeout the CLEANUP owns settlement (the group must be
+      // verified gone first) — a fast exit 0 after the timeout fired must
+      // not race in front of it and must not flip the verdict.
+      if (settled || timedOut) return;
       settled = true;
       clearTimeout(timer);
-      if (timedOut) return resolve({ ok: false, kind: 'timeout', timeoutMs });
+      detach();
       if (signal) return resolve({ ok: false, kind: 'signal', signal });
       resolve({ ok: code === 0, kind: 'exit', code });
-    });
+    }
+    child.once('error', onError);
+    child.once('exit', onExit);
   });
 }
 
 function describeResult(r) {
   if (r.kind === 'exit') return ' (exit ' + r.code + ')';
   if (r.kind === 'signal') return ' (killed by signal ' + r.signal + ')';
-  if (r.kind === 'timeout') return ' (timed out after ' + r.timeoutMs + 'ms)';
+  if (r.kind === 'timeout') {
+    return ' (timed out after ' + r.timeoutMs + 'ms'
+      + (r.cleanup ? '; CLEANUP ALSO FAILED: ' + (r.cleanup.error && r.cleanup.error.message || r.cleanup.error) : '')
+      + ')';
+  }
   if (r.kind === 'spawn-error') return ' (spawn failed: ' + (r.error && r.error.code || r.error) + ')';
   return '';
 }

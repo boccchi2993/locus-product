@@ -21,7 +21,15 @@ jobs:
       # the packaged-page gates scan the BUILT bundle; the documented local
       # order is the same: npm ci && npm run build && npm test
       - run: npm run build
-      - run: npm test
+      # BROWSER_GATE_ORCH_REAL_PREVIEW=1 wires the orchestrator's REAL
+      # vite-preview lifecycle test (build → identity readiness → verified
+      # bounded cleanup) into CI explicitly — on Linux it also executes the
+      # POSIX-only owned-process-group cleanup tests for real (m3c review
+      # round 2, F1). Not left as local-only evidence.
+      - name: run the unit suites (incl. the real-preview orchestrator test)
+        run: npm test
+        env:
+          BROWSER_GATE_ORCH_REAL_PREVIEW: '1'
 
   browser:
     name: browser gates (packaged build, headless Chrome)
