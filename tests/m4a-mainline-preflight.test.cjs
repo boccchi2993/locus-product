@@ -1,18 +1,42 @@
-// M4a-C preflight classification matrix, driven entirely by FAKE GitHub API
-// responses — no network access happens in this suite. Also pins the
-// read-only contract: the gh transport's argv is exactly ['api', path].
+// M4a mainline preflight suite (review round C revision), driven entirely by
+// FAKE GitHub API responses — no network access happens here. Pins:
+//   - the evidence-refusing contract: missing/unknown/skipped evidence is
+//     NEVER ready (the v1 implementation failed these — see
+//     docs/M4A-REVIEW-C.md for the first-failure record);
+//   - two-leg merge traceability (accepted->merge AND merge->current main);
+//   - the shared aggregation: summary.verdict, text render, and exit code
+//     all derive from the same statuses;
+//   - config validation (empty/invalid config is rejected);
+//   - the read-only transport contract (argv exactly ['api', path]).
 //
-// Standalone on purpose: this suite is NOT registered in tests/run-unit.cjs
-// (the M4a-C file scope forbids touching that file). Run it directly:
+// v1-pin corrections, made deliberately as defect fixes (not matrix removals):
+//   - "ready-to-merge" now requires explicit job-level CI evidence; the v1
+//     suite's GREEN_CI (run-level success only, no jobs) no longer yields
+//     ready and was extended.
+//   - "no CI run -> ready by policy" was an unauthorized invention in v1 and
+//     is gone; the scenario now asserts insufficient-info.
+//   - "already-in-main" was renamed landed-other-route (same scenario).
+//   - "merged-traceable" now also requires the merge commit to be an
+//     ancestor of CURRENT main (v1 only checked accepted->merge).
+//   - "summarizeCi status 'none'" no longer exists as a ready path.
+//
+// Standalone on purpose: NOT registered in tests/run-unit.cjs (M4a-C file
+// scope). Run directly:
 //   node tests/m4a-mainline-preflight.test.cjs
 const assert = require('assert');
 const {
   DEFAULT_CONFIG,
-  CLASSIFICATIONS,
+  STATUS,
+  FAMILIES,
+  ConfigError,
+  validateConfig,
   buildReport,
-  summarizeCi,
+  aggregateVerdict,
+  summarizeRuns,
   summarizeProtection,
   containedFromCompare,
+  evaluateRequiredEvidence,
+  evaluateProtectionRequirements,
   renderText,
   ghApiAdapter,
   exitCodeFor,
@@ -38,13 +62,13 @@ function check(name, fn) {
 }
 
 // ---------------------------------------------------------------------------
-// Fake API: exact-path and prefix routes, plus a call recorder.
+// Fake API: exact-path and regex routes; LATER entries win (tests patch a
+// base scenario by re-setting a route).
 // ---------------------------------------------------------------------------
 function fakeApi(routes) {
   const calls = [];
   const fn = function api(path) {
     calls.push(path);
-    // Later entries win: tests patch a base scenario by re-setting a route.
     const entries = Array.from(routes.entries()).reverse();
     for (const [match, res] of entries) {
       const hit = typeof match === 'string' ? path === match : match.test(path);
@@ -59,332 +83,579 @@ function fakeApi(routes) {
   return fn;
 }
 
+function ok(body) { return { status: 200, body, error: null }; }
 function repoMeta() {
-  return {
-    status: 200,
-    body: {
-      default_branch: 'main',
-      permissions: { admin: true, maintain: true, push: true, triage: true, pull: true },
-    },
-    error: null,
-  };
+  return ok({
+    default_branch: 'main',
+    permissions: { admin: true, maintain: true, push: true, triage: true, pull: true },
+  });
 }
 function branchMain(protectedFlag) {
-  return { status: 200, body: { commit: { sha: MAIN }, protected: protectedFlag }, error: null };
+  return ok({ commit: { sha: MAIN }, protected: protectedFlag });
 }
 const NOT_PROTECTED = { status: 404, body: null, error: 'gh: Branch not protected (HTTP 404)' };
-const FORBIDDEN = { status: 403, body: null, error: 'gh: Permission denied (HTTP 403)' };
+const FORBIDDEN = { status: 403, body: null, error: 'gh: Forbidden (HTTP 403)' };
 
-function pull({ headSha, merged = false, mergeable = true, mergeableState = 'clean', draft = false }) {
-  return {
-    status: 200,
-    body: {
-      state: merged ? 'closed' : 'open',
-      merged,
-      merge_commit_sha: merged ? MERGE_COMMIT : null,
-      draft,
-      title: 'fake PR',
-      head: { ref: 'refactor/fake', sha: headSha },
-      base: { ref: 'main', sha: MAIN },
-      mergeable,
-      mergeable_state: mergeableState,
-    },
-    error: null,
-  };
-}
-function compare(status, aheadBy = 0, behindBy = 0, extra = {}) {
-  return {
-    status: 200,
-    body: {
-      status, ahead_by: aheadBy, behind_by: behindBy,
-      total_commits: aheadBy + behindBy,
-      commits: extra.commits || [],
-      files: extra.files || [],
-    },
-    error: null,
-  };
-}
-function ciRuns(list) {
-  return { status: 200, body: { workflow_runs: list }, error: null };
-}
-function run({ id, name = 'CI', event = 'push', status = 'completed', conclusion = 'success', attempt = 1 }) {
-  return {
-    id, name, event, status, conclusion, run_attempt: attempt,
-    head_sha: DRIFTED, // runFor() overrides this with the head under test
-    created_at: '2026-10-05T00:00:00Z',
-    html_url: `https://github.com/x/actions/runs/${id}`,
-  };
-}
-function runFor(sha, opts) {
-  const r = run(opts || {});
-  r.head_sha = sha;
-  return r;
-}
-
-const GREEN_CI = [
-  runFor(ACCEPTED, { id: 100, event: 'push', conclusion: 'success' }),
-  runFor(ACCEPTED, { id: 101, event: 'pull_request', conclusion: 'success' }),
+const EVIDENCE_SPEC = { workflow: 'CI', jobs: ['unit', 'browser'] };
+const ALL_JOBS_OK = [
+  { name: 'unit', conclusion: 'success' },
+  { name: 'browser', conclusion: 'success' },
 ];
 
-function baseRoutes(opts) {
+function pull({ state = 'open', merged = false, headSha = ACCEPTED, mergeable = true,
+  mergeableState, draft = false, baseRef = 'main' }) {
+  return ok({
+    state, merged,
+    merge_commit_sha: merged ? MERGE_COMMIT : null,
+    draft, title: 'fake PR',
+    head: { ref: 'refactor/fake', sha: headSha },
+    base: { ref: baseRef, sha: MAIN },
+    mergeable,
+    mergeable_state: mergeableState !== undefined ? mergeableState
+      : (mergeable === true ? 'clean' : (mergeable === false ? 'dirty' : 'unknown')),
+  });
+}
+function compare(status, aheadBy = 0, behindBy = 0, extra = {}) {
+  return ok({
+    status, ahead_by: aheadBy, behind_by: behindBy,
+    total_commits: aheadBy + behindBy,
+    commits: extra.commits || [],
+    files: extra.files || [],
+  });
+}
+
+// runs: [{id, conclusion, status?, runAttempt?, event?, headSha?}]
+// jobsByRun: {runId: [{name, conclusion}]} — default ALL_JOBS_OK
+function baseRoutes(over) {
   const o = Object.assign({
-    headSha: ACCEPTED,
-    merged: false,
-    mergeable: true,
-    mergeableState: 'clean',
+    state: 'open', merged: false, headSha: ACCEPTED, mergeable: true,
     acceptedVsMain: 'behind', // main does NOT contain accepted
-    ci: GREEN_CI,
+    leg1: 'ahead', leg2: 'ahead',
+    runs: [{ id: 100, event: 'push' }, { id: 101, event: 'pull_request' }],
+    jobsByRun: {},
     protection: NOT_PROTECTED,
-  }, opts);
+    branchProtected: false,
+  }, over);
   const repo = 'boccchi2993/locus-fake';
-  const routes = new Map();
-  routes.set(`/repos/${repo}`, repoMeta());
-  routes.set(`/repos/${repo}/branches/main`, branchMain(false));
-  routes.set(`/repos/${repo}/branches/main/protection`, o.protection);
-  routes.set(`/repos/${repo}/pulls/1`, pull({
-    headSha: o.headSha, merged: o.merged, mergeable: o.mergeable, mergeableState: o.mergeableState,
+  const R = new Map();
+  R.set(`/repos/${repo}`, repoMeta());
+  R.set(`/repos/${repo}/branches/main`, branchMain(o.branchProtected));
+  R.set(`/repos/${repo}/branches/main/protection`, o.protection);
+  R.set(`/repos/${repo}/pulls/1`, pull({
+    state: o.state, merged: o.merged, headSha: o.headSha, mergeable: o.mergeable,
+    draft: o.draft, baseRef: o.baseRef,
   }));
-  // The script compares against the main branch's COMMIT SHA, not the word.
-  routes.set(new RegExp(`/repos/${repo}/compare/${ACCEPTED}\\.\\.\\.${MAIN}$`),
+  // The script compares against the target branch's COMMIT SHA, not the word.
+  R.set(new RegExp(`/repos/${repo}/compare/${ACCEPTED}\\.\\.\\.${MAIN}$`),
     compare(o.acceptedVsMain, o.acceptedVsMain === 'ahead' ? 3 : 0, o.acceptedVsMain === 'behind' ? 2 : 0));
-  routes.set(new RegExp(`/repos/${repo}/compare/${ACCEPTED}\\.\\.\\.${ACCEPTED}$`),
-    compare('identical'));
-  routes.set(new RegExp(`/repos/${repo}/actions/runs\\?head_sha=`), ciRuns(o.ci));
-  return { repo, routes };
-}
-
-function configFor(repo) {
-  return {
-    candidates: [{ repo, pr: 1, acceptedSha: ACCEPTED }],
-    carriedInputs: { repo, carriedBy: { pr: 1, head: ACCEPTED }, prs: [] },
-  };
-}
-
-// ---------------------------------------------------------------------------
-// 1. ready-to-merge: open + head == accepted + green CI + no conflict.
-// ---------------------------------------------------------------------------
-check('ready-to-merge', () => {
-  const { repo, routes } = baseRoutes({});
-  const report = buildReport(configFor(repo), fakeApi(routes), '2026-10-05T00:00:00Z');
-  const c = report.candidates[0];
-  assert.strictEqual(c.classification, CLASSIFICATIONS.READY);
-  assert.strictEqual(c.prState.headMatchesAccepted, true);
-  assert.strictEqual(c.acceptedInMain.state, 'not-contained');
-  assert.strictEqual(c.ci.status, 'success');
-  assert.strictEqual(c.ci.rerunDetected, false);
-  assert.strictEqual(report.summary.verdict, 'ready');
-  assert.deepStrictEqual(report.summary.landableNow, [`${repo}#1`]);
-  assert.strictEqual(exitCodeFor(report), 0);
-});
-
-// ---------------------------------------------------------------------------
-// 2. merged-traceable (true merge: accepted is ancestor of the merge commit).
-// ---------------------------------------------------------------------------
-check('merged-traceable', () => {
-  const { repo, routes } = baseRoutes({ merged: true });
-  routes.set(new RegExp(`/repos/${repo}/compare/${ACCEPTED}\\.\\.\\.${MERGE_COMMIT}$`),
-    compare('ahead', 0, 0));
-  const report = buildReport(configFor(repo), fakeApi(routes), null);
-  const c = report.candidates[0];
-  assert.strictEqual(c.classification, CLASSIFICATIONS.MERGED_TRACEABLE);
-  assert.strictEqual(exitCodeFor(report), 0);
-});
-
-// ---------------------------------------------------------------------------
-// 3. merged-untraceable: squash-style merge — accepted NOT an ancestor.
-// ---------------------------------------------------------------------------
-check('merged-untraceable', () => {
-  const { repo, routes } = baseRoutes({ merged: true, acceptedVsMain: 'diverged' });
-  routes.set(new RegExp(`/repos/${repo}/compare/${ACCEPTED}\\.\\.\\.${MERGE_COMMIT}$`),
-    compare('diverged', 5, 5));
-  const report = buildReport(configFor(repo), fakeApi(routes), null);
-  const c = report.candidates[0];
-  assert.strictEqual(c.classification, CLASSIFICATIONS.MERGED_UNTRACEABLE);
-  assert.ok(c.reasons.some((r) => r.includes('squash/rebase')));
-  assert.strictEqual(exitCodeFor(report), 1);
-});
-
-// ---------------------------------------------------------------------------
-// 4. merged but both compares unreadable -> insufficient-info, NOT untraceable.
-// ---------------------------------------------------------------------------
-check('merged-with-unreadable-compares-is-insufficient', () => {
-  const { repo, routes } = baseRoutes({ merged: true });
-  routes.set(new RegExp(`/repos/${repo}/compare/`), { status: 0, body: null, error: 'transport down' });
-  const report = buildReport(configFor(repo), fakeApi(routes), null);
-  assert.strictEqual(report.candidates[0].classification, CLASSIFICATIONS.INSUFFICIENT);
-  assert.strictEqual(report.summary.verdict, 'insufficient-info');
-  assert.strictEqual(exitCodeFor(report), 2);
-});
-
-// ---------------------------------------------------------------------------
-// 5. head-drifted: head moved off the accepted SHA; drift scope is reported.
-// ---------------------------------------------------------------------------
-check('head-drifted-reports-diff-scope', () => {
-  const { repo, routes } = baseRoutes({ headSha: DRIFTED });
-  routes.set(new RegExp(`/repos/${repo}/compare/${ACCEPTED}\\.\\.\\.${DRIFTED}$`), compare(
+  R.set(new RegExp(`/repos/${repo}/compare/${ACCEPTED}\\.\\.\\.main$`),
+    compare(o.acceptedVsMain, o.acceptedVsMain === 'ahead' ? 3 : 0, o.acceptedVsMain === 'behind' ? 2 : 0));
+  R.set(new RegExp(`/repos/${repo}/compare/${ACCEPTED}\\.\\.\\.${ACCEPTED}$`), compare('identical'));
+  R.set(new RegExp(`/repos/${repo}/compare/${ACCEPTED}\\.\\.\\.${MERGE_COMMIT}$`),
+    compare(o.leg1, 0, 0));
+  R.set(new RegExp(`/repos/${repo}/compare/${MERGE_COMMIT}\\.\\.\\.${MAIN}$`),
+    compare(o.leg2, 3, 0));
+  R.set(new RegExp(`/repos/${repo}/compare/${ACCEPTED}\\.\\.\\.${DRIFTED}$`), compare(
     'diverged', 2, 1,
     {
       commits: [{ sha: DRIFTED, commit: { message: 'late change\n\nbody' } }],
       files: [{ status: 'modified', filename: 'src/x.js' }, { status: 'added', filename: 'src/y.js' }],
     },
   ));
+  R.set(new RegExp('/actions/runs\\?head_sha='), ok({
+    total_count: o.runs.length,
+    workflow_runs: o.runs.map((r) => ({
+      id: r.id, name: 'CI', event: r.event || 'pull_request',
+      status: r.status || 'completed',
+      conclusion: r.conclusion !== undefined ? r.conclusion : 'success',
+      run_attempt: r.runAttempt || 1,
+      head_sha: r.headSha || o.headSha,
+      created_at: r.createdAt || '2026-10-05T00:00:00Z',
+      html_url: `https://github.com/x/actions/runs/${r.id}`,
+    })),
+  }));
+  R.set(new RegExp('/actions/runs/(\\d+)/jobs'), function jobsRoute(path) {
+    const id = Number(/\/actions\/runs\/(\d+)\/jobs/.exec(path)[1]);
+    const jobs = o.jobsByRun[id] || ALL_JOBS_OK;
+    return ok({ total_count: jobs.length, jobs });
+  });
+  return { repo, routes: R };
+}
+
+function configFor(repo) {
+  return {
+    targetBranch: 'main',
+    candidates: [{ repo, pr: 1, acceptedSha: ACCEPTED }],
+    ciEvidence: { [repo]: EVIDENCE_SPEC },
+    carriedInputs: { repo, carriedBy: { pr: 1, head: ACCEPTED }, prs: [] },
+  };
+}
+const classifyOf = (report) => report.candidates[0].status;
+const unknownsOf = (report) => report.candidates[0].unknowns;
+
+// ---------------------------------------------------------------------------
+// A. The ready positive control: FULL explicit evidence.
+// ---------------------------------------------------------------------------
+check('ready positive control — complete explicit evidence', () => {
+  const { repo, routes } = baseRoutes({});
+  const report = buildReport(configFor(repo), fakeApi(routes), '2026-10-05T00:00:00Z');
+  const c = report.candidates[0];
+  assert.strictEqual(c.status, STATUS.READY);
+  assert.strictEqual(c.prState.headMatchesAccepted, true);
+  assert.strictEqual(c.prState.baseMatchesTarget, true);
+  assert.strictEqual(c.evidence.state, 'satisfied');
+  assert.strictEqual(c.acceptedInMain.state, 'not-contained');
+  assert.strictEqual(report.summary.verdict, 'ready');
+  assert.strictEqual(report.summary.exitCode, 0);
+  assert.deepStrictEqual(report.summary.ready, [`${repo}#1: ready`]);
+  assert.strictEqual(exitCodeFor(report), 0);
+});
+
+check('ready requires mergeable explicitly true — null is insufficient (bug 3)', () => {
+  const { repo, routes } = baseRoutes({ mergeable: null, mergeableState: 'unknown' });
+  const report = buildReport(configFor(repo), fakeApi(routes), null);
+  assert.strictEqual(classifyOf(report), STATUS.INSUFFICIENT);
+  assert.ok(unknownsOf(report).some((u) => u.includes('mergeability unknown')));
+});
+
+check('closed without merge is explicitly not landable (bug 2)', () => {
+  const { repo, routes } = baseRoutes({ state: 'closed' });
+  const report = buildReport(configFor(repo), fakeApi(routes), null);
+  assert.strictEqual(classifyOf(report), STATUS.CLOSED_UNMERGED);
+  assert.strictEqual(report.candidates[0].family, 'blocked');
+  assert.ok(report.candidates[0].reasons[0].includes('closed without being merged'));
+});
+
+check('draft can never be ready', () => {
+  const { repo, routes } = baseRoutes({ draft: true });
+  const report = buildReport(configFor(repo), fakeApi(routes), null);
+  assert.strictEqual(classifyOf(report), STATUS.DRAFT);
+  assert.strictEqual(report.candidates[0].family, 'blocked');
+});
+
+check('wrong PR base is refused (base-mismatch)', () => {
+  const { repo, routes } = baseRoutes({ baseRef: 'release' });
+  const report = buildReport(configFor(repo), fakeApi(routes), null);
+  assert.strictEqual(classifyOf(report), STATUS.BASE_MISMATCH);
+  assert.ok(report.candidates[0].reasons[0].includes('configured landing target is "main"'));
+});
+
+check('head drift reported with diff scope; foreign-head CI does not gate', () => {
+  const { repo, routes } = baseRoutes({ headSha: DRIFTED });
+  routes.set(new RegExp('/actions/runs\\?head_sha='), ok({
+    total_count: 2,
+    workflow_runs: [
+      { id: 1, name: 'CI', event: 'push', status: 'completed', conclusion: 'success', run_attempt: 1, head_sha: ACCEPTED, created_at: '2026-10-05T00:00:00Z', html_url: 'u' },
+      { id: 2, name: 'CI', event: 'pull_request', status: 'completed', conclusion: 'failure', run_attempt: 1, head_sha: DRIFTED, created_at: '2026-10-05T01:00:00Z', html_url: 'u' },
+    ],
+  }));
   const report = buildReport(configFor(repo), fakeApi(routes), null);
   const c = report.candidates[0];
-  assert.strictEqual(c.classification, CLASSIFICATIONS.HEAD_DRIFTED);
+  assert.strictEqual(c.status, STATUS.HEAD_DRIFTED);
   assert.strictEqual(c.drift.status, 'diverged');
   assert.strictEqual(c.drift.aheadBy, 2);
   assert.strictEqual(c.drift.behindBy, 1);
   assert.deepStrictEqual(c.drift.fileList, ['modified:src/x.js', 'added:src/y.js']);
   assert.strictEqual(c.drift.commits[0].message, 'late change');
-  // CI ran on the DRIFTED head, not the accepted one — must be filtered.
-  const { routes: routes2 } = baseRoutes({ headSha: DRIFTED });
-  routes2.set(new RegExp('/actions/runs\\?head_sha='), ciRuns([
-    runFor(ACCEPTED, { id: 1, conclusion: 'success' }),
-    runFor(DRIFTED, { id: 2, conclusion: 'failure' }),
-  ]));
-  const report2 = buildReport(configFor(repo), fakeApi(routes2), null);
-  assert.strictEqual(report2.candidates[0].classification, CLASSIFICATIONS.HEAD_DRIFTED,
-    'drift outranks CI state — the failed run is on a foreign head anyway');
+  // The evidence fetch is head-scoped (it described the drifted head's own
+  // runs), but drift outranks it: the candidate is not ready or ci-failed.
+  assert.strictEqual(c.evidence.runs.runs[0].id, 2);
+  assert.notStrictEqual(c.status, STATUS.READY);
+  assert.notStrictEqual(c.status, STATUS.CI_FAILED);
 });
 
-// ---------------------------------------------------------------------------
-// 6. conflict beats CI.
-// ---------------------------------------------------------------------------
-check('conflict', () => {
+check('mergeable false is conflict', () => {
   const { repo, routes } = baseRoutes({ mergeable: false, mergeableState: 'dirty' });
   const report = buildReport(configFor(repo), fakeApi(routes), null);
-  assert.strictEqual(report.candidates[0].classification, CLASSIFICATIONS.CONFLICT);
-  assert.strictEqual(exitCodeFor(report), 1);
+  assert.strictEqual(classifyOf(report), STATUS.CONFLICT);
+  assert.strictEqual(report.summary.verdict, 'blocked');
+  assert.strictEqual(report.summary.exitCode, 1);
 });
 
 // ---------------------------------------------------------------------------
-// 7. ci-pending.
+// B. CI evidence gate.
 // ---------------------------------------------------------------------------
-check('ci-pending', () => {
-  const { repo, routes } = baseRoutes({});
-  routes.set(new RegExp('/actions/runs\\?head_sha='), ciRuns([
-    runFor(ACCEPTED, { id: 1, event: 'push', conclusion: 'success' }),
-    runFor(ACCEPTED, { id: 2, event: 'pull_request', status: 'in_progress', conclusion: null }),
-  ]));
+check('no CI run for the head -> insufficient, never ready (bug 1)', () => {
+  const { repo, routes } = baseRoutes({ runs: [] });
   const report = buildReport(configFor(repo), fakeApi(routes), null);
-  assert.strictEqual(report.candidates[0].classification, CLASSIFICATIONS.CI_PENDING);
+  assert.strictEqual(classifyOf(report), STATUS.INSUFFICIENT);
+  assert.ok(report.candidates[0].evidence.detail.includes('no run on this head'));
+});
+
+check('CI runs unreadable -> insufficient', () => {
+  const { repo, routes } = baseRoutes({});
+  routes.set(new RegExp('/actions/runs\\?head_sha='), { status: 500, body: null, error: 'boom' });
+  const report = buildReport(configFor(repo), fakeApi(routes), null);
+  assert.strictEqual(classifyOf(report), STATUS.INSUFFICIENT);
+  assert.ok(unknownsOf(report).some((u) => u.includes('required CI evidence not provable')));
+});
+
+check('all required jobs skipped is NOT success evidence (bug 4)', () => {
+  const { repo, routes } = baseRoutes({
+    runs: [{ id: 7, conclusion: 'skipped' }],
+    jobsByRun: { 7: [{ name: 'unit', conclusion: 'skipped' }, { name: 'browser', conclusion: 'skipped' }] },
+  });
+  const report = buildReport(configFor(repo), fakeApi(routes), null);
+  assert.strictEqual(classifyOf(report), STATUS.INSUFFICIENT);
+  assert.ok(report.candidates[0].evidence.detail.includes('did not execute (skipped/neutral)'));
+});
+
+check('required job missing from the run -> insufficient (workflow shape drift)', () => {
+  const { repo, routes } = baseRoutes({
+    jobsByRun: { 100: [{ name: 'unit', conclusion: 'success' }], 101: [{ name: 'unit', conclusion: 'success' }] },
+  });
+  const report = buildReport(configFor(repo), fakeApi(routes), null);
+  assert.strictEqual(classifyOf(report), STATUS.INSUFFICIENT);
+  assert.ok(report.candidates[0].evidence.detail.includes('missing job(s): browser'));
+});
+
+check('required job explicitly failed -> ci-failed, verdict blocked', () => {
+  const { repo, routes } = baseRoutes({
+    jobsByRun: { 100: [{ name: 'unit', conclusion: 'success' }, { name: 'browser', conclusion: 'failure' }],
+      101: [{ name: 'unit', conclusion: 'success' }, { name: 'browser', conclusion: 'failure' }] },
+  });
+  const report = buildReport(configFor(repo), fakeApi(routes), null);
+  assert.strictEqual(classifyOf(report), STATUS.CI_FAILED);
+  assert.ok(report.candidates[0].reasons[0].includes('browser=failure'));
+  assert.strictEqual(report.summary.verdict, 'blocked');
+  assert.strictEqual(report.summary.exitCode, 1);
+});
+
+check('a green sibling run cannot erase an executed required-job failure', () => {
+  // The real runtime #1 shape: push run all green, PR run browser job failed,
+  // never rerun. The failure stands until ITS run is superseded.
+  const { repo, routes } = baseRoutes({
+    runs: [{ id: 100, event: 'push' }, { id: 101, event: 'pull_request' }],
+    jobsByRun: {
+      100: ALL_JOBS_OK,
+      101: [{ name: 'unit', conclusion: 'success' }, { name: 'browser', conclusion: 'failure' }],
+    },
+  });
+  const report = buildReport(configFor(repo), fakeApi(routes), null);
+  assert.strictEqual(classifyOf(report), STATUS.CI_FAILED);
+  assert.ok(report.candidates[0].reasons[0].includes('browser=failure'));
+  assert.ok(report.candidates[0].reasons[0].includes('sibling run(s)'),
+    'the satisfied sibling must stay visible next to the failure');
+  assert.strictEqual(report.summary.verdict, 'blocked');
+});
+
+check('incomplete CI stays pending, never success', () => {
+  const { repo, routes } = baseRoutes({
+    runs: [{ id: 100, event: 'push', conclusion: 'success' },
+      { id: 101, status: 'in_progress', conclusion: null }],
+    jobsByRun: { 100: ALL_JOBS_OK },
+  });
+  const report = buildReport(configFor(repo), fakeApi(routes), null);
+  assert.strictEqual(classifyOf(report), STATUS.CI_PENDING);
+  assert.strictEqual(report.candidates[0].family, 'pending');
+  assert.strictEqual(report.summary.verdict, 'blocked');
+});
+
+check('green after a rerun is ready — with the rerun kept on the record', () => {
+  const { repo, routes } = baseRoutes({
+    runs: [{ id: 100, event: 'push', runAttempt: 1 },
+      { id: 101, event: 'pull_request', runAttempt: 2 }],
+  });
+  const report = buildReport(configFor(repo), fakeApi(routes), null);
+  assert.strictEqual(classifyOf(report), STATUS.READY);
+  assert.strictEqual(report.candidates[0].evidence.runs.rerunDetected, true);
+  assert.ok(report.candidates[0].reasons.some((r) => r.includes('rerun is on record')
+    && r.includes('first-attempt')));
+});
+
+check('truncated run list -> insufficient (incomplete inventory)', () => {
+  const { repo, routes } = baseRoutes({ runs: [{ id: 1 }, { id: 2 }] });
+  routes.set(new RegExp('/actions/runs\\?head_sha='), ok({
+    total_count: 5,
+    workflow_runs: [
+      { id: 1, name: 'CI', event: 'push', status: 'completed', conclusion: 'success', run_attempt: 1, head_sha: ACCEPTED, created_at: '2026-10-05T00:00:00Z', html_url: 'u' },
+      { id: 2, name: 'CI', event: 'pull_request', status: 'completed', conclusion: 'success', run_attempt: 1, head_sha: ACCEPTED, created_at: '2026-10-05T00:00:01Z', html_url: 'u' },
+    ],
+  }));
+  const report = buildReport(configFor(repo), fakeApi(routes), null);
+  assert.strictEqual(classifyOf(report), STATUS.INSUFFICIENT);
+  assert.ok(report.candidates[0].evidence.detail.includes('truncated'));
 });
 
 // ---------------------------------------------------------------------------
-// 8. ci-failed, no rerun (mirrors the real runtime #1 snapshot).
+// C. Protection.
 // ---------------------------------------------------------------------------
-check('ci-failed-no-rerun', () => {
-  const { repo, routes } = baseRoutes({});
-  routes.set(new RegExp('/actions/runs\\?head_sha='), ciRuns([
-    runFor(ACCEPTED, { id: 1, event: 'push', conclusion: 'success' }),
-    runFor(ACCEPTED, { id: 2, event: 'pull_request', conclusion: 'failure' }),
-  ]));
+check('protection unreadable (403) -> insufficient, not ready (bug 7)', () => {
+  const { repo, routes } = baseRoutes({ protection: FORBIDDEN });
+  const report = buildReport(configFor(repo), fakeApi(routes), null);
+  assert.strictEqual(classifyOf(report), STATUS.INSUFFICIENT);
+  assert.ok(unknownsOf(report).some((u) => u.includes('branch protection unreadable')));
+});
+
+check('protection 404 with unreadable branch stays unknown', () => {
+  const prot = summarizeProtection({ status: 0, body: null, error: 'down' }, NOT_PROTECTED);
+  assert.strictEqual(prot.state, 'unknown');
+});
+
+check('protected + unsatisfied required checks -> blocked, satisfied -> ready', () => {
+  const protectedRes = ok({
+    required_status_checks: { strict: true, contexts: ['CI / unit'] },
+    required_pull_request_reviews: { required_approving_review_count: 1 },
+  });
+  const headSha = ACCEPTED;
+  const checkRunsOk = ok({ total_count: 1, check_runs: [{ name: 'CI / unit', status: 'completed', conclusion: 'success' }] });
+  const statusOk = ok({ state: 'success', total_count: 1, statuses: [{ context: 'CI / unit', state: 'success' }] });
+  assert.strictEqual(
+    evaluateProtectionRequirements(summarizeProtection(branchMain(true), protectedRes), checkRunsOk, statusOk).state,
+    'satisfied');
+  const missing = ok({ total_count: 0, check_runs: [] });
+  const statusMissing = ok({ state: 'expected', total_count: 0, statuses: [] });
+  assert.strictEqual(
+    evaluateProtectionRequirements(summarizeProtection(branchMain(true), protectedRes), missing, statusMissing).state,
+    'unsatisfied');
+  const pendingCr = ok({ total_count: 1, check_runs: [{ name: 'CI / unit', status: 'in_progress', conclusion: null }] });
+  assert.strictEqual(
+    evaluateProtectionRequirements(summarizeProtection(branchMain(true), protectedRes), pendingCr, statusMissing).state,
+    'pending');
+  // End-to-end: satisfied rules + full evidence -> ready; unreadable -> insufficient.
+  const { repo, routes } = baseRoutes({ protection: protectedRes, branchProtected: true });
+  routes.set(`/repos/${repo}/commits/${headSha}/check-runs?per_page=100`, checkRunsOk);
+  routes.set(`/repos/${repo}/commits/${headSha}/status`, statusOk);
+  const report = buildReport(configFor(repo), fakeApi(routes), null);
+  assert.strictEqual(classifyOf(report), STATUS.READY);
+  routes.set(`/repos/${repo}/commits/${headSha}/check-runs?per_page=100`, { status: 403, body: null, error: 'forbidden' });
+  const report2 = buildReport(configFor(repo), fakeApi(routes), null);
+  assert.strictEqual(classifyOf(report2), STATUS.INSUFFICIENT);
+});
+
+// ---------------------------------------------------------------------------
+// D. Merge traceability — two independent legs.
+// ---------------------------------------------------------------------------
+check('merged with BOTH legs proven -> landed-traceable (bug 5 regression)', () => {
+  const { repo, routes } = baseRoutes({ merged: true });
   const report = buildReport(configFor(repo), fakeApi(routes), null);
   const c = report.candidates[0];
-  assert.strictEqual(c.classification, CLASSIFICATIONS.CI_FAILED);
-  assert.strictEqual(c.ci.rerunDetected, false);
-  assert.ok(c.ci.notes.some((n) => n.includes('no rerun')));
-  assert.ok(report.summary.blockers.some((b) => b.includes('ci-failed')));
+  assert.strictEqual(c.status, STATUS.LANDED_TRACEABLE);
+  assert.strictEqual(c.mergeTrace.acceptedToMerge.state, 'contained');
+  assert.strictEqual(c.mergeTrace.mergeToMain.state, 'contained');
+  assert.strictEqual(report.summary.verdict, 'landed');
+  assert.strictEqual(report.summary.exitCode, 0);
 });
 
-// ---------------------------------------------------------------------------
-// 9. green after a rerun: ready, but rerun evidence stays on the record.
-// ---------------------------------------------------------------------------
-check('green-after-rerun-is-ready-with-evidence', () => {
-  const { repo, routes } = baseRoutes({});
-  routes.set(new RegExp('/actions/runs\\?head_sha='), ciRuns([
-    runFor(ACCEPTED, { id: 1, event: 'push', conclusion: 'success', attempt: 1 }),
-    runFor(ACCEPTED, { id: 2, event: 'pull_request', conclusion: 'success', attempt: 2 }),
-  ]));
+check('accepted->merge proven but merge NOT in current main -> merged-untraceable (bug 5)', () => {
+  const { repo, routes } = baseRoutes({ merged: true, leg2: 'diverged', acceptedVsMain: 'diverged' });
   const report = buildReport(configFor(repo), fakeApi(routes), null);
   const c = report.candidates[0];
-  assert.strictEqual(c.classification, CLASSIFICATIONS.READY);
-  assert.strictEqual(c.ci.rerunDetected, true);
-  assert.ok(c.ci.notes.some((n) => n.includes('first attempt conclusion is not in the runs API')));
+  assert.strictEqual(c.status, STATUS.MERGED_UNTRACEABLE);
+  assert.ok(c.reasons[0].includes('NOT an ancestor of current main'));
+  assert.strictEqual(c.mergeTrace.acceptedToMerge.state, 'contained');
+  assert.strictEqual(c.mergeTrace.mergeToMain.state, 'not-contained');
+  assert.strictEqual(report.summary.exitCode, 1);
 });
 
-// ---------------------------------------------------------------------------
-// 10. already-in-main: open PR whose accepted SHA reached main another way.
-// ---------------------------------------------------------------------------
-check('already-in-main', () => {
+check('merge leg unreadable -> insufficient, not silently untraceable', () => {
+  const { repo, routes } = baseRoutes({ merged: true, acceptedVsMain: 'diverged' });
+  routes.set(new RegExp(`/repos/${repo}/compare/${MERGE_COMMIT}`),
+    { status: 0, body: null, error: 'transport down' });
+  const report = buildReport(configFor(repo), fakeApi(routes), null);
+  assert.strictEqual(classifyOf(report), STATUS.INSUFFICIENT);
+  assert.ok(unknownsOf(report).some((u) => u.includes('merge commit -> current main unreadable')));
+});
+
+check('accepted compare unreadable at all -> insufficient', () => {
+  const { repo, routes } = baseRoutes({ merged: true });
+  routes.set(new RegExp('/compare/'), { status: 0, body: null, error: 'transport down' });
+  const report = buildReport(configFor(repo), fakeApi(routes), null);
+  assert.strictEqual(classifyOf(report), STATUS.INSUFFICIENT);
+  assert.ok(unknownsOf(report).length >= 1);
+});
+
+check('accepted reached main by another route -> landed-other-route', () => {
   const { repo, routes } = baseRoutes({ acceptedVsMain: 'ahead' });
   const report = buildReport(configFor(repo), fakeApi(routes), null);
-  assert.strictEqual(report.candidates[0].classification, CLASSIFICATIONS.ALREADY_IN_MAIN);
+  const c = report.candidates[0];
+  assert.strictEqual(c.status, STATUS.LANDED_OTHER_ROUTE);
+  assert.strictEqual(c.family, 'landed');
+  assert.strictEqual(report.summary.verdict, 'landed');
+  assert.strictEqual(report.summary.exitCode, 0);
+});
+
+// ---------------------------------------------------------------------------
+// E. Aggregation: verdict / summary / exit code from ONE source.
+// ---------------------------------------------------------------------------
+check('all landed: verdict landed + exit 0, consistent (bug 6)', () => {
+  const { repo, routes } = baseRoutes({ merged: true });
+  const report = buildReport(configFor(repo), fakeApi(routes), null);
+  assert.strictEqual(report.summary.landed.length, 1);
+  assert.notStrictEqual(report.summary.verdict, 'blocked');
+  assert.strictEqual(report.summary.verdict, 'landed');
   assert.strictEqual(exitCodeFor(report), 0);
 });
 
-// ---------------------------------------------------------------------------
-// 11. unreadable PR -> insufficient-info (verdict + exit code 2).
-// ---------------------------------------------------------------------------
-check('unreadable-pr-is-insufficient', () => {
+check('ready + landed mix -> continue, exit 0', () => {
+  const repo = 'boccchi2993/locus-fake';
+  const cfg = configFor(repo);
+  cfg.candidates.push({ repo, pr: 2, acceptedSha: MERGE_COMMIT });
+  const { routes } = baseRoutes({});
+  routes.set(`/repos/${repo}/pulls/2`, pull({ merged: true, headSha: MERGE_COMMIT }));
+  routes.set(new RegExp(`/repos/${repo}/compare/${MERGE_COMMIT}\\.\\.\\.${MERGE_COMMIT}$`), compare('identical'));
+  const report = buildReport(cfg, fakeApi(routes), null);
+  assert.deepStrictEqual(report.candidates.map((c) => c.status), [STATUS.READY, STATUS.LANDED_TRACEABLE]);
+  assert.strictEqual(report.summary.verdict, 'continue');
+  assert.strictEqual(report.summary.exitCode, 0);
+});
+
+check('verdict precedence: unknown > blocked > landed/ready', () => {
+  assert.deepStrictEqual(aggregateVerdict([STATUS.READY, STATUS.INSUFFICIENT]),
+    { verdict: 'insufficient-info', exitCode: 2 });
+  assert.deepStrictEqual(aggregateVerdict([STATUS.READY, STATUS.CI_FAILED]),
+    { verdict: 'blocked', exitCode: 1 });
+  assert.deepStrictEqual(aggregateVerdict([STATUS.LANDED_TRACEABLE, STATUS.CI_PENDING]),
+    { verdict: 'blocked', exitCode: 1 });
+  assert.deepStrictEqual(aggregateVerdict([STATUS.LANDED_TRACEABLE, STATUS.LANDED_OTHER_ROUTE]),
+    { verdict: 'landed', exitCode: 0 });
+});
+
+check('unreadable PR -> insufficient, verdict and exit agree', () => {
   const { repo, routes } = baseRoutes({});
   routes.set(`/repos/${repo}/pulls/1`, { status: 404, body: null, error: 'no such PR' });
   const report = buildReport(configFor(repo), fakeApi(routes), null);
-  assert.strictEqual(report.candidates[0].classification, CLASSIFICATIONS.INSUFFICIENT);
+  assert.strictEqual(classifyOf(report), STATUS.INSUFFICIENT);
   assert.strictEqual(report.summary.verdict, 'insufficient-info');
+  assert.strictEqual(report.summary.exitCode, 2);
   assert.strictEqual(exitCodeFor(report), 2);
+  assert.deepStrictEqual(report.summary.undetermined, [`${repo}#1: insufficient-info`]);
 });
 
 // ---------------------------------------------------------------------------
-// 12. protection states: definitive not-protected vs permission-gap unknown.
+// F. Configuration validation.
 // ---------------------------------------------------------------------------
-check('protection-not-protected-vs-unknown', () => {
+check('empty candidates rejected', () => {
+  assert.throws(() => validateConfig({ candidates: [], ciEvidence: {} }), ConfigError);
+  assert.throws(() => validateConfig({}), ConfigError);
+  assert.throws(() => buildReport({ candidates: [] }, fakeApi(new Map())), ConfigError);
+});
+
+check('candidate shape and duplicate rejected', () => {
+  const base = { ciEvidence: { 'o/r': EVIDENCE_SPEC } };
+  assert.throws(() => validateConfig({ candidates: [{ repo: 'o/r', pr: 1, acceptedSha: 'xyz' }], ciEvidence: base.ciEvidence }), ConfigError);
+  assert.throws(() => validateConfig({ candidates: [{ repo: 'o/r', pr: 0, acceptedSha: ACCEPTED }], ciEvidence: base.ciEvidence }), ConfigError);
+  assert.throws(() => validateConfig({
+    candidates: [{ repo: 'o/r', pr: 1, acceptedSha: ACCEPTED }, { repo: 'o/r', pr: 1, acceptedSha: DRIFTED }],
+    ciEvidence: { 'o/r': EVIDENCE_SPEC },
+  }), ConfigError);
+});
+
+check('missing ciEvidence entry for a candidate rejected — evidence is explicit', () => {
+  assert.throws(() => validateConfig({ candidates: [{ repo: 'o/r', pr: 1, acceptedSha: ACCEPTED }] }), ConfigError);
+  assert.throws(() => validateConfig({
+    candidates: [{ repo: 'o/r', pr: 1, acceptedSha: ACCEPTED }],
+    ciEvidence: { 'o/r': { workflow: 'CI' } },
+  }), ConfigError);
+  assert.throws(() => validateConfig({
+    candidates: [{ repo: 'o/r', pr: 1, acceptedSha: ACCEPTED }],
+    ciEvidence: { 'o/r': { workflow: 'CI', jobs: [] } },
+  }), ConfigError);
+});
+
+check('invalid carriedInputs rejected', () => {
+  assert.throws(() => validateConfig({
+    candidates: [{ repo: 'o/r', pr: 1, acceptedSha: ACCEPTED }],
+    ciEvidence: { 'o/r': EVIDENCE_SPEC },
+    carriedInputs: { repo: 'o/r', carriedBy: { pr: 1, head: 'nope' }, prs: [1] },
+  }), ConfigError);
+});
+
+// ---------------------------------------------------------------------------
+// G. Unit helpers preserved.
+// ---------------------------------------------------------------------------
+check('contained-from-compare directions (the ahead/behind trap)', () => {
+  const mk = (status) => ({ status: 200, body: { status }, error: null });
+  assert.strictEqual(containedFromCompare(mk('ahead')), 'contained');
+  assert.strictEqual(containedFromCompare(mk('identical')), 'contained');
+  assert.strictEqual(containedFromCompare(mk('behind')), 'not-contained');
+  assert.strictEqual(containedFromCompare(mk('diverged')), 'not-contained');
+  assert.strictEqual(containedFromCompare(null), 'unknown');
+  assert.strictEqual(containedFromCompare({ status: 404, body: null }), 'unknown');
+});
+
+check('summarizeRuns filters foreign heads; empty stays visible', () => {
+  const only = summarizeRuns({
+    total_count: 1,
+    workflow_runs: [{ id: 9, name: 'CI', event: 'push', status: 'completed', conclusion: 'success', run_attempt: 1, head_sha: ACCEPTED, created_at: 't', html_url: 'u' }],
+  }, DRIFTED);
+  assert.strictEqual(only.runs.length, 0);
+  const mixed = summarizeRuns({
+    total_count: 2,
+    workflow_runs: [
+      { id: 1, name: 'CI', event: 'push', status: 'completed', conclusion: 'success', run_attempt: 1, head_sha: ACCEPTED, created_at: 't', html_url: 'u' },
+      { id: 2, name: 'CI', event: 'push', status: 'completed', conclusion: 'failure', run_attempt: 1, head_sha: DRIFTED, created_at: 't', html_url: 'u' },
+    ],
+  }, ACCEPTED);
+  assert.strictEqual(mixed.runs.length, 1);
+  assert.strictEqual(mixed.failed.length, 0);
+});
+
+check('evaluateRequiredEvidence: no run of the required workflow -> unknown-evidence', () => {
+  const runs = [{ id: 1, name: 'Other', status: 'completed', conclusion: 'success', createdAt: 't' }];
+  const res = evaluateRequiredEvidence(EVIDENCE_SPEC, runs, new Map());
+  assert.strictEqual(res.state, 'unknown-evidence');
+  assert.ok(res.detail.includes('has no run on this head'));
+});
+
+// ---------------------------------------------------------------------------
+// H. Renderer + shipped config.
+// ---------------------------------------------------------------------------
+check('render text carries marks, unknowns, verdict and exit code', () => {
+  const { repo, routes } = baseRoutes({ runs: [] });
+  const report = buildReport(configFor(repo), fakeApi(routes), '2026-10-05T01:02:03Z');
+  const text = renderText(report);
+  assert.ok(text.includes('UNKNOWN (insufficient evidence — refused, not passed)'));
+  assert.ok(text.includes('? unknown:'));
+  assert.ok(text.includes('verdict: insufficient-info (exit 2)'));
+  assert.ok(text.includes('evidence policy'));
+  assert.ok(text.includes('(read-only, live GitHub state)'));
+});
+
+check('shipped default config: accepted set unchanged, evidence explicit', () => {
+  assert.strictEqual(DEFAULT_CONFIG.targetBranch, 'main');
+  assert.strictEqual(DEFAULT_CONFIG.candidates.length, 3);
+  const [rt, hn, pd] = DEFAULT_CONFIG.candidates;
   assert.deepStrictEqual(
-    summarizeProtection(branchMain(false), NOT_PROTECTED).state, 'not-protected');
-  const unknown403 = summarizeProtection(branchMain(false), FORBIDDEN);
-  assert.strictEqual(unknown403.state, 'unknown');
-  assert.ok(unknown403.note.includes('not assuming absence'));
-  const protectedRes = {
-    status: 200,
-    body: {
-      required_status_checks: { strict: true, contexts: ['CI / unit'] },
-      required_pull_request_reviews: { required_approving_review_count: 1 },
-    },
-    error: null,
-  };
-  const prot = summarizeProtection(branchMain(true), protectedRes);
-  assert.strictEqual(prot.state, 'protected');
-  assert.deepStrictEqual(prot.requiredStatusChecks.contexts, ['CI / unit']);
-  assert.strictEqual(prot.requiredReviews.required, 1);
-  // 404 protection with unreadable branch must stay unknown (no absence guess).
-  assert.strictEqual(
-    summarizeProtection({ status: 0, body: null, error: 'down' }, NOT_PROTECTED).state,
-    'unknown');
+    [rt.repo, rt.pr, rt.acceptedSha],
+    ['boccchi2993/locus-runtime', 1, '2435a57ff7a66db3db88aa98a88d404c75133483']);
+  assert.deepStrictEqual(
+    [hn.repo, hn.pr, hn.acceptedSha],
+    ['boccchi2993/locus-harness', 1, '347eed99a415dc080b97d46d8a4271ceb19c5142']);
+  assert.deepStrictEqual(
+    [pd.repo, pd.pr, pd.acceptedSha],
+    ['boccchi2993/locus-product', 5, 'd6a74a25a2b98293d9aa1f2a635022d8f5ed733b']);
+  // The evidence requirements mirror the repos' REAL ci.yml jobs (as of the
+  // accepted heads) — an unexplainable workflow must fail, not pass.
+  assert.deepStrictEqual(DEFAULT_CONFIG.ciEvidence['boccchi2993/locus-runtime'].jobs, [
+    'build + package checks',
+    'unit tests (Node)',
+    'browser gates (headless Chrome)',
+    'out-of-repo tarball consumer (headless Chrome)',
+  ]);
+  assert.deepStrictEqual(DEFAULT_CONFIG.ciEvidence['boccchi2993/locus-harness'].jobs, [
+    'build + package checks',
+    'unit tests (Node)',
+    'harness host browser gate (headless Chrome)',
+    'out-of-checkout tarball consumer (headless Chrome)',
+  ]);
+  assert.deepStrictEqual(DEFAULT_CONFIG.ciEvidence['boccchi2993/locus-product'].jobs, [
+    'unit tests (Node, clean checkout)',
+    'browser gates (packaged build, headless Chrome)',
+  ]);
+  assert.deepStrictEqual(DEFAULT_CONFIG.carriedInputs.prs, [1, 2, 3, 4]);
+  assert.strictEqual(DEFAULT_CONFIG.carriedInputs.carriedBy.head,
+    'd6a74a25a2b98293d9aa1f2a635022d8f5ed733b');
+  validateConfig(DEFAULT_CONFIG); // must not throw
 });
 
 // ---------------------------------------------------------------------------
-// 13. carried inputs: ancestor vs diverged vs unreadable.
+// I. Read-only transport contract.
 // ---------------------------------------------------------------------------
-check('carried-inputs-containment', () => {
-  const repo = 'boccchi2993/locus-fake';
-  const cfg = {
-    candidates: [],
-    carriedInputs: { repo, carriedBy: { pr: 5, head: ACCEPTED }, prs: [2, 3, 4] },
-  };
-  const routes = new Map();
-  routes.set(`/repos/${repo}/pulls/2`, pull({ headSha: INPUT_HEAD })); // ancestor
-  routes.set(`/repos/${repo}/pulls/3`, pull({ headSha: 'f'.repeat(40) })); // diverged
-  routes.set(`/repos/${repo}/pulls/4`, { status: 500, body: null, error: 'boom' });
-  routes.set(new RegExp(`/repos/${repo}/compare/${INPUT_HEAD}\\.\\.\\.${ACCEPTED}$`),
-    compare('ahead', 0, 0));
-  routes.set(new RegExp(`/repos/${repo}/compare/f{40}\\.\\.\\.${ACCEPTED}$`),
-    compare('diverged', 1, 1));
-  const report = buildReport(cfg, fakeApi(routes), null);
-  const [pr2, pr3, pr4] = report.carriedInputs;
-  assert.strictEqual(pr2.classification, 'contained-by-integration-head');
-  assert.strictEqual(pr2.containedInIntegrationHead, 'contained');
-  assert.strictEqual(pr3.classification, 'not-contained-in-integration-head');
-  assert.strictEqual(pr3.containedInIntegrationHead, 'not-contained');
-  assert.strictEqual(pr4.classification, 'insufficient-info');
-});
-
-// ---------------------------------------------------------------------------
-// 14. read-only contract: the gh transport argv is exactly ['api', path].
-// ---------------------------------------------------------------------------
-check('gh-adapter-is-get-only-by-construction', () => {
+check('gh adapter argv is exactly ["api", path] — GET by construction', () => {
   const calls = [];
-  const fakeSpawn = (cmd, args, opts) => {
-    calls.push({ cmd, args, opts });
+  const fakeSpawn = (cmd, args) => {
+    calls.push({ cmd, args });
     return { status: 0, stdout: '{}', stderr: '' };
   };
   const api = ghApiAdapter(fakeSpawn);
@@ -394,89 +665,32 @@ check('gh-adapter-is-get-only-by-construction', () => {
   assert.strictEqual(calls[0].args.length, 2);
   assert.strictEqual(calls[0].args[0], 'api');
   assert.strictEqual(calls[0].args[1], '/repos/boccchi2993/locus-fake/pulls/1');
-  // No flag of any kind: no -X/-f/-F/--method/--input — nothing but path.
   for (const a of calls[0].args) {
     assert.ok(!String(a).startsWith('-'), `transport must not pass flags, saw ${a}`);
   }
-  // And every path the orchestrator asks for is a read endpoint.
-  const { repo, routes } = baseRoutes({});
+});
+
+check('every requested endpoint is in the read allowlist', () => {
+  const { repo, routes } = baseRoutes({ merged: true, protection: FORBIDDEN });
   const recorder = fakeApi(routes);
   buildReport(configFor(repo), recorder, null);
-  for (const path of recorder.calls) {
-    assert.match(path, /^\/repos\/[^/]+\/[^/]+(\/(pulls\/\d+|branches\/[^/]+(\/protection)?|compare\/[a-f0-9]{40}\.\.\.(main|[a-f0-9]{40})|actions\/runs\?head_sha=[0-9a-f]{40}(&per_page=\d+)?))?$/,
-      `non-read endpoint requested: ${path}`);
+  const allow = new RegExp('^/repos/[^/]+/[^/]+(/('
+    + 'pulls/\\d+'
+    + '|branches/[^/]+(/protection)?'
+    + '|compare/[0-9a-f]{40}\\.\\.\\.(main|[0-9a-f]{40})'
+    + '|actions/runs\\?head_sha=[0-9a-f]{40}(&per_page=\\d+)?'
+    + '|actions/runs/\\d+/jobs(\\?per_page=\\d+)?'
+    + '|commits/[0-9a-f]{40}/check-runs(\\?per_page=\\d+)?'
+    + '|commits/[0-9a-f]{40}/status'
+    + '))?$');
+  assert.ok(recorder.calls.length >= 6, `expected several reads, got ${recorder.calls.length}`);
+  for (const p of recorder.calls) {
+    assert.match(p, allow, `non-read endpoint requested: ${p}`);
   }
-});
-
-// ---------------------------------------------------------------------------
-// 15. compare-status -> containment mapping (the direction trap).
-// ---------------------------------------------------------------------------
-check('contained-from-compare-directions', () => {
-  const mk = (status) => ({ status: 200, body: { status }, error: null });
-  // compare/{accepted}...{main}: "ahead" means main contains accepted.
-  assert.strictEqual(containedFromCompare(mk('ahead')), 'contained');
-  assert.strictEqual(containedFromCompare(mk('identical')), 'contained');
-  assert.strictEqual(containedFromCompare(mk('behind')), 'not-contained');
-  assert.strictEqual(containedFromCompare(mk('diverged')), 'not-contained');
-  assert.strictEqual(containedFromCompare(null), 'unknown');
-  assert.strictEqual(containedFromCompare({ status: 404, body: null }), 'unknown');
-});
-
-// ---------------------------------------------------------------------------
-// 16. summarizeCi: filters foreign heads; empty run list -> 'none'.
-// ---------------------------------------------------------------------------
-check('summarize-ci-filtering', () => {
-  const only = summarizeCi({ workflow_runs: [runFor(ACCEPTED, { id: 9, conclusion: 'success' })] }, DRIFTED);
-  assert.strictEqual(only.status, 'none');
-  assert.ok(only.notes[0].includes('no CI run'));
-  const mixed = summarizeCi({
-    workflow_runs: [
-      runFor(ACCEPTED, { id: 1, conclusion: 'success' }),
-      runFor(DRIFTED, { id: 2, conclusion: 'failure' }),
-    ],
-  }, ACCEPTED);
-  assert.strictEqual(mixed.status, 'success');
-  assert.strictEqual(mixed.runs.length, 1);
-});
-
-// ---------------------------------------------------------------------------
-// 17. renderText: human summary mentions marks, verdict, carried inputs.
-// ---------------------------------------------------------------------------
-check('render-text-smoke', () => {
-  const { repo, routes } = baseRoutes({ merged: true, acceptedVsMain: 'diverged' });
-  routes.set(new RegExp(`/repos/${repo}/compare/${ACCEPTED}\\.\\.\\.${MERGE_COMMIT}$`),
-    compare('diverged', 5, 5));
-  const cfg = configFor(repo);
-  cfg.carriedInputs.prs = [2];
-  routes.set(`/repos/${repo}/pulls/2`, pull({ headSha: INPUT_HEAD }));
-  routes.set(new RegExp(`/repos/${repo}/compare/${INPUT_HEAD}\\.\\.\\.${ACCEPTED}$`),
-    compare('diverged', 1, 1));
-  const report = buildReport(cfg, fakeApi(routes), '2026-10-05T01:02:03Z');
-  const text = renderText(report);
-  assert.ok(text.includes('BLOCKER (merged, untraceable)'));
-  assert.ok(text.includes('verdict: blocked'));
-  assert.ok(text.includes('Product integration inputs'));
-  assert.ok(text.includes('not-contained-in-integration-head'));
-  assert.ok(text.includes('(read-only, live GitHub state)'));
-});
-
-// ---------------------------------------------------------------------------
-// 18. default config shape sanity: the shipped table matches the task card.
-// ---------------------------------------------------------------------------
-check('default-config-matches-verified-set', () => {
-  assert.strictEqual(DEFAULT_CONFIG.candidates.length, 3);
-  const rt = DEFAULT_CONFIG.candidates[0];
-  assert.strictEqual(rt.repo, 'boccchi2993/locus-runtime');
-  assert.strictEqual(rt.pr, 1);
-  assert.strictEqual(rt.acceptedSha, '2435a57ff7a66db3db88aa98a88d404c75133483');
-  const hn = DEFAULT_CONFIG.candidates[1];
-  assert.strictEqual(hn.acceptedSha, '347eed99a415dc080b97d46d8a4271ceb19c5142');
-  const pd = DEFAULT_CONFIG.candidates[2];
-  assert.strictEqual(pd.acceptedSha, 'd6a74a25a2b98293d9aa1f2a635022d8f5ed733b');
-  assert.deepStrictEqual(DEFAULT_CONFIG.carriedInputs.prs, [1, 2, 3, 4]);
-  assert.strictEqual(
-    DEFAULT_CONFIG.carriedInputs.carriedBy.head,
-    'd6a74a25a2b98293d9aa1f2a635022d8f5ed733b');
+  for (const p of recorder.calls) {
+    assert.ok(!/method=|-X|merge|issues\/\d+\/comments|git\/refs/.test(p),
+      `mutation-shaped endpoint requested: ${p}`);
+  }
 });
 
 // ---------------------------------------------------------------------------
