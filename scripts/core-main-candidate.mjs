@@ -144,10 +144,23 @@ function headAt(dir) {
 export function defaultIo() {
   return {
     now: () => new Date().toISOString(),
+    env: process.env,
     listMainSha: listMainShaDefault,
     runNpm: runNpmDefault,
     productHead: (checkout) => headAt(checkout),
   };
+}
+
+// Dispatch inputs reach the workflow as environment variables, never as
+// interpolated shell source (review round 1, F1): a hostile value arrives as
+// plain data in Node, where the shared validation in captureCandidate rejects
+// it before any network, npm, or filesystem effect. An empty/unset value
+// means "not provided" — a scheduled run with no dispatch inputs resolves to
+// main mode.
+function envInput(value) {
+  if (value === undefined || value === null) return undefined;
+  const s = String(value);
+  return s === '' ? undefined : s;
 }
 
 let toolRepoRootCache;
@@ -171,11 +184,14 @@ export async function captureCandidate({
 }) {
   if (checkout) checkout = String(checkout);
   if (!SOURCES.includes(source)) {
-    throw new CandidateError(EXIT.USAGE, `--source must be "main" or "explicit", got ${JSON.stringify(source)}`);
+    // Rejected input values are never echoed back (review round 1, F1) —
+    // only their shape, so hostile bytes can neither execute nor reach logs.
+    throw new CandidateError(EXIT.USAGE,
+      `--source must be "main" or "explicit" (rejected a value of length ${String(source).length})`);
   }
   if (source === 'main' && (runtimeSha !== undefined || harnessSha !== undefined)) {
     throw new CandidateError(EXIT.USAGE,
-      'explicit SHA flags are not allowed with --source main (capture modes must not be mixed)');
+      'explicit SHA inputs are not allowed with main mode (capture modes must not be mixed)');
   }
   const explicit = {
     'locus-runtime': runtimeSha,
@@ -188,7 +204,7 @@ export async function captureCandidate({
         throw new CandidateError(EXIT.USAGE, `--source explicit requires --${pkg === 'locus-runtime' ? 'runtime' : 'harness'}-sha (missing for ${pkg})`);
       }
       if (typeof v !== 'string' || !SHA_RE.test(v)) {
-        throw new CandidateError(EXIT.USAGE, `${pkg} candidate must be a full 40-char lowercase hex SHA, got ${JSON.stringify(v)}`);
+        throw new CandidateError(EXIT.USAGE, `${pkg} candidate must be a full 40-char lowercase hex SHA (rejected a value of length ${String(v).length})`);
       }
     }
   }
@@ -490,14 +506,16 @@ function emitResult(resultFile, payload) {
 
 export async function runCli(argv, io = defaultIo()) {
   const [cmd, ...rest] = argv;
+  const env = io.env || process.env;
   try {
     if (cmd === 'capture') {
       const out = argValue(rest, '--out');
+      const flagSource = argValue(rest, '--source');
       const snapshot = await captureCandidate({
         checkout: requireValue(rest, '--checkout'),
-        source: argValue(rest, '--source') || 'main',
-        runtimeSha: argValue(rest, '--runtime-sha'),
-        harnessSha: argValue(rest, '--harness-sha'),
+        source: flagSource !== undefined ? flagSource : (envInput(env.CAND_SOURCE) || 'main'),
+        runtimeSha: argValue(rest, '--runtime-sha') ?? envInput(env.CAND_RUNTIME_SHA),
+        harnessSha: argValue(rest, '--harness-sha') ?? envInput(env.CAND_HARNESS_SHA),
         io,
       });
       if (out) writeFileSync(out, `${JSON.stringify(snapshot, null, 2)}\n`);
