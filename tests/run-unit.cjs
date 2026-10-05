@@ -42,6 +42,10 @@ const SUITES = [
   // M4a-A: core-main candidate capture/apply/verify battery — faked npm/git
   // transports, so the real candidate tool is exercised only in rehearsals.
   'core-main-candidate.test.mjs',
+  // M4a review A (F1): the candidate workflow's static shape — every run
+  // block scanned for `${{`/eval/bash -c, inputs.* only in env value
+  // positions, capture step carries no mode flags. Registered by D.
+  'core-main-candidate-workflow.test.mjs',
   // M4a-B: production-graph ownership gate — closure from the real entry;
   // fault-injection self-proofs run in OS-temp trees, never this worktree.
   'm4a-product-ownership.test.cjs',
