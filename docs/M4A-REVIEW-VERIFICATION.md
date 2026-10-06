@@ -293,13 +293,25 @@ delivery commit's parent chain prove.
 | `37355783370` | pull_request (PR #9 check) | **success** (both jobs) |
 | `37355773953` | push | **failure**: exactly one suite, `e2e-ui.cjs`, died at Chrome boot with `CDP browser endpoint unavailable: readiness timeout`; every other suite passed on that run (including `e2e-m3c-python-integration` 55/55) |
 
-First failure kept, not rerun. Diagnosis, with the evidence stated: the
-identical commit passed the identical browser-gates job minutes later on
-the pull_request run, and the failure hit the run's very first Chrome boot
-— the known runner-side CDP readiness flake family recorded in earlier
-rounds, not a regression of this integration. No gate was weakened and no
-rerun was triggered (out of this round's authorization); the red push run
-stands on the record next to the green PR run. The candidate
+First failure kept, not rerun. What the recorded facts show: the identical
+commit passed the identical browser-gates job minutes later on the
+pull_request run, and the failure hit the run's very first Chrome boot.
+
+> **Correction (2026-10-06, review round 2 — supersedes the sentence that
+> followed here originally).** This record originally continued: "the known
+> runner-side CDP readiness flake family recorded in earlier rounds, not a
+> regression of this integration". That attribution was NOT established by
+> the evidence and is **retracted**: the observations do not identify a root
+> cause, do not suffice to attribute the failure to the environment or to
+> the product, and do not rule out a regression. What stands is exactly the
+> table above — first failure on push run `37355773953` (`e2e-ui.cjs`, CDP
+> readiness timeout), same-commit success on pull_request run
+> `37355783370`, no rerun triggered (out of that round's authorization).
+> Root cause: **unconfirmed**. The red push run stays on the record next to
+> the green PR run — nothing was deleted or rewritten as a first-try green.
+> See `docs/M4A-REVIEW-R2.md` §6 for the round-2 record of this correction.
+
+The candidate
 `core-main-candidate` workflow did NOT run anywhere on GitHub — it is not
 on the default branch (schedule/dispatch remain dormant, §8.5).
 

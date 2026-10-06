@@ -324,3 +324,22 @@ clean-tree battery, and an honestly red main-mode candidate — is
 there (§8) on 2026-10-06 evidence; the mainline remains blocked on
 locus-runtime #1's never-rerun failed run `36987973661`, and the candidate
 schedule/dispatch remain dormant until this merge chain reaches `main`.
+
+## 9. Review round 2 (2026-10-06) — see M4A-REVIEW-R2.md
+
+The second review round fixed four more unearned-ready defects in the
+preflight (`mergeable_state="blocked"` fell through; a required-reviews
+protection rule was displayed but never judged; a required job with a
+`stale`/unknown conclusion defaulted to success; and a latest-4-runs window
+in both fetch and judgment layers silently dropped older failures), gated
+every success verdict on the absence of unresolved necessary-evidence gaps,
+and added a complete-inventory (budgeted, paged) evidence requirement with
+evaluated run ids in the report. Suite 39 → 65 checks; the baseline first-
+fail record (50/15, exit 1) and the full battery are in
+`docs/M4A-REVIEW-R2.md` §1/§4, with a fresh live preflight (still `blocked`
+on runtime #1, §5 there). **Correction carried from that round:** §7 of
+`docs/M4A-REVIEW-VERIFICATION.md` originally attributed the red push run
+`37355773953` to the "runner-side CDP flake family, not a regression" —
+that attribution is retracted there in place; root cause is unconfirmed,
+and the first failure stands on the record. The landing checklist (§6) is
+unchanged.

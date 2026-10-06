@@ -60,6 +60,24 @@ The rollout sequence (§3), SHA semantics (§4), combo record (§5), rollback
 (§6), deployment surface (§7) and authorization asks (§9) are unchanged by
 this revision; Phase 0 now means running the R1 preflight.
 
+### Revision R2 (2026-10-06, review round 2)
+
+A second review found four more unearned-`ready` defects in the R1
+classifier and fixed them (`docs/M4A-REVIEW-R2.md`):
+`mergeable_state="blocked"` now blocks (mergeable=true alone never meant
+"merge permitted"); a required-approving-reviews rule is answered
+insufficient (current approvals are not provable from historical review
+lists); a required job counts as succeeded only on the explicit conclusion
+`success` (`stale`/unknown values are refused with the raw value, run id,
+and job name); and the latest-4-runs window is gone — the required
+workflow's runs are paged to completion within explicit budgets, an
+incomplete inventory is insufficient unless an explicit failure was already
+observed, and the report names the evaluated run ids. Suite 39 → 65 checks;
+baseline first-fail record and a fresh live preflight (2026-10-06, still
+`blocked` on runtime #1's never-rerun run `36987973661`) are in
+`docs/M4A-REVIEW-R2.md` §1/§5. This banner and the script's header contract
+supersede the §0-R1 and §10 taxonomy text below, which stays as history.
+
 ---
 
 
