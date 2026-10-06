@@ -986,6 +986,96 @@ check('R2-F4 positive: jobs pagination — required job on page 2 is still judge
 });
 
 // ---------------------------------------------------------------------------
+// M4b (2026-10-06): the full-page jobs false rejection. fetchJobsForRun
+// already broke out of its loop on "provably complete" (jobs.length >=
+// total_count) but then classified the result by `lastPageRows >= 100`
+// alone — so a run with EXACTLY 100 (or 200) jobs, fully fetched against a
+// trusted total_count, was mislabeled truncated ("ended on a full page
+// without a usable total_count") and could never be judged. Every control
+// below goes through the real buildReport on the full fake-API chain. The
+// first failures (the two full-page positives and the failed-job positive)
+// were reproduced against the unmodified PR #9 head 2a01ba8; the two
+// negative pins here passed before the fix and must keep passing after it.
+// ---------------------------------------------------------------------------
+check('M4b: exactly one full page (total_count=100, all fetched) is complete -> ready', () => {
+  const page1 = [
+    ...Array.from({ length: 98 }, (_, i) => ({ name: `aux ${i}`, conclusion: 'success' })),
+    { name: 'unit', conclusion: 'success' },
+    { name: 'browser', conclusion: 'success' },
+  ];
+  const { repo, routes } = baseRoutes({ runs: [r2RunRow(9)] });
+  r2SetPagedJobs(routes, 9, [page1], 100);
+  const api = fakeApi(routes);
+  const report = buildReport(configFor(repo), api, null);
+  assert.strictEqual(classifyOf(report), STATUS.READY);
+  const c = report.candidates[0];
+  assert.strictEqual(c.evidence.state, 'satisfied');
+  assert.ok(!JSON.stringify(c.evidence).includes('not fully readable'));
+  // provably complete must not keep paging past the proven end
+  const jobPages = api.calls.filter((p) => p.includes('/actions/runs/9/jobs'));
+  assert.deepStrictEqual(jobPages, [`/repos/${repo}/actions/runs/9/jobs?per_page=100&page=1`]);
+});
+
+check('M4b: exactly two full pages (total_count=200, all fetched) are complete -> ready', () => {
+  const page1 = Array.from({ length: 100 }, (_, i) => ({ name: `aux ${i}`, conclusion: 'success' }));
+  const page2 = [
+    ...Array.from({ length: 98 }, (_, i) => ({ name: `aux2 ${i}`, conclusion: 'success' })),
+    { name: 'unit', conclusion: 'success' },
+    { name: 'browser', conclusion: 'success' },
+  ];
+  const { repo, routes } = baseRoutes({ runs: [r2RunRow(9)] });
+  r2SetPagedJobs(routes, 9, [page1, page2], 200);
+  const api = fakeApi(routes);
+  const report = buildReport(configFor(repo), api, null);
+  assert.strictEqual(classifyOf(report), STATUS.READY);
+  const pages = api.calls
+    .filter((p) => p.includes('/actions/runs/9/jobs'))
+    .map((p) => /[?&]page=(\d+)/.exec(p)[1]);
+  assert.deepStrictEqual(pages, ['1', '2'], 'both full pages were genuinely fetched');
+  assert.ok(!JSON.stringify(report.candidates[0].evidence).includes('not fully readable'));
+});
+
+check('M4b: full pages, total_count beyond the fetch budget -> insufficient (budget named)', () => {
+  const pages = Array.from({ length: 5 }, (_, p) => Array.from({ length: 100 }, (_, i) => ({
+    name: p === 4 && i === 0 ? 'unit' : p === 4 && i === 1 ? 'browser' : `aux ${p}-${i}`,
+    conclusion: 'success',
+  })));
+  const { repo, routes } = baseRoutes({ runs: [r2RunRow(9)] });
+  r2SetPagedJobs(routes, 9, pages, 600);
+  const report = buildReport(configFor(repo), fakeApi(routes), null);
+  assert.strictEqual(classifyOf(report), STATUS.INSUFFICIENT);
+  const blob = JSON.stringify(report.candidates[0].evidence);
+  assert.ok(blob.includes('budget exhausted'), blob);
+  assert.ok(blob.includes('total_count=600'), blob);
+  assert.ok(blob.includes('500 job(s)'), 'the fetched count stays visible');
+});
+
+check('M4b: full pages with no usable total_count, budget exhausted -> insufficient', () => {
+  const pages = Array.from({ length: 5 }, () => Array.from({ length: 100 }, (_, i) => ({ name: `aux ${i}`, conclusion: 'success' })));
+  const { repo, routes } = baseRoutes({ runs: [r2RunRow(9)] });
+  r2SetPagedJobs(routes, 9, pages, null);
+  const report = buildReport(configFor(repo), fakeApi(routes), null);
+  assert.strictEqual(classifyOf(report), STATUS.INSUFFICIENT);
+  const blob = JSON.stringify(report.candidates[0].evidence);
+  assert.ok(blob.includes('without a usable total_count'), blob);
+});
+
+check('M4b: complete 100-job list with a required job failed -> blocked (judged, not refused)', () => {
+  const page1 = [
+    ...Array.from({ length: 98 }, (_, i) => ({ name: `aux ${i}`, conclusion: 'success' })),
+    { name: 'unit', conclusion: 'success' },
+    { name: 'browser', conclusion: 'failure' },
+  ];
+  const { repo, routes } = baseRoutes({ runs: [r2RunRow(9)] });
+  r2SetPagedJobs(routes, 9, [page1], 100);
+  const report = buildReport(configFor(repo), fakeApi(routes), null);
+  assert.strictEqual(classifyOf(report), STATUS.CI_FAILED);
+  assert.ok(report.candidates[0].reasons[0].includes('browser=failure'));
+  assert.strictEqual(report.summary.verdict, 'blocked');
+  assert.strictEqual(report.summary.exitCode, 1);
+});
+
+// ---------------------------------------------------------------------------
 console.log(`m4a-mainline-preflight.test.cjs: ${pass} passed, ${fail} failed`);
 if (fail) {
   for (const f of failures) console.log(`FAIL ${f}`);

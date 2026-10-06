@@ -791,23 +791,28 @@ function fetchJobsForRun(repo, runId, api) {
     if (rows.length < 100) break; // server says this is the last page
     if (totalCount !== null && jobs.length >= totalCount) break; // provably complete
   }
-  if (totalCount !== null && jobs.length < totalCount) {
-    return {
-      ok: true, error: null, truncated: true,
-      reason: lastPageRows >= 100
+  // ONE completeness decision for every exit path: the list is complete when
+  // a trusted total_count is fully fetched (a final page of exactly 100 is
+  // then the PROOF of completeness, not a gap), or when the server itself
+  // ended the list on a short page. A full final page alone proves nothing:
+  // with no usable total_count it keeps paging and, at the budget, is
+  // reported explicitly incomplete; with a total_count still above the
+  // fetched count it is missing pages. Every incomplete shape stays
+  // truncated -> unknown-evidence -> never ready.
+  const complete = (totalCount !== null && jobs.length >= totalCount)
+    || (totalCount === null && lastPageRows < 100);
+  if (complete) {
+    return { ok: true, error: null, truncated: false, reason: null, jobs };
+  }
+  return {
+    ok: true, error: null, truncated: true,
+    reason: totalCount !== null
+      ? (lastPageRows >= 100
         ? `jobs budget exhausted for run ${runId}: ${pagesFetched} page(s) fetched, ${jobs.length} job(s) of a claimed total_count=${totalCount}`
-        : `job list truncated for run ${runId}: total_count=${totalCount} but only ${jobs.length} fetched`,
-      jobs,
-    };
-  }
-  if (lastPageRows >= 100) {
-    return {
-      ok: true, error: null, truncated: true,
-      reason: `job list for run ${runId} ended on a full page without a usable total_count`,
-      jobs,
-    };
-  }
-  return { ok: true, error: null, truncated: false, reason: null, jobs };
+        : `job list truncated for run ${runId}: total_count=${totalCount} but only ${jobs.length} fetched`)
+      : `job list for run ${runId} ended on a full page without a usable total_count (fetched ${pagesFetched} page(s) within the budget) — completeness unproven`,
+    jobs,
+  };
 }
 
 function fetchCandidateFacts(entry, config, api) {

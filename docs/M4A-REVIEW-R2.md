@@ -196,3 +196,68 @@ adds no retry.
   until a reviewed change adds a valid current-approvals evidence source.
 - `ciEvidence` still pins workflow shapes; a renamed/added job stays
   `unknown-evidence` until the config is deliberately updated.
+
+## 8. M4b follow-up (2026-10-06): the full-page jobs false rejection, fixed
+
+Appended, not rewritten — this section is a separate M4b defect fix on top
+of the §1–§7 record above. Scope honored: only
+`scripts/m4a-mainline-preflight.cjs` (one function), this test file's
+successor (`tests/m4a-mainline-preflight.test.cjs`), and this doc. No
+production `src/`, no dependency locks, no other script, no policy change
+elsewhere, no core repos. Worktree: fresh clone
+`locus-m4b-work/product`, branch `refactor/m4a-integration`,
+`core.autocrlf=false` + `core.eol=lf` (local config only). Baseline: PR #9
+head `2a01ba8a93b4e8590f69e3a14e7cde56200410d9`, verified equal to the
+remote head before starting; nothing else was in the tree.
+
+**Defect (confirmed, not live-triggering at today's job counts):**
+`fetchJobsForRun` already broke out of its paging loop on "provably
+complete" (`jobs.length >= total_count`) but then classified the result by
+`lastPageRows >= 100` alone. A run with EXACTLY 100 (or 200) jobs — fully
+fetched against a trusted `total_count` — fell through to the
+"ended on a full page without a usable total_count" branch and was labeled
+`truncated`, so `evaluateRequiredEvidence` refused to judge it
+(`unknown-evidence`) no matter what the jobs said. The sibling
+`fetchRunsForHead` never had this bug (its budget branch already carries
+the `runs.length < totalCount` guard) and is untouched.
+
+**First failure, reproduced on the unmodified head** through the real
+`buildReport(config, fakeApi)` chain — 5 new buildReport controls, of which
+3 failed pre-fix (log: out-of-tree `locus-m4b-work/m4b-evidence/first-fail-preflight.log`,
+**67 passed / 3 failed**, exit 1):
+
+| control | pre-fix | post-fix |
+|---|---|---|
+| total_count=100, exactly one full page of 100 jobs, required jobs success | **FAIL** (insufficient-info instead of ready) | ready, exit 0; exactly one jobs page fetched |
+| total_count=200, exactly two full pages of 100 | **FAIL** (insufficient-info) | ready; pages 1 and 2 both genuinely fetched |
+| full pages, total_count=600 beyond the 5×100 budget | insufficient (budget named) — pin, passed pre-fix | unchanged: insufficient |
+| full pages, no usable total_count, budget exhausted | insufficient — pin, passed pre-fix | unchanged: insufficient |
+| complete 100-job list with `browser=failure` | **FAIL** (misjudgment refused to judge; insufficient-info instead of ci-failed) | ci-failed, verdict blocked, exit 1 |
+
+**Fix (one function, no policy change):** the truncation verdict now comes
+from a single completeness decision covering every exit path — complete =
+(trusted `total_count` fully fetched) OR (no usable total_count AND a short
+final page, i.e. the server itself ended the list). A full final page alone
+proves nothing: with no usable total_count the fetcher keeps paging and, at
+the budget, reports the incompleteness explicitly (reason now names the
+page budget); with a total_count still above the fetched count it stays
+"missing pages". Every incomplete shape remains
+`truncated -> unknown-evidence -> never ready`; API failure, missing pages,
+and budget exhaustion still cannot produce a ready. The two reason strings
+for the incomplete-total_count cases are byte-identical to before.
+
+**Verification (all real runs, post-fix):**
+
+| Gate | Result |
+|---|---|
+| `node tests/m4a-mainline-preflight.test.cjs` | **70 passed / 0 failed**, exit 0 (65 + 5 new) |
+| `node tests/core-main-candidate.test.mjs` | all 60 checks passed, exit 0 |
+| `node tests/core-main-candidate-workflow.test.mjs` | all 15 checks passed, exit 0 |
+| `npm run build` | exit 0 (built in 961 ms) |
+| `npm test` (`BROWSER_GATE_ORCH_REAL_PREVIEW=1`) | **all 31 suites passed**, exit 0 (real-preview orchestrator test included) |
+
+The push of this commit runs the PR's automatic CI; its outcome is reported
+as observed (no manual reruns). Live full-page runs do not exist on today's
+heads (all runs have far fewer than 100 jobs), so the fix's practical
+effect is proven by the suite, not by a live run — stated as such rather
+than implied.
