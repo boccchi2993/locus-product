@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main, 'refactor/**']
+  pull_request:
+
+jobs:
+  unit:
+    name: unit tests (Node, clean checkout)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      # github: git dependencies resolve through the lockfile — a clean
+      # checkout must install with nothing but the manifest + lockfile.
+      - run: npm ci
+      # the packaged-page gates scan the BUILT bundle; the documented local
+      # order is the same: npm ci && npm run build && npm test
+      - run: npm run build
+      # BROWSER_GATE_ORCH_REAL_PREVIEW=1 wires the orchestrator's REAL
+      # vite-preview lifecycle test (build → identity readiness → verified
+      # bounded cleanup) into CI explicitly — on Linux it also executes the
+      # POSIX-only owned-process-group cleanup tests for real (m3c review
+      # round 2, F1). Not left as local-only evidence.
+      - name: run the unit suites (incl. the real-preview orchestrator test)
+        run: npm test
+        env:
+          BROWSER_GATE_ORCH_REAL_PREVIEW: '1'
+
+  browser:
+    name: browser gates (packaged build, headless Chrome)
+    runs-on: ubuntu-latest
+    needs: [unit]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      # the gates drive the PACKAGED page through real headless Chrome:
+      # python gates boot the REAL verified Pyodide from the pinned CDN
+      # (a real-network step, recorded distinctly from every faked hop)
+      - name: run the browser gates
+        run: |
+          CHROME=$(which google-chrome || which chromium || true)
+          export CHROME
+          node tests/run-browser-gates.cjs

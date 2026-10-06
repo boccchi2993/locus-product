@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Locus — Browser Agent Runtime</title>
+</head>
+<body>
+<div id="app"></div>
+
+<!-- The ONE module entry (M3c): the whole graph — Runtime through
+     src/product/runtime-api.js, Harness through src/product/harness-api.js,
+     Product modules (telemetry, markdown, tools, …) through explicit
+     imports — is bundled by Vite from here. ZERO classic scripts are
+     loaded or copied anymore (M3c integration: telemetry.js and
+     ui/markdown.js are ES modules too; their consumers import them). -->
+<script type="module" src="/src/main.js"></script>
+</body>
+</html>

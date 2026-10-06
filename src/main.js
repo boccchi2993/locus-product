@@ -1,0 +1,272 @@
+// ============================================================
+//  Vue bootstrap + test/demo hooks.
+//
+//  The app mounts a Cowork-style agent workspace over the runtime's
+//  event stream. Query-param hooks exist ONLY for automated tests and
+//  visual QA screenshots:
+//
+//    ?e2e=1       expose window.__locus { store, actions, session, vfs },
+//                 honor window.__e2eReplies / __e2eToolExecutor fakes,
+//                 collect console errors into window.__e2eErrors
+//    ?e2e=1&wire=1 use the production model client (adapter/serializer/
+//                 headers) with a deterministic in-page transport queue
+//    ?demo=task   scripted fake model + tool, auto-mount an OPFS demo
+//                 folder and run one demo task (screenshot fixture)
+//    ?demo=plus   open the composer "+" menu after mount
+//
+//  Runtime code never sees these hooks; they plug in at the documented
+//  AgentSession dependency boundary (modelClient / toolExecutor) via
+//  window.__LOCUS_HOOKS__.
+// ============================================================
+
+import { createApp, nextTick } from 'vue';
+import App from './App.vue';
+import * as ui from './ui/store.js';
+// M3c: the harness declaration resolver comes through the PUBLIC transfer
+// layer (the same entry the Product compatibility check reads); the tool
+// executor is the Product tool module's explicit export.
+import { harnessCapabilities, registerPluginRuntimeProvider, ApprovalController, createProviderIdentity } from './product/harness-api.js';
+import { productTaskVfsMounts, SkillInstanceWorkspace } from './extensions.js';
+import { executeTool } from './tools.js';
+import { PersistenceServiceInstance } from './persistence.js';
+import './ui/theme.css';
+
+const params = new URLSearchParams(window.location.search);
+const e2eMode = params.get('e2e') === '1';
+const wireMode = e2eMode && params.get('wire') === '1';
+const demoMode = params.get('demo');
+
+function normalizeEnvelope(partial) {
+  const p = partial || {};
+  const content = typeof p.content === 'string' ? p.content : '';
+  return {
+    content: content,
+    reasoning: p.reasoning || null,
+    reasoningType: p.reasoningType || 'raw',
+    toolCalls: p.toolCalls || null,
+    rawMessage: p.rawMessage || { role: 'assistant', content: content },
+    stopReason: p.stopReason || 'end_turn',
+    usage: p.usage || null,
+    providerMetadata: p.providerMetadata || null,
+    truncated: !!p.truncated,
+  };
+}
+
+// ---------- e2e hooks ----------
+if (e2eMode) {
+  window.__e2eErrors = [];
+  window.addEventListener('error', (e) => window.__e2eErrors.push(String(e.message || e)));
+  window.addEventListener('unhandledrejection', (e) => window.__e2eErrors.push('unhandledrejection: ' + String(e.reason && e.reason.message || e.reason)));
+  window.__e2eReplies = [];
+  const hooks = {
+    toolExecutor: (tool, input, ws, opts) => {
+      // null → delegate to the REAL tool layer (telemetry, workspace authority)
+      if (typeof window.__e2eToolExecutor === 'function') return window.__e2eToolExecutor(tool, input, ws, opts);
+      return executeTool(tool, input, ws, opts);
+    },
+    pickDirectory: async () => {
+      const root = await navigator.storage.getDirectory();
+      return root.getDirectoryHandle('e2e-workspace', { create: true });
+    },
+  };
+  if (!wireMode) {
+    hooks.modelClient = (body, opts) => {
+      const q = window.__e2eReplies;
+      const next = q.length ? q.shift() : { content: 'e2e default answer' };
+      if (typeof next === 'function') return next(body, opts);
+      return Promise.resolve(normalizeEnvelope(next));
+    };
+  } else {
+    // Keep the transport fake below the real model boundary: the store's
+    // createModelClient still selects the adapter, builds provider-native
+    // JSON and auth headers; only the final network hop is deterministic
+    // for browser integration tests. M3c: the fake installs through the
+    // EXPLICIT Product transport port (the deleted legacy Model singleton
+    // no longer exists); the harness captures the transport per request.
+    window.__locusWire = { calls: [], responses: [] };
+    // M3c integration: the wire fake itself is exposed so e2e suites can
+    // WRAP it (capture/corrupt around the production fake) and reinstall
+    // through the same explicit transport port — the legacy page-global
+    // transport holder no longer exists.
+    const wireFake = async (url, init) => {
+      const wire = window.__locusWire;
+      const headers = {};
+      for (const [key, value] of Object.entries(init.headers || {})) headers[key] = value;
+      const body = JSON.parse(init.body || '{}');
+      wire.calls.push({ url, headers, body });
+      const response = wire.responses.length ? wire.responses.shift() : {
+        choices: [{ message: { role: 'assistant', content: 'wire default answer' }, finish_reason: 'stop' }],
+      };
+      return new Response(JSON.stringify(response), {
+        status: 200, headers: { 'content-type': 'application/json' },
+      });
+    };
+    window.__locusWire.fn = wireFake;
+    ui.setProductModelTransport(wireFake);
+  }
+  window.__LOCUS_HOOKS__ = hooks;
+  // Established e2e seam (e2e-grep / e2e-network / e2e-capabilities drive
+  // the real shell stack through it): the REAL production executor, same
+  // function the store's ToolPort closes over — an observation surface,
+  // never an assembly dependency.
+  window.executeTool = executeTool;
+}
+
+// ---------- demo hooks (screenshot fixtures; deterministic, offline) ----------
+if (demoMode) {
+  const DEMO_REPLIES = [
+    normalizeEnvelope({
+      content: '```json\n{"tool":"bash","input":"ls -la"}\n```',
+      reasoning: 'The user wants a summary of the Q3 sales data. First I should see what files are in the workspace — the CSV is probably there along with previous reports. Then I can load it with pandas, compute the aggregates and write a short report file.',
+    }),
+    normalizeEnvelope({
+      content: '```json\n{"tool":"bash","input":"python <<\'PY\'\\nimport pandas as pd\\ndf = pd.read_csv(\'q3-sales.csv\')\\nsummary = df.groupby(\'region\')[\'revenue\'].sum()\\nprint(summary.to_string())\\nsummary.to_csv(\'q3-report.csv\')\\nPY"}\n```',
+    }),
+    normalizeEnvelope({
+      content: 'Done. I read `q3-sales.csv`, aggregated revenue by region and saved the result to `q3-report.csv`.\n\n**Revenue by region**\n\n- North — 184,200\n- South — 96,450\n- East — 152,300\n- West — 121,880\n\nNorth leads this quarter, about 21% ahead of East. The full per-region table is in `q3-report.csv` in your workspace.',
+    }),
+  ];
+  let demoIdx = 0;
+  const demoToolOutputs = [
+    'total 4\n-rw-r--r--  q3-sales.csv      84,120 bytes\n-rw-r--r--  q2-report.csv      2,304 bytes\n-rw-r--r--  notes.txt            412 bytes',
+    'region\nEast     152300\nNorth    184200\nSouth     96450\nWest     121880\nName: revenue, dtype: int64',
+  ];
+  window.__LOCUS_HOOKS__ = {
+    modelClient: () => Promise.resolve(DEMO_REPLIES[Math.min(demoIdx++, DEMO_REPLIES.length - 1)]),
+    toolExecutor: (tool, input) => Promise.resolve({
+      output: demoToolOutputs.shift() || '',
+      success: true,
+      backend: 'browser',
+      operation: 'shell',
+    }),
+    pickDirectory: async () => {
+      const root = await navigator.storage.getDirectory();
+      return root.getDirectoryHandle('demo-workspace', { create: true });
+    },
+  };
+}
+
+// ---------- mount ----------
+const app = createApp(App);
+app.mount('#app');
+
+if (e2eMode || demoMode) {
+  window.__locus = { store: ui.store, actions: ui, session: ui.session, vfs: ui.vfs };
+}
+
+// Test-only approval seam: lets browser e2e drive the real ApprovalCard /
+// ApprovalController without a production consumer. It can trigger a
+// Harness-shaped permission request (canonical policyKey, plain-text
+// action) bound to the running task's AbortSignal when one exists.
+// Never exposed outside ?e2e=1 and never rendered as a UI button.
+if (e2eMode) {
+  // M1b seam: the canonical interpreter instance (never exposed outside
+  // ?e2e=1). Browser python e2e drives prepare/reset/worker-state through
+  // it — the SAME object task preparation and shell execution use.
+  window.__locus.pythonRuntime = () => ui.pythonRuntime();
+  // M3c integration seam: the canonical persistence singleton (plugin
+  // seeding / provider-frame interception in the persistence + wire e2e).
+  // Never exposed outside ?e2e=1; observation/seeding only.
+  window.__locus.persistence = () => PersistenceServiceInstance;
+  // M2a seam: the runtime session (prepare/reset/status/execute) — the
+  // public entry object the product chain drives.
+  window.__locus.runtime = () => ui.runtimeSession();
+  // M2c seam: the RETAINED runtime host — the public capabilities()
+  // declaration owner the Product compatibility check reads. Browser e2e
+  // drives REAL incompatible-declaration negatives through it.
+  window.__locus.runtimeHost = () => ui.runtimeHost();
+  // M2c review round 2 seam: the REAL harness declaration exactly as the
+  // compatibility check resolves it. Browser gates host a variant of THIS
+  // object through window.__LOCUS_HOOKS__.harnessCapabilities (the narrow
+  // declaration seam the store reads per task; never a skip mode).
+  window.__locus.harnessCapabilities = () => harnessCapabilities();
+  // M2a seam: the runtime worker assets this build carries (worker-source
+  // instrumentation in e2e; never part of the product chain).
+  window.__locus.runtimeAssets = () => ui.runtimeWorkerAssets();
+  window.__locus.approvals = {
+    // Harness-shaped request passthrough for fake tool executors (the exact
+    // shape a real consumer will use).
+    request: (spec, opts) => ui.approvals.request(spec, opts),
+    // Direct controller access for e2e-only assertions on the CANONICAL
+    // pending state (e.g. when the injected observer failure breaks the
+    // store projection, the controller must still own a resolvable
+    // request). Never exposed outside ?e2e=1.
+    controller: ui.approvals,
+    // Prebuilt synthetic permission request for card-level tests.
+    requestTestPermission(spec) {
+      const s = spec && typeof spec === 'object' ? spec : {};
+      const signal = ui.session.task ? ui.session.task.controller.signal : undefined;
+      return ui.approvals.request({
+        kind: 'permission',
+        action: {
+          type: 'test',
+          summary: typeof s.summary === 'string' ? s.summary : 'Run the e2e approval probe',
+          detail: typeof s.detail === 'string' ? s.detail : null,
+        },
+        resource: s.resource || null,
+        policyKey: typeof s.policyKey === 'string' ? s.policyKey : 'e2e:permission:default',
+        conversationId: ui.store.liveConversationId,
+        taskGeneration: ui.session.generation,
+      }, { signal });
+    },
+  };
+  // Image Feedback v1 seams (never exposed outside ?e2e=1): registry
+  // preseed/inspection and attachment-store introspection for durable
+  // bytes and no-base64-persisted assertions.
+  window.__locus.capabilities = {
+    registry: () => ui.getCapabilityRegistry(),
+    // M3c integration: identity construction is a harness entry export
+    // (the classic page global is gone); the image e2e seeds registry
+    // decisions with it. TEST-ONLY.
+    createProviderIdentity: (config) => createProviderIdentity(config),
+    status: () => ui.refreshImageCapability(),
+    forget: () => ui.recheckImageCapability(),
+  };
+  window.__locus.attachments = {
+    store: () => ui.getAttachmentStore(),
+  };
+  // Capability Composition v1 seam (never exposed outside ?e2e=1):
+  // TEST-ONLY synthetic catalog + source injection and manager driving.
+  // The production catalog is empty; nothing here exists in a normal run.
+  window.__locus.capabilityComposition = {
+    manager: () => ui.capabilityManager,
+    // M3c integration: the composition-core page globals are gone — the
+    // adapters/classes the browser e2e drives come from their owning
+    // modules (harness entry / Product extensions adapter). TEST-ONLY.
+    registerPluginRuntimeProvider: (runtime, provider) => registerPluginRuntimeProvider(runtime, provider),
+    productTaskVfsMounts: (manager, env) => productTaskVfsMounts(manager, env),
+    ApprovalController,
+    SkillInstanceWorkspace,
+    list: () => ui.capabilityList(),
+    injectTestCatalog: (catalogs, sources) => ui.injectCapabilityCatalogs(catalogs, sources),
+    enable: (id) => ui.enableCapability(id),
+    disable: (id) => ui.disableCapability(id),
+    connectMcp: (id) => ui.setMcpConnectionState(id, 'connected'),
+    setMcpState: (id, state) => ui.setMcpConnectionState(id, state),
+    taskEnvironment: () => ui.capabilityManager ? ui.capabilityManager.buildTaskEnvironment() : null,
+  };
+}
+
+// Python interpreter status is owned by the runtime session (M2a): the
+// status EVENT stream replaces the old 1-second poll — the store
+// projection updates on every transition, with the current snapshot
+// delivered synchronously at subscribe time. The public entry assembles
+// asynchronously (review round), so the subscription attaches once the
+// one-time session resolution settles (a microtask on a registry page).
+{
+  ui.whenRuntimeSession().then((rt) => {
+    if (rt && typeof rt.onStatus === 'function') {
+      rt.onStatus((snap) => { ui.store.pythonStatus = snap.interpreter; });
+    }
+  });
+}
+
+// ---------- demo automation ----------
+if (demoMode === 'task') {
+  nextTick(async () => {
+    await ui.mountFolder();
+    await ui.submit('Summarize the Q3 sales data and save a report');
+  });
+} else if (demoMode === 'plus') {
+  nextTick(() => { ui.store.plusMenuOpen = true; });
+}
