@@ -73,7 +73,7 @@ user image
   -> materialize provider-native image input only at request time
 ```
 
-The image capability registry in `src/capabilities.js` answers a provider/model compatibility question. It is distinct from the **user-facing Capability composition registry** in `src/extensions.js`. The shared word “capability” describes two different layers; do not conflate them.
+The image capability registry in the locus-harness core (`src/capabilities.js`) answers a provider/model compatibility question. It is distinct from the **user-facing Capability composition registry** in the Product-owned `src/extensions.js`. The shared word “capability” describes two different layers; do not conflate them.
 
 See `IMAGE-INPUT.md`.
 

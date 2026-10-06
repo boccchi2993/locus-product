@@ -28,7 +28,7 @@ AttachmentStore (src/attachments.js)
     ↓ durable content-addressed blob (OPFS) + metadata (IndexedDB)
 semantic user turn: [{ type: 'text' }, { type: 'image', attachmentId, … }]
     ↓ about to build the next model request
-ImageInputGate (src/capabilities.js) → supported | unsupported | unknown
+ImageInputGate (locus-harness src/capabilities.js) → supported | unsupported | unknown
     ↓ supported
 AttachmentResolver → temporary { type:'image', mimeType, dataBase64 }
     ↓
@@ -118,7 +118,7 @@ A user turn with images is ONE turn:
   "Read-path integrity"), the task instead fails closed with zero
   provider requests; the UI error names the verification reason.
 
-## Provider serialization (src/model-adapters.js)
+## Provider serialization (locus-harness src/model-adapters.js)
 
 - OpenAI-compatible: `{ type: 'image_url', image_url: { url:
   'data:image/png;base64,…' } }` content parts (Chat Completions).
@@ -131,7 +131,7 @@ A user turn with images is ONE turn:
 - ProviderAdapters never see OPFS, attachments, hashing, capability
   decisions or approvals — only resolved parts in, wire shape out.
 
-## Capability registry (src/capabilities.js)
+## Capability registry (locus-harness src/capabilities.js)
 
 Two DIFFERENT concepts, never merged (docs/APPROVALS.md):
 

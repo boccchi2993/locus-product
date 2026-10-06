@@ -67,7 +67,8 @@ The model layer evolved from:
 callModelText() -> string
 ```
 
-to a structured response envelope (implemented in `src/model-adapters.js`):
+to a structured response envelope (implemented in the locus-harness core's
+`src/model-adapters.js`):
 
 ```js
 {
@@ -179,7 +180,7 @@ The UI must never become responsible for reconstructing provider conversation st
 
 ## 5. Replay policy lives in the provider adapter
 
-Implemented: each provider adapter (`src/model-adapters.js`) determines how assistant state is replayed.
+Implemented: each provider adapter (locus-harness `src/model-adapters.js`) determines how assistant state is replayed.
 
 Current policies:
 
@@ -351,7 +352,7 @@ The harness should avoid silently deleting model state merely because the curren
 Implemented (P2, `refactor/provider-adapter`):
 
 ```
-ProviderAdapter (src/model-adapters.js)
+ProviderAdapter (locus-harness src/model-adapters.js)
   |
   +-- request serialization     (serializeRequest / prepareHistory)
   +-- response parsing          (parseResponse → envelope, incl. toolCalls)
@@ -361,14 +362,14 @@ ProviderAdapter (src/model-adapters.js)
   |                              neutral tool_result → provider wire shape)
   +-- downgrade classification  (isToolingUnsupportedError)
   |
-ModelClient (src/model.js)
+ModelClient (locus-harness src/model.js)
   |
   +-- adapter selection (getProviderAdapter: auto/openai/anthropic)
   +-- transport: direct fetch, /proxy relay fallback
   +-- deadlines, size caps, error taxonomy, endpoint fallback
   +-- one-time tools downgrade on explicit request-validation rejection
   |
-AgentSession (src/agent.js)
+AgentSession (locus-harness src/agent.js)
   |
   +-- provider-neutral runtime events
   +-- native-first tool dispatch (strict fenced-JSON text fallback second)

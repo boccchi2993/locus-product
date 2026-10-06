@@ -237,7 +237,7 @@ enforcement token, NOT an authorization identity, and NOT a replacement
 for the AbortSignal. Runtime liveness enforcement relies on
 `requestId` + `AbortSignal` + the caller-side final liveness recheck above.
 
-## API (`src/approval.js`, framework/DOM/provider independent)
+## API (locus-harness `src/approval.js`, framework/DOM/provider independent)
 
 ```js
 const approvals = new ApprovalController({ onChange, onEvent });
