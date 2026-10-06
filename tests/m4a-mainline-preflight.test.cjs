@@ -129,6 +129,7 @@ function compare(status, aheadBy = 0, behindBy = 0, extra = {}) {
 function baseRoutes(over) {
   const o = Object.assign({
     state: 'open', merged: false, headSha: ACCEPTED, mergeable: true,
+    mergeableState: undefined,
     acceptedVsMain: 'behind', // main does NOT contain accepted
     leg1: 'ahead', leg2: 'ahead',
     runs: [{ id: 100, event: 'push' }, { id: 101, event: 'pull_request' }],
@@ -143,7 +144,7 @@ function baseRoutes(over) {
   R.set(`/repos/${repo}/branches/main/protection`, o.protection);
   R.set(`/repos/${repo}/pulls/1`, pull({
     state: o.state, merged: o.merged, headSha: o.headSha, mergeable: o.mergeable,
-    draft: o.draft, baseRef: o.baseRef,
+    mergeableState: o.mergeableState, draft: o.draft, baseRef: o.baseRef,
   }));
   // The script compares against the target branch's COMMIT SHA, not the word.
   R.set(new RegExp(`/repos/${repo}/compare/${ACCEPTED}\\.\\.\\.${MAIN}$`),
@@ -392,10 +393,13 @@ check('protection 404 with unreadable branch stays unknown', () => {
   assert.strictEqual(prot.state, 'unknown');
 });
 
+// R2 note: this scenario is now checks-ONLY. Round C's version also carried
+// required_pull_request_reviews={count:1}; R2-F1 makes a reviews requirement
+// unprovable (-> insufficient), so the checks-satisfied/unsatisfied/pending
+// paths are pinned separately from the reviews path (see R2-F1 below).
 check('protected + unsatisfied required checks -> blocked, satisfied -> ready', () => {
   const protectedRes = ok({
     required_status_checks: { strict: true, contexts: ['CI / unit'] },
-    required_pull_request_reviews: { required_approving_review_count: 1 },
   });
   const headSha = ACCEPTED;
   const checkRunsOk = ok({ total_count: 1, check_runs: [{ name: 'CI / unit', status: 'completed', conclusion: 'success' }] });
@@ -670,27 +674,315 @@ check('gh adapter argv is exactly ["api", path] — GET by construction', () => 
   }
 });
 
-check('every requested endpoint is in the read allowlist', () => {
-  const { repo, routes } = baseRoutes({ merged: true, protection: FORBIDDEN });
-  const recorder = fakeApi(routes);
-  buildReport(configFor(repo), recorder, null);
+check('every requested endpoint is in the read allowlist (merged + open, paged runs/jobs)', () => {
   const allow = new RegExp('^/repos/[^/]+/[^/]+(/('
     + 'pulls/\\d+'
     + '|branches/[^/]+(/protection)?'
     + '|compare/[0-9a-f]{40}\\.\\.\\.(main|[0-9a-f]{40})'
-    + '|actions/runs\\?head_sha=[0-9a-f]{40}(&per_page=\\d+)?'
-    + '|actions/runs/\\d+/jobs(\\?per_page=\\d+)?'
+    + '|actions/runs\\?head_sha=[0-9a-f]{40}(&per_page=\\d+)(&page=\\d+)?'
+    + '|actions/runs/\\d+/jobs(\\?per_page=\\d+)(&page=\\d+)?'
     + '|commits/[0-9a-f]{40}/check-runs(\\?per_page=\\d+)?'
     + '|commits/[0-9a-f]{40}/status'
     + '))?$');
-  assert.ok(recorder.calls.length >= 6, `expected several reads, got ${recorder.calls.length}`);
-  for (const p of recorder.calls) {
-    assert.match(p, allow, `non-read endpoint requested: ${p}`);
+  // merged scenario (no evidence fetches) and open scenario (paged runs/jobs)
+  for (const scenario of [{ merged: true, protection: FORBIDDEN }, {}]) {
+    const { repo, routes } = baseRoutes(scenario);
+    const recorder = fakeApi(routes);
+    buildReport(configFor(repo), recorder, null);
+    assert.ok(recorder.calls.length >= 6, `expected several reads, got ${recorder.calls.length}`);
+    for (const p of recorder.calls) {
+      assert.match(p, allow, `non-read endpoint requested: ${p}`);
+    }
+    for (const p of recorder.calls) {
+      assert.ok(!/method=|-X|merge|issues\/\d+\/comments|git\/refs/.test(p),
+        `mutation-shaped endpoint requested: ${p}`);
+    }
   }
-  for (const p of recorder.calls) {
-    assert.ok(!/method=|-X|merge|issues\/\d+\/comments|git\/refs/.test(p),
-      `mutation-shaped endpoint requested: ${p}`);
+});
+
+// ---------------------------------------------------------------------------
+// R2 (review round 2, 2026-10-06): the four unearned-ready defects.
+//   R2-F1  mergeable=true must not override mergeable_state="blocked";
+//          a required-reviews rule cannot be proven satisfied;
+//          unexplained mergeable_state is never ready.
+//   R2-F2  an unresolved necessary-evidence unknown (accepted->main compare
+//          unreadable) must forbid every success verdict.
+//   R2-F3  required jobs succeed only on explicit conclusion === 'success'.
+//   R2-F4  the full run inventory replaces the latest-4 window; incomplete
+//          inventory is insufficient unless an explicit failure was seen.
+// Every negative here was reproduced against the PRE-FIX implementation
+// (buildReport on the real chain, fake API only); the first-failure record
+// lives in docs/M4A-REVIEW-R2.md.
+// ---------------------------------------------------------------------------
+const R2_JOB_ERROR = { status: 500, body: null, error: 'fake: jobs boom' };
+
+function r2RunRow(id, over) {
+  const o = Object.assign({ conclusion: 'success', status: 'completed', runAttempt: 1 }, over);
+  return {
+    id, name: 'CI', event: 'pull_request', status: o.status, conclusion: o.conclusion,
+    run_attempt: o.runAttempt, head_sha: ACCEPTED,
+    created_at: o.createdAt
+      || `2026-10-05T00:${String(id % 60).padStart(2, '0')}:${String(id % 60).padStart(2, '0')}Z`,
+    html_url: `https://github.com/x/actions/runs/${id}`,
+  };
+}
+
+// A runs route with server-side pagination; pages[0] is page 1. Requests
+// WITHOUT a page param (the pre-R2 fetch shape) are answered with page 1.
+function r2PagedRunsRoute(pages, totalCount) {
+  return function (path) {
+    const m = /[?&]page=(\d+)/.exec(path);
+    const rows = pages[(m ? Number(m[1]) : 1) - 1];
+    if (!rows) return { status: 500, body: null, error: 'fake: no such runs page' };
+    return ok({ total_count: totalCount, workflow_runs: rows });
+  };
+}
+
+function r2SetPagedJobs(routes, runId, pages, totalCount) {
+  routes.set(new RegExp(`/actions/runs/${runId}/jobs`), function (path) {
+    const m = /[?&]page=(\d+)/.exec(path);
+    const rows = pages[(m ? Number(m[1]) : 1) - 1];
+    if (!rows) return { status: 500, body: null, error: 'fake: no such jobs page' };
+    return ok({ total_count: totalCount, jobs: rows });
+  });
+}
+
+// --- R2-F1: merge state + required reviews ----------------------------------
+check('R2-F1: mergeable=true + mergeable_state=blocked is NOT ready even with all CI green', () => {
+  const { repo, routes } = baseRoutes({ mergeableState: 'blocked' });
+  const report = buildReport(configFor(repo), fakeApi(routes), null);
+  const c = report.candidates[0];
+  assert.strictEqual(c.status, 'merge-blocked');
+  assert.strictEqual(c.family, 'blocked');
+  assert.strictEqual(report.summary.verdict, 'blocked');
+  assert.strictEqual(report.summary.exitCode, 1);
+  assert.strictEqual(exitCodeFor(report), 1);
+  assert.ok(c.reasons[0].includes('blocked'));
+});
+
+check('R2-F1: required approving reviews cannot be proven satisfied -> insufficient-info', () => {
+  const reviewsRes = ok({
+    required_status_checks: { strict: true, contexts: ['CI / unit'] },
+    required_pull_request_reviews: { required_approving_review_count: 1 },
+  });
+  const crOk = ok({ total_count: 1, check_runs: [{ name: 'CI / unit', status: 'completed', conclusion: 'success' }] });
+  const stOk = ok({ state: 'success', total_count: 1, statuses: [{ context: 'CI / unit', state: 'success' }] });
+  // unit level: even fully green required checks leave the reviews rule unproven
+  const evald = evaluateProtectionRequirements(summarizeProtection(branchMain(true), reviewsRes), crOk, stOk);
+  assert.strictEqual(evald.state, 'unknown');
+  assert.ok(evald.detail.includes('1 approving review'));
+  // end to end: green checks + green CI + reviews rule still refuses ready
+  const { repo, routes } = baseRoutes({ protection: reviewsRes, branchProtected: true });
+  routes.set(`/repos/${repo}/commits/${ACCEPTED}/check-runs?per_page=100`, crOk);
+  routes.set(`/repos/${repo}/commits/${ACCEPTED}/status`, stOk);
+  const report = buildReport(configFor(repo), fakeApi(routes), null);
+  assert.strictEqual(classifyOf(report), STATUS.INSUFFICIENT);
+  assert.ok(unknownsOf(report).some((u) => u.includes('approving review')));
+  assert.strictEqual(report.summary.exitCode, 2);
+});
+
+check('R2-F1: protected with required CHECKS only — satisfied checks still allow ready (no over-blocking)', () => {
+  const checksOnly = ok({ required_status_checks: { strict: true, contexts: ['CI / unit'] } });
+  const crOk = ok({ total_count: 1, check_runs: [{ name: 'CI / unit', status: 'completed', conclusion: 'success' }] });
+  const stOk = ok({ state: 'success', total_count: 1, statuses: [{ context: 'CI / unit', state: 'success' }] });
+  assert.strictEqual(
+    evaluateProtectionRequirements(summarizeProtection(branchMain(true), checksOnly), crOk, stOk).state,
+    'satisfied');
+  const { repo, routes } = baseRoutes({ protection: checksOnly, branchProtected: true });
+  routes.set(`/repos/${repo}/commits/${ACCEPTED}/check-runs?per_page=100`, crOk);
+  routes.set(`/repos/${repo}/commits/${ACCEPTED}/status`, stOk);
+  const report = buildReport(configFor(repo), fakeApi(routes), null);
+  assert.strictEqual(classifyOf(report), STATUS.READY);
+  assert.strictEqual(report.summary.exitCode, 0);
+});
+
+check('R2-F1: unexplained mergeable_state (has_hooks / unknown) is never ready', () => {
+  for (const st of ['has_hooks', 'unknown']) {
+    const { repo, routes } = baseRoutes({ mergeableState: st });
+    const report = buildReport(configFor(repo), fakeApi(routes), null);
+    assert.strictEqual(classifyOf(report), STATUS.INSUFFICIENT, `mergeable_state=${st}`);
+    assert.strictEqual(report.summary.exitCode, 2, `mergeable_state=${st}`);
   }
+});
+
+// --- R2-F2: necessary unknowns forbid success -------------------------------
+check('R2-F2: accepted->main compare unreadable (403/404/transport) -> insufficient, never ready', () => {
+  const cases = [
+    ['403', FORBIDDEN],
+    ['404', { status: 404, body: null, error: 'gh: Not Found (HTTP 404)' }],
+    ['transport', { status: 0, body: null, error: 'curl 56 Recv failure' }],
+  ];
+  for (const [label, res] of cases) {
+    const { repo, routes } = baseRoutes({});
+    routes.set(new RegExp(`/repos/${repo}/compare/${ACCEPTED}\\.\\.\\.${MAIN}$`), res);
+    const report = buildReport(configFor(repo), fakeApi(routes), null);
+    const c = report.candidates[0];
+    assert.strictEqual(c.status, STATUS.INSUFFICIENT, `compare ${label}`);
+    assert.ok(c.unknowns.some((u) => u.includes('containment unreadable')), label);
+    assert.strictEqual(report.summary.verdict, 'insufficient-info', label);
+    assert.strictEqual(report.summary.exitCode, 2, label);
+    assert.strictEqual(exitCodeFor(report), 2, label);
+    const text = renderText(report);
+    assert.ok(text.includes('verdict: insufficient-info (exit 2)'), label);
+    assert.ok(!/READY/.test(text), `text must not claim READY (${label})`);
+  }
+});
+
+check('R2-F2 positive: two-leg landed proof stands even when accepted->main compare is unreadable', () => {
+  const { repo, routes } = baseRoutes({ merged: true });
+  routes.set(new RegExp(`/repos/${repo}/compare/${ACCEPTED}\\.\\.\\.${MAIN}$`), FORBIDDEN);
+  const report = buildReport(configFor(repo), fakeApi(routes), null);
+  assert.strictEqual(classifyOf(report), STATUS.LANDED_TRACEABLE);
+  assert.strictEqual(report.summary.exitCode, 0);
+});
+
+// --- R2-F3: required jobs succeed only on explicit success -------------------
+const R2_JOB_CONCLUSIONS = [
+  ['success', STATUS.READY, 'ready', 0],
+  ['failure', STATUS.CI_FAILED, 'blocked', 1],
+  ['timed_out', STATUS.CI_FAILED, 'blocked', 1],
+  ['cancelled', STATUS.CI_FAILED, 'blocked', 1],
+  ['action_required', STATUS.CI_FAILED, 'blocked', 1],
+  ['skipped', STATUS.INSUFFICIENT, 'insufficient-info', 2],
+  ['neutral', STATUS.INSUFFICIENT, 'insufficient-info', 2],
+  [null, STATUS.INSUFFICIENT, 'insufficient-info', 2],
+  [undefined, STATUS.INSUFFICIENT, 'insufficient-info', 2],
+  ['stale', STATUS.INSUFFICIENT, 'insufficient-info', 2],
+  ['startup_failure', STATUS.INSUFFICIENT, 'insufficient-info', 2],
+];
+for (const [conc, wantStatus, wantVerdict, wantExit] of R2_JOB_CONCLUSIONS) {
+  check(`R2-F3: required job conclusion ${conc === undefined ? 'undefined' : JSON.stringify(conc)} -> ${wantStatus}`, () => {
+    const { repo, routes } = baseRoutes({
+      runs: [{ id: 7, event: 'push' }],
+      jobsByRun: { 7: [{ name: 'unit', conclusion: 'success' }, { name: 'browser', conclusion: conc }] },
+    });
+    const report = buildReport(configFor(repo), fakeApi(routes), null);
+    const c = report.candidates[0];
+    assert.strictEqual(c.status, wantStatus, `conclusion ${String(conc)}`);
+    assert.strictEqual(report.summary.verdict, wantVerdict, `conclusion ${String(conc)}`);
+    assert.strictEqual(report.summary.exitCode, wantExit, `conclusion ${String(conc)}`);
+    if (conc !== 'success') {
+      assert.ok(!/READY/.test(renderText(report)), `text must not claim READY (${String(conc)})`);
+    }
+    if (conc === 'stale') {
+      // raw value, run id and job name must all be visible in the report
+      assert.ok(c.evidence.detail.includes('stale'), c.evidence.detail);
+      assert.ok(JSON.stringify(c.evidence).includes('"runId":7'));
+      assert.ok(c.evidence.detail.includes('browser'));
+    }
+  });
+}
+
+check('R2-F3 unit table: evaluateRequiredEvidence states per conclusion', () => {
+  const want = [
+    ['success', 'satisfied'],
+    ['failure', 'failed'], ['timed_out', 'failed'], ['cancelled', 'failed'],
+    ['action_required', 'failed'],
+    ['skipped', 'not-executed'], ['neutral', 'not-executed'],
+    [null, 'unknown-evidence'], [undefined, 'unknown-evidence'],
+    ['stale', 'unknown-evidence'], ['startup_failure', 'unknown-evidence'],
+  ];
+  for (const [conc, expected] of want) {
+    const jobs = new Map([[7, {
+      ok: true, error: null, truncated: false,
+      jobs: [{ name: 'unit', conclusion: 'success' }, { name: 'browser', conclusion: conc }],
+    }]]);
+    const runs = [{ id: 7, name: 'CI', status: 'completed', conclusion: 'success', createdAt: 't' }];
+    const res = evaluateRequiredEvidence(EVIDENCE_SPEC, runs, jobs);
+    assert.strictEqual(res.state, expected, `conclusion ${String(conc)}`);
+  }
+});
+
+// --- R2-F4: the full run inventory, no latest-N window ----------------------
+check('R2-F4: five runs, oldest failed, newer four green -> failure not forgotten (blocked)', () => {
+  const runs = [1, 2, 3, 4, 5].map((id) => r2RunRow(id));
+  const jobsByRun = { 1: [{ name: 'unit', conclusion: 'success' }, { name: 'browser', conclusion: 'failure' }] };
+  const { repo, routes } = baseRoutes({ runs, jobsByRun });
+  const report = buildReport(configFor(repo), fakeApi(routes), null);
+  const c = report.candidates[0];
+  assert.strictEqual(c.status, STATUS.CI_FAILED);
+  assert.strictEqual(report.summary.verdict, 'blocked');
+  assert.strictEqual(report.summary.exitCode, 1);
+  assert.ok(c.reasons[0].includes('browser=failure'));
+  const evaluated = c.evidence.perRun.map((p) => p.runId);
+  assert.ok(evaluated.includes(1), 'the failed run must be among the evaluated runs');
+  assert.strictEqual(evaluated.length, 5, 'every run of the required workflow was evaluated');
+});
+
+check('R2-F4 positive: five runs all green with a complete inventory -> ready', () => {
+  const runs = [1, 2, 3, 4, 5].map((id) => r2RunRow(id));
+  const { repo, routes } = baseRoutes({ runs });
+  const report = buildReport(configFor(repo), fakeApi(routes), null);
+  const c = report.candidates[0];
+  assert.strictEqual(c.status, STATUS.READY);
+  assert.deepStrictEqual([...c.evidence.evaluatedRunIds].sort((a, b) => a - b), [1, 2, 3, 4, 5]);
+  assert.strictEqual(c.evidence.runs.inventory.complete, true);
+});
+
+check('R2-F4: failure on page 2 of a multi-page run list is not dropped', () => {
+  const page1 = Array.from({ length: 100 }, (_, i) => r2RunRow(200 + i)); // 100 green (newer)
+  const page2 = [r2RunRow(10, { createdAt: '2026-09-01T00:00:00Z' })]; // oldest run failed
+  const jobsByRun = { 10: [{ name: 'unit', conclusion: 'success' }, { name: 'browser', conclusion: 'failure' }] };
+  const { repo, routes } = baseRoutes({ jobsByRun });
+  routes.set(new RegExp('/actions/runs\\?head_sha='), r2PagedRunsRoute([page1, page2], 101));
+  const report = buildReport(configFor(repo), fakeApi(routes), null);
+  assert.strictEqual(classifyOf(report), STATUS.CI_FAILED);
+  assert.ok(report.candidates[0].reasons[0].includes('browser=failure'));
+  assert.strictEqual(report.summary.verdict, 'blocked');
+});
+
+check('R2-F4: pagination failure -> not ready, the failed page is named', () => {
+  const page1 = Array.from({ length: 100 }, (_, i) => r2RunRow(300 + i));
+  const { repo, routes } = baseRoutes({});
+  routes.set(new RegExp('/actions/runs\\?head_sha='), function (path) {
+    if (/[?&]page=2/.test(path)) return { status: 0, body: null, error: 'curl 56 Recv failure' };
+    return ok({ total_count: 101, workflow_runs: page1 });
+  });
+  const report = buildReport(configFor(repo), fakeApi(routes), null);
+  assert.strictEqual(classifyOf(report), STATUS.INSUFFICIENT);
+  const blob = JSON.stringify(report.candidates[0].evidence);
+  assert.ok(blob.includes('page 2'), blob);
+});
+
+check('R2-F4: run-list budget exhausted -> insufficient with the budget named', () => {
+  const pages = Array.from({ length: 5 }, (_, p) => Array.from({ length: 100 }, (_, i) => r2RunRow(1000 + p * 100 + i)));
+  const { repo, routes } = baseRoutes({});
+  routes.set(new RegExp('/actions/runs\\?head_sha='), r2PagedRunsRoute(pages, 1000));
+  const report = buildReport(configFor(repo), fakeApi(routes), null);
+  assert.strictEqual(classifyOf(report), STATUS.INSUFFICIENT);
+  const blob = JSON.stringify(report.candidates[0].evidence);
+  assert.ok(blob.includes('budget'), blob);
+});
+
+check('R2-F4: explicit failure + incomplete inventory -> blocked (failure wins), never ready/insufficient', () => {
+  const pages = Array.from({ length: 5 }, (_, p) => Array.from({ length: 100 }, (_, i) => r2RunRow(2000 + p * 100 + i)));
+  pages[1][7] = r2RunRow(2107, { conclusion: 'failure' });
+  const jobsByRun = { 2107: [{ name: 'unit', conclusion: 'success' }, { name: 'browser', conclusion: 'failure' }] };
+  const { repo, routes } = baseRoutes({ jobsByRun });
+  routes.set(new RegExp('/actions/runs\\?head_sha='), r2PagedRunsRoute(pages, 700));
+  const report = buildReport(configFor(repo), fakeApi(routes), null);
+  assert.strictEqual(classifyOf(report), STATUS.CI_FAILED);
+  assert.strictEqual(report.summary.verdict, 'blocked');
+  assert.ok(report.candidates[0].reasons[0].includes('browser=failure'));
+  const blob = JSON.stringify(report.candidates[0].evidence);
+  assert.ok(blob.includes('incomplete'), 'the incomplete inventory must stay visible');
+});
+
+check('R2-F4: a required run whose jobs are unreadable among green siblings -> not ready', () => {
+  const runs = [1, 2, 3, 4, 5, 6].map((id) => r2RunRow(id));
+  const { repo, routes } = baseRoutes({ runs });
+  routes.set(new RegExp('/actions/runs/1/jobs'), function () { return R2_JOB_ERROR; });
+  const report = buildReport(configFor(repo), fakeApi(routes), null);
+  assert.strictEqual(classifyOf(report), STATUS.INSUFFICIENT);
+  assert.ok(JSON.stringify(report.candidates[0].evidence).includes('run 1'));
+});
+
+check('R2-F4 positive: jobs pagination — required job on page 2 is still judged', () => {
+  const { repo, routes } = baseRoutes({ runs: [r2RunRow(9)] });
+  const aux = Array.from({ length: 100 }, (_, i) => ({ name: `aux ${i}`, conclusion: 'success' }));
+  r2SetPagedJobs(routes, 9, [aux, ALL_JOBS_OK], 102);
+  const report = buildReport(configFor(repo), fakeApi(routes), null);
+  assert.strictEqual(classifyOf(report), STATUS.READY);
 });
 
 // ---------------------------------------------------------------------------

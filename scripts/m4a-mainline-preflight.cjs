@@ -17,11 +17,17 @@
 //                      current main.
 //   ci-pending         evidence runs still executing (never treated as pass).
 //   blocked            explicit non-landable: head drift, base mismatch,
-//                      conflict, closed-unmerged, draft, ci-failed,
-//                      merged-untraceable (merge not in current main).
+//                      conflict, GitHub-reported merge blocked
+//                      (mergeable_state="blocked"), closed-unmerged, draft,
+//                      ci-failed, merged-untraceable (merge not in current
+//                      main).
 //   insufficient-info  anything required but unreadable/missing/unexplainable:
-//                      no CI runs, unknown mergeable, unreadable protection,
-//                      truncated lists, workflow shape != config.
+//                      no CI runs, unknown mergeable, unexplained
+//                      mergeable_state, unreadable protection, a required-
+//                      approving-reviews rule (current approvals are not
+//                      provable from historical review lists), truncated
+//                      lists, incomplete run inventories, workflow shape
+//                      != config.
 //
 // summary.verdict, the text render, and the process exit code are ALL derived
 // from one aggregation of the same statuses (aggregateVerdict):
@@ -30,6 +36,26 @@
 //   else all landed -> 'landed' (0); all ready -> 'ready' (0);
 //   else ready+landed mix -> 'continue' (0).
 //   Invalid/empty config is rejected outright (ConfigError, CLI exit 3).
+//
+// REVIEW-R2 CONTRACT (second review round):
+//   - mergeable=true only means "no textual merge conflict". The merge
+//     verdict comes from mergeable_state: 'blocked' is a blocked status;
+//     only 'clean' and 'unstable' may proceed (unstable is still gated by
+//     the explicit protection + evidence checks below); any unexplained
+//     state is insufficient. A required-approving-reviews protection rule
+//     cannot be proven satisfied by this audit (historical review lists do
+//     not prove current effective approvals; CI green is not approval
+//     green) -> the requirement is unknown -> refuses ready.
+//   - No success verdict may carry an unresolved necessary-evidence unknown
+//     (e.g. accepted->current-main containment unreadable -> insufficient).
+//   - Required CI jobs succeed only on the explicit conclusion 'success';
+//     skipped/neutral stay not-executed; stale/missing/other values are
+//     unknown-evidence naming the raw value, run id, and job name.
+//   - The required workflow's runs are paged to completion within explicit
+//     budgets; no latest-N window survives anywhere. An incomplete run or
+//     job inventory is insufficient unless an explicit failure was already
+//     observed (then blocked, failure reported); the report names the
+//     evaluated run ids and the missing/budget reason.
 //
 // READ-ONLY CONTRACT: every network call is a GET issued through the `gh` CLI
 // with argv exactly ['api', <path>]. The script never merges, comments,
@@ -126,6 +152,7 @@ const STATUS = {
   CONFLICT: 'conflict',
   CLOSED_UNMERGED: 'closed-unmerged',
   DRAFT: 'draft',
+  MERGE_BLOCKED: 'merge-blocked',
   MERGED_UNTRACEABLE: 'merged-untraceable',
   INSUFFICIENT: 'insufficient-info',
 };
@@ -136,8 +163,8 @@ const FAMILIES = {
   pending: new Set([STATUS.CI_PENDING]),
   blocked: new Set([
     STATUS.CI_FAILED, STATUS.HEAD_DRIFTED, STATUS.BASE_MISMATCH,
-    STATUS.CONFLICT, STATUS.CLOSED_UNMERGED, STATUS.DRAFT,
-    STATUS.MERGED_UNTRACEABLE,
+    STATUS.CONFLICT, STATUS.MERGE_BLOCKED, STATUS.CLOSED_UNMERGED,
+    STATUS.DRAFT, STATUS.MERGED_UNTRACEABLE,
   ]),
   unknown: new Set([STATUS.INSUFFICIENT]),
 };
@@ -146,8 +173,24 @@ const EXPLICIT_FAILURES = ['failure', 'timed_out', 'cancelled', 'action_required
 const NOT_EXECUTED = ['skipped', 'neutral'];
 const PENDING_STATES = ['expected', 'pending', 'in_progress', 'queued'];
 
+// R2-F1: mergeable_state values that may proceed to the remaining explicit
+// gates. 'clean' = GitHub sees nothing blocking or pending. 'unstable' =
+// only NON-required commit statuses are failing/pending — readiness is still
+// decided below by the explicit protection + evidence checks (so an explicit
+// required-job failure stays a ci-failed diagnosis, not an unknown).
+// Everything else (blocked/has_hooks/unknown/null/…) has its own rule: see
+// classifyCandidate.
+const MERGEABLE_STATE_PROCEED = ['clean', 'unstable'];
+
+// R2-F4: pagination budgets. The required workflow's runs for one head are
+// fetched to completion up to MAX_RUN_PAGES pages (5 × 100 runs); each run's
+// jobs up to MAX_JOBS_PAGES pages (5 × 100 jobs). Beyond a budget the
+// inventory is reported INCOMPLETE and no positive verdict may rely on it —
+// the bound is a guard against unbounded requests, never a silent window.
+const MAX_RUN_PAGES = 5;
+const MAX_JOBS_PAGES = 5;
+
 const DRIFT_COMMIT_CAP = 20;
-const MAX_EVIDENCE_RUNS = 4; // jobs fetched for the N latest runs of the required workflow
 
 // ---------------------------------------------------------------------------
 // Transport adapters. api(path) -> {status, body, error}; status is the HTTP
@@ -188,6 +231,10 @@ function ok(res) { return res && res.status === 200 && res.body; }
 function errText(res) {
   return (res && (res.error || `HTTP ${res.status}`)) || 'no data';
 }
+
+// JSON.stringify that survives undefined (plain stringify would silently
+// drop the value from a rendered list of observed raw conclusions).
+function jsonVal(v) { return v === undefined ? 'undefined' : JSON.stringify(v); }
 
 // compare API status -> is `base` commit an ancestor of `head` commit?
 // (compare/{base}...{head}: "ahead"/"identical" = head contains base.)
@@ -249,18 +296,29 @@ function summarizeRuns(runsBody, headSha) {
 
 // The explicit evidence gate: does the configured required workflow have a
 // completed run on this head whose jobs prove every required job succeeded?
-// skipped/neutral conclusions are NOT success evidence. Missing jobs mean the
-// workflow shape no longer matches the configured requirement — that is
-// "unexplainable rule", answered insufficient, never guessed as satisfied.
-function evaluateRequiredEvidence(spec, runsForHead, jobsByRun) {
+// R2-F3: a required job counts as succeeded ONLY on the explicit conclusion
+// 'success'. skipped/neutral are not-executed; stale/null/missing/any other
+// value is unknown-evidence that names the raw value, run id, and job name.
+// R2-F4: EVERY run of the required workflow passed here is judged — the
+// caller (fetch layer, paged to completion) must not slice, and this layer
+// keeps no window either. `inventory` states whether the run list was
+// fetched completely (fetch-layer budget); an incomplete inventory is
+// insufficient unless an explicit failure was already observed (then the
+// failure is reported, since unevaluated runs cannot erase it).
+function evaluateRequiredEvidence(spec, runsForHead, jobsByRun, inventory) {
+  const inv = (inventory && typeof inventory === 'object')
+    ? inventory
+    : { complete: true, reason: null };
   const wfRuns = runsForHead
     .filter((r) => r.name === spec.workflow)
-    .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
-    .slice(0, MAX_EVIDENCE_RUNS);
+    .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
   if (wfRuns.length === 0) {
     return {
       state: 'unknown-evidence',
-      detail: `required workflow "${spec.workflow}" has no run on this head — nothing proves the required verification executed`,
+      detail: `required workflow "${spec.workflow}" has no run on this head — nothing proves the required verification executed`
+        + (inv.complete === false && inv.reason ? ` (inventory incomplete: ${inv.reason})` : ''),
+      perRun: [],
+      evaluatedRunIds: [],
     };
   }
   const perRun = [];
@@ -279,7 +337,10 @@ function evaluateRequiredEvidence(spec, runsForHead, jobsByRun) {
       continue; // eslint-disable-line no-continue
     }
     if (j.truncated) {
-      perRun.push({ runId: run.id, state: 'unknown-evidence', detail: `job list for run ${run.id} truncated (total_count > fetched) — refusing to judge` });
+      perRun.push({
+        runId: run.id, state: 'unknown-evidence',
+        detail: `job list for run ${run.id} not fully readable${j.reason ? `: ${j.reason}` : ' (total_count > fetched)'} — refusing to judge`,
+      });
       continue; // eslint-disable-line no-continue
     }
     const byName = new Map(j.jobs.map((job) => [job.name, job.conclusion]));
@@ -292,8 +353,7 @@ function evaluateRequiredEvidence(spec, runsForHead, jobsByRun) {
       continue; // eslint-disable-line no-continue
     }
     const failedJobs = spec.jobs.filter((n) => EXPLICIT_FAILURES.includes(byName.get(n)));
-    const notRunJobs = spec.jobs.filter((n) => byName.get(n) == null
-      || NOT_EXECUTED.includes(byName.get(n)));
+    const succeeded = spec.jobs.filter((n) => byName.get(n) === 'success');
     // Non-configured jobs that explicitly failed stay visible but do not gate:
     // the config defines the project's required evidence.
     const failedOther = j.jobs
@@ -305,22 +365,38 @@ function evaluateRequiredEvidence(spec, runsForHead, jobsByRun) {
         detail: `required job(s) explicitly failed: ${failedJobs.map((n) => `${n}=${byName.get(n)}`).join(', ')}`
           + (failedOther.length ? `; non-required failures: ${failedOther.join(', ')}` : ''),
       });
-    } else if (notRunJobs.length) {
-      perRun.push({
-        runId: run.id, state: 'not-executed',
-        detail: `required job(s) did not execute (skipped/neutral): ${notRunJobs.map((n) => `${n}=${byName.get(n)}`).join(', ')}`,
-      });
-    } else {
+    } else if (succeeded.length === spec.jobs.length) {
       perRun.push({
         runId: run.id, state: 'satisfied', runAttempt: run.runAttempt,
         detail: `all required jobs succeeded on run ${run.id}`
           + (failedOther.length ? ` (visible non-required failures: ${failedOther.join(', ')})` : ''),
       });
+    } else {
+      const bad = spec.jobs
+        .filter((n) => byName.get(n) !== 'success')
+        .map((n) => `${n}=${jsonVal(byName.get(n))}`);
+      // skipped/neutral (alone or mixed with successes) keep the round-C
+      // "not-executed" classification; any other non-success value
+      // (stale/null/missing/unrecognized) is unknown-evidence.
+      const unclassifiable = spec.jobs
+        .filter((n) => byName.get(n) !== 'success' && !NOT_EXECUTED.includes(byName.get(n)));
+      if (unclassifiable.length === 0) {
+        perRun.push({
+          runId: run.id, state: 'not-executed',
+          detail: `required job(s) did not execute (skipped/neutral): ${bad.join(', ')}`,
+        });
+      } else {
+        perRun.push({
+          runId: run.id, state: 'unknown-evidence',
+          detail: `required job(s) on run ${run.id} without explicit success (only conclusion "success" counts; observed: ${bad.join(', ')})`,
+        });
+      }
     }
   }
   const satisfied = perRun.filter((r) => r.state === 'satisfied');
   const failedRuns = perRun.filter((r) => r.state === 'failed');
   const pendings = perRun.filter((r) => r.state === 'pending');
+  const evaluatedRunIds = perRun.map((r) => r.runId);
   // An explicit required-job failure STANDS until its own run is superseded
   // by a rerun (the runs API then reports the latest attempt). A green
   // sibling run (e.g. the push-event run) is additional evidence, but it
@@ -330,28 +406,44 @@ function evaluateRequiredEvidence(spec, runsForHead, jobsByRun) {
     if (satisfied.length) {
       via.detail = `${via.detail}; sibling run(s) also satisfied the requirement (${satisfied.map((s) => `run ${s.runId}`).join(', ')}) — they do not supersede the failed run, only a rerun of it does`;
     }
-    return { state: 'failed', via, perRun };
+    if (inv.complete === false && inv.reason) {
+      via.detail = `${via.detail}; run inventory incomplete (${inv.reason}) — evaluated runs: ${evaluatedRunIds.join(', ') || 'none'}; unevaluated runs can only add failures, never erase this one`;
+    }
+    return { state: 'failed', via, perRun, evaluatedRunIds };
+  }
+  // R2-F4: with no failure in hand, an incomplete inventory can only be
+  // "not enough" — a partial list never proves satisfaction.
+  if (inv.complete === false) {
+    return {
+      state: 'unknown-evidence',
+      detail: `required-workflow run inventory incomplete and no explicit failure observed among evaluated runs (${evaluatedRunIds.join(', ') || 'none'}) — ${inv.reason || 'reason unknown'}; a ready verdict requires the complete inventory`,
+      perRun,
+      evaluatedRunIds,
+    };
   }
   // Fail-closed: while any run of the required workflow is still executing,
   // the evidence is pending — even if another run already satisfied the
   // requirement — because the eventual outcome is not known yet.
   if (pendings.length) {
     return {
-      state: 'pending', via: pendings[0], perRun,
+      state: 'pending', via: pendings[0], perRun, evaluatedRunIds,
       note: satisfied.length
         ? 'another run already satisfied the requirement, but a required-workflow run is still executing'
         : undefined,
     };
   }
-  if (satisfied.length) {
-    return { state: 'satisfied', via: satisfied[0], perRun };
-  }
+  // R2-F4: a satisfied run must never shadow another run's unexplained
+  // evidence (unreadable/truncated/shape-drifted) — "some run was green"
+  // is not a license to skip the remaining unknowns.
   const order = ['not-executed', 'unknown-evidence'];
   for (const s of order) {
     const hit = perRun.filter((r) => r.state === s);
-    if (hit.length) return { state: s, via: hit[0], perRun };
+    if (hit.length) return { state: s, via: hit[0], perRun, evaluatedRunIds };
   }
-  return { state: 'unknown-evidence', detail: 'no evaluable run', perRun };
+  if (satisfied.length) {
+    return { state: 'satisfied', via: satisfied[0], perRun, evaluatedRunIds };
+  }
+  return { state: 'unknown-evidence', detail: 'no evaluable run', perRun, evaluatedRunIds };
 }
 
 // Branch protection rules for the target branch. Permission gaps stay
@@ -400,6 +492,18 @@ function evaluateProtectionRequirements(protection, checkRunsRes, statusRes) {
   }
   if (protection.state === 'unknown') {
     return { state: 'unknown', detail: protection.note || 'protection unreadable' };
+  }
+  // R2-F1: a required-approving-reviews rule cannot be proven satisfied by
+  // this audit. Historical review lists mix stale/dismissed reviews with
+  // currently valid ones, and green CI is not approval evidence — so the
+  // requirement is answered "unknown" (which refuses ready), never guessed
+  // from any count.
+  if (protection.requiredReviews) {
+    const n = protection.requiredReviews.required;
+    return {
+      state: 'unknown',
+      detail: `branch protection requires ${n === null || n === undefined ? 'an unreadable number of' : n} approving review(s) — this audit has no evidence of currently valid approvals (a historical review list or green CI does not prove them); refusing ready`,
+    };
   }
   const contexts = (protection.requiredStatusChecks && protection.requiredStatusChecks.contexts) || [];
   if (!contexts.length) {
@@ -541,14 +645,32 @@ function classifyCandidate(facts) {
     return { status: STATUS.INSUFFICIENT, reasons, unknowns };
   }
   if (pr.mergeable === false || pr.mergeable_state === 'dirty') {
-    reasons.push(`merge conflict (mergeable=${pr.mergeable}, state=${pr.mergeable_state})`);
+    reasons.push(`merge conflict (mergeable=${pr.mergeable}, state=${jsonVal(pr.mergeable_state)})`);
     return { status: STATUS.CONFLICT, reasons, unknowns };
   }
   // Unknown mergeability must not pass: GitHub may still be computing, and a
   // failed read is indistinguishable from that here.
   if (pr.mergeable !== true) {
-    unknowns.push(`mergeability unknown (mergeable=${JSON.stringify(pr.mergeable)}, state=${pr.mergeable_state}) — not treated as passable`);
+    unknowns.push(`mergeability unknown (mergeable=${jsonVal(pr.mergeable)}, state=${jsonVal(pr.mergeable_state)}) — not treated as passable`);
     return { status: STATUS.INSUFFICIENT, reasons, unknowns };
+  }
+  // R2-F1: mergeable=true only means "no textual merge conflict" — it is NOT
+  // "merge permitted". mergeable_state decides, explicitly:
+  //   'blocked'  -> GitHub itself states protection requirements are unmet.
+  //   'clean'    -> nothing blocking or pending; may proceed.
+  //   'unstable' -> only NON-required statuses failing/pending; the explicit
+  //                 protection + evidence gates below still decide.
+  //   anything else (has_hooks/unknown/null/…) does not prove readiness.
+  if (pr.mergeable_state === 'blocked') {
+    reasons.push('GitHub reports the merge as blocked (mergeable=true but mergeable_state="blocked") — branch protection requirements (approvals / required checks) are not satisfied on this head');
+    return { status: STATUS.MERGE_BLOCKED, reasons, unknowns };
+  }
+  if (!MERGEABLE_STATE_PROCEED.includes(pr.mergeable_state)) {
+    unknowns.push(`mergeable_state=${jsonVal(pr.mergeable_state)} is not an explained state (allowlist with rationale: clean, unstable) — readiness cannot be proven from it`);
+    return { status: STATUS.INSUFFICIENT, reasons, unknowns };
+  }
+  if (pr.mergeable_state === 'unstable') {
+    reasons.push('note: mergeable_state="unstable" (GitHub sees failing/pending non-required statuses); readiness below still requires the explicit protection + evidence gates');
   }
 
   // Protection: an unknown state cannot back a ready; existing rules must be
@@ -593,6 +715,14 @@ function classifyCandidate(facts) {
     return { status: STATUS.INSUFFICIENT, reasons, unknowns };
   }
 
+  // R2-F2: no success verdict may carry an unresolved necessary-evidence gap
+  // (e.g. accepted->current-main containment unreadable above). Explicit
+  // blocked/pending diagnoses already returned; reaching here with a gap
+  // means the gap alone stands between this candidate and success.
+  if (unknowns.length) {
+    return { status: STATUS.INSUFFICIENT, reasons, unknowns };
+  }
+
   reasons.push(`required CI evidence satisfied: ${evidence.via && evidence.via.detail}`);
   if (facts.runs && facts.runs.rerunDetected) {
     reasons.push('note: a rerun is on record for this head (run_attempt > 1) — the first-attempt outcome stays in the review record, not rewritten as first-try success');
@@ -604,7 +734,82 @@ function classifyCandidate(facts) {
 // ---------------------------------------------------------------------------
 // Fetch layer (GET-only). api is injectable; every path used here is in the
 // read allowlist the tests pin.
+//
+// R2-F4: both fetch helpers page to COMPLETION within explicit budgets and
+// return an honest inventory flag — the judgment layer never slices, and an
+// incomplete inventory is surfaced, not papered over.
 // ---------------------------------------------------------------------------
+function fetchRunsForHead(repo, headSha, api) {
+  const runs = [];
+  let totalCount = null;
+  let pagesFetched = 0;
+  let lastPageRows = 0;
+  for (let page = 1; page <= MAX_RUN_PAGES; page++) {
+    const res = api(`/repos/${repo}/actions/runs?head_sha=${headSha}&per_page=100&page=${page}`);
+    pagesFetched = page;
+    if (!ok(res)) {
+      const error = `run list page ${page} unreadable: ${errText(res)}`;
+      return { ok: false, error, runs, totalCount, pagesFetched, complete: false, reason: error };
+    }
+    totalCount = typeof res.body.total_count === 'number' ? res.body.total_count : totalCount;
+    const rows = Array.isArray(res.body.workflow_runs) ? res.body.workflow_runs : [];
+    runs.push(...rows);
+    lastPageRows = rows.length;
+    if (rows.length < 100) break; // server says this is the last page
+    if (totalCount !== null && runs.length >= totalCount) break; // provably complete
+  }
+  if (lastPageRows >= 100 && (totalCount === null || runs.length < totalCount)) {
+    return {
+      ok: true, runs, totalCount, pagesFetched, complete: false,
+      reason: `run list budget exhausted: ${pagesFetched} page(s) fetched, ${runs.length} run(s) of a claimed total_count=${totalCount === null ? 'absent' : totalCount} — raise MAX_RUN_PAGES deliberately if a head really has more`,
+    };
+  }
+  if (totalCount !== null && runs.length < totalCount) {
+    return {
+      ok: true, runs, totalCount, pagesFetched, complete: false,
+      reason: `run list truncated: total_count=${totalCount} but only ${runs.length} fetched`,
+    };
+  }
+  return { ok: true, runs, totalCount, pagesFetched, complete: true, reason: null };
+}
+
+function fetchJobsForRun(repo, runId, api) {
+  const jobs = [];
+  let totalCount = null;
+  let pagesFetched = 0;
+  let lastPageRows = 0;
+  for (let page = 1; page <= MAX_JOBS_PAGES; page++) {
+    const res = api(`/repos/${repo}/actions/runs/${runId}/jobs?per_page=100&page=${page}`);
+    pagesFetched = page;
+    if (!ok(res)) {
+      return { ok: false, error: errText(res), truncated: false, reason: null, jobs: [] };
+    }
+    totalCount = typeof res.body.total_count === 'number' ? res.body.total_count : totalCount;
+    const rows = Array.isArray(res.body.jobs) ? res.body.jobs : [];
+    jobs.push(...rows.map((j) => ({ name: j.name, conclusion: j.conclusion })));
+    lastPageRows = rows.length;
+    if (rows.length < 100) break; // server says this is the last page
+    if (totalCount !== null && jobs.length >= totalCount) break; // provably complete
+  }
+  if (totalCount !== null && jobs.length < totalCount) {
+    return {
+      ok: true, error: null, truncated: true,
+      reason: lastPageRows >= 100
+        ? `jobs budget exhausted for run ${runId}: ${pagesFetched} page(s) fetched, ${jobs.length} job(s) of a claimed total_count=${totalCount}`
+        : `job list truncated for run ${runId}: total_count=${totalCount} but only ${jobs.length} fetched`,
+      jobs,
+    };
+  }
+  if (lastPageRows >= 100) {
+    return {
+      ok: true, error: null, truncated: true,
+      reason: `job list for run ${runId} ended on a full page without a usable total_count`,
+      jobs,
+    };
+  }
+  return { ok: true, error: null, truncated: false, reason: null, jobs };
+}
+
 function fetchCandidateFacts(entry, config, api) {
   const { repo, pr: prNumber, acceptedSha } = entry;
   const targetBranch = entry.baseBranch || config.targetBranch || 'main';
@@ -642,47 +847,47 @@ function fetchCandidateFacts(entry, config, api) {
   const needsEvidence = prBody && prBody.merged !== true && prBody.head && prBody.head.sha;
   if (needsEvidence) {
     const headSha = prBody.head.sha;
-    facts.runsRes = api(`/repos/${repo}/actions/runs?head_sha=${headSha}&per_page=100`);
-    if (ok(facts.runsRes)) {
-      facts.runs = summarizeRuns(facts.runsRes.body, headSha);
-      if (truncatedList(facts.runsRes.body, 'workflow_runs')) {
-        facts.runs.truncated = true;
+    const runsFetch = fetchRunsForHead(repo, headSha, api);
+    if (runsFetch.ok) {
+      facts.runs = summarizeRuns({ workflow_runs: runsFetch.runs }, headSha);
+      facts.runs.truncated = runsFetch.complete === false;
+      facts.runs.inventory = {
+        complete: runsFetch.complete,
+        reason: runsFetch.reason,
+        totalCount: runsFetch.totalCount,
+        pagesFetched: runsFetch.pagesFetched,
+      };
+      if (runsFetch.complete === false && runsFetch.reason) {
+        facts.runs.notes.push(`run inventory incomplete: ${runsFetch.reason}`);
       }
+      // R2-F4: jobs are fetched for EVERY run of the required workflow on
+      // this head — no latest-N slice survives in either layer.
       const wfRuns = spec
         ? facts.runs.runs.filter((r) => r.name === spec.workflow)
           .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
-          .slice(0, MAX_EVIDENCE_RUNS)
         : [];
       for (const run of wfRuns) {
-        const jobsRes = api(`/repos/${repo}/actions/runs/${run.id}/jobs?per_page=100`);
-        facts.jobsByRun.set(run.id, ok(jobsRes)
-          ? {
-            ok: true, error: null,
-            truncated: truncatedList(jobsRes.body, 'jobs'),
-            jobs: (jobsRes.body.jobs || []).map((j) => ({ name: j.name, conclusion: j.conclusion })),
-          }
-          : { ok: false, error: errText(jobsRes), truncated: false, jobs: [] });
+        facts.jobsByRun.set(run.id, fetchJobsForRun(repo, run.id, api));
       }
-      if (spec) {
-        facts.requiredEvidence = evaluateRequiredEvidence(spec, facts.runs.runs, facts.jobsByRun);
-        if (facts.runs.truncated) {
-          // Incomplete inventory: refuse, even if a satisfying run is visible —
-          // the page did not prove what else ran on this head.
-          facts.requiredEvidence = {
-            state: 'unknown-evidence',
-            detail: 'run list truncated (total_count > fetched) — required evidence cannot be judged from an incomplete inventory',
-            perRun: facts.requiredEvidence.perRun || [],
-          };
-        }
-      } else {
-        facts.requiredEvidence = {
+      facts.requiredEvidence = spec
+        ? evaluateRequiredEvidence(spec, facts.runs.runs, facts.jobsByRun, {
+          complete: runsFetch.complete,
+          reason: runsFetch.reason,
+        })
+        : {
           state: 'unknown-evidence',
           detail: `no explicit evidence requirement configured for ${repo}`,
         };
-      }
     } else {
-      facts.runs = { ok: false, error: errText(facts.runsRes), runs: [], incomplete: [], failed: [], rerunDetected: false, notes: [], truncated: false };
-      facts.requiredEvidence = { state: 'unknown-evidence', detail: `CI runs unreadable: ${errText(facts.runsRes)}` };
+      facts.runs = {
+        ok: false, error: runsFetch.error, runs: [], incomplete: [], failed: [],
+        rerunDetected: false, notes: [], truncated: true,
+        inventory: {
+          complete: false, reason: runsFetch.reason,
+          totalCount: runsFetch.totalCount, pagesFetched: runsFetch.pagesFetched,
+        },
+      };
+      facts.requiredEvidence = { state: 'unknown-evidence', detail: `CI runs unreadable: ${runsFetch.error}` };
     }
 
     if (facts.protectionFacts.state === 'protected') {
@@ -764,8 +969,10 @@ function candidateRecord(entry, config, api) {
         || (facts.requiredEvidence.via && facts.requiredEvidence.via.detail) || null,
       via: facts.requiredEvidence.via || null,
       perRun: facts.requiredEvidence.perRun || [],
+      evaluatedRunIds: facts.requiredEvidence.evaluatedRunIds || [],
       runs: facts.runs ? {
         truncated: !!facts.runs.truncated,
+        inventory: facts.runs.inventory || null,
         rerunDetected: facts.runs.rerunDetected,
         notes: facts.runs.notes,
         incomplete: facts.runs.incomplete,
@@ -929,6 +1136,7 @@ const STATUS_MARK = {
   'head-drifted': 'BLOCKED (head drifted)',
   'base-mismatch': 'BLOCKED (PR base != target)',
   'conflict': 'BLOCKED (conflict / unsatisfied requirements)',
+  'merge-blocked': 'BLOCKED (GitHub reports the merge blocked — protection requirements unmet)',
   'closed-unmerged': 'NOT LANDABLE (closed without merge)',
   'draft': 'NOT LANDABLE (draft)',
   'merged-untraceable': 'BLOCKED (landing not traceable in current main)',
@@ -963,6 +1171,10 @@ function renderText(report) {
     if (c.evidence) {
       const e = c.evidence;
       lines.push(`  required evidence: ${e.state}${e.detail ? ` — ${e.detail}` : ''}`);
+      const ev = e.evaluatedRunIds || [];
+      const inv = e.runs && e.runs.inventory;
+      lines.push(`  runs evaluated: ${ev.length ? ev.join(', ') : 'none'}`
+        + (inv && inv.complete === false && inv.reason ? ` — inventory incomplete: ${inv.reason}` : ''));
       const r = e.runs;
       if (r) {
         const det = [
