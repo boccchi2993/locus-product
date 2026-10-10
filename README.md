@@ -1,61 +1,81 @@
 # locus-product
 
-Locus Product — the application repository of the three-repository Locus
-split: Vue 3 presentation, browser storage, user configuration, capability
-catalogs, and the integration adapters that compose `locus-runtime` and
-`locus-harness` into the shipped product.
+Locus Product is the application repository: Vue UI, browser storage, user
+configuration, capability catalogs, and adapters that compose the independent
+[locus-runtime](https://github.com/boccchi2993/locus-runtime) and
+[locus-harness](https://github.com/boccchi2993/locus-harness) packages.
 
-## Branch `refactor/m3c-integration`: the M3c switch, verified (M3c-D)
+## Current status
 
-This branch completes the three-repository switch: the product page is ONE
-ESM entry over the two installed cores; the in-repo duplicate
-implementations are deleted; production core imports enter only through
-`src/product/{runtime-api,harness-api}.js`.
+**The M0–M4 repository split is complete and landed on all three main branches.**
+Runtime and Harness PR #1, Product integration PR #5, candidate/rollout PR #9,
+and dependency-pins PR #12 have merged. This repository is the authoritative
+Product implementation; the original monorepo remains historical provenance.
 
-This is a **verified set of candidate SHAs, locked through the lockfile**
-— NOT a claim that the cores' latest main is compatible:
+Production imports enter through `src/product/runtime-api.js` and
+`src/product/harness-api.js`. Product owns compatibility checks and adapters;
+it does not maintain duplicate implementations of either core.
 
-- source snapshot `2aec76e78431382873be1db8a6db6310cc89c782`
-- locus-runtime `2435a57ff7a66db3db88aa98a88d404c75133483` (PR #1 OPEN)
-- locus-harness `347eed99a415dc080b97d46d8a4271ceb19c5142` (PR #1 OPEN)
+## Verified dependency combination
 
-Integration record + verification evidence:
-[docs/M3C-D-INTEGRATION.md](docs/M3C-D-INTEGRATION.md). The base and
-agent PRs (#1–#4) stay OPEN until M3c closeout; nothing is merged,
-published or deployed here.
+The first verified mainline combination captured on 2026-10-06 is:
 
-Verification on this branch (local AND clean checkout): `npm ci` →
-`npm run build` → `npm test` (24/24 suites) → `node
-tests/run-browser-gates.cjs` (14/14 packaged-build browser gates in real
-Chrome). CI runs the same gates from a from-scratch checkout.
+| Component | Exact commit |
+| --- | --- |
+| Product tested main baseline | `18e3c76d6f2d38770997324c434b14ba319bf8ff` |
+| Runtime dependency | `45bc935af91dbf5ea6c1078a939c0589853a50a8` |
+| Harness dependency | `5ce67052be3820f607835dd8fd3df373c814ab9c` |
 
-## This branch: `refactor/m3c-base` (M3c-0 common baseline)
+The Product SHA above identifies the tested baseline, not subsequent documentation
+commits. `package.json` and `package-lock.json` pin the cores to full SHAs.
+This is evidence for that exact combination, not a promise that future main commits
+are compatible.
 
-This branch is the common baseline for the parallel M3c switch agents
-(A/B/C) and the integration agent (D). It contains:
+The default-branch candidate workflow was actually executed on GitHub:
+[run 37465158293](https://github.com/boccchi2993/locus-product/actions/runs/37465158293).
+Capture, install, build, unit and browser stages passed; the captured core heads
+had not advanced at the final check. Full provenance, first failures and limitations:
+[docs/M4B-MAINLINE-VERIFICATION.md](docs/M4B-MAINLINE-VERIFICATION.md).
 
-1. The verbatim source snapshot of the product code, imported from
-   [boccchi2993/Locus-browser-agent-runtime](https://github.com/boccchi2993/Locus-browser-agent-runtime)
-   @ `2aec76e78431382873be1db8a6db6310cc89c782` (branch
-   `refactor/repository-split-m2c`, head of OPEN PR #7) — source code and
-   tests kept as the pre-switch baseline. NOT imported: `node_modules`,
-   `dist`, logs, secrets, `.git`. The import switch itself is intentionally
-   NOT implemented on this branch.
-2. The two pinned core dependencies in `package.json` (GitHub git
-   dependencies, locked to full commit SHAs, real `package-lock.json`):
-   - `locus-runtime` @ `2435a57ff7a66db3db88aa98a88d404c75133483`
-     ([locus-runtime PR #1](https://github.com/boccchi2993/locus-runtime/pull/1))
-   - `locus-harness` @ `347eed99a415dc080b97d46d8a4271ceb19c5142`
-     ([locus-harness PR #1](https://github.com/boccchi2993/locus-harness/pull/1))
-3. `docs/M3C-PARALLEL-HANDOFF.md` — the shared interface contract
-   (`src/product/runtime-api.js`, `src/product/harness-api.js`), the ESM
-   conversion rules for the classic files, and the per-agent file
-   ownership map.
+## Development
 
-A/B/C must all branch from this branch's head (M3C_BASE_SHA, recorded in
-the handoff document and in the base PR); they never stack on each other.
+```bash
+npm ci
+npm run build
+npm test
+node tests/run-browser-gates.cjs
+```
 
-Until the switch lands and is verified, the source repository remains the
-authoritative product implementation.
+Build before testing: some gates inspect packaged output. The closeout baseline
+has 31 unit suites and 16 browser gates. Browser gates require Chrome and exercise
+the built Product against fake models. Python gates may download the real,
+hash-pinned Pyodide assets; they do not require model keys.
 
-License: Apache-2.0 (see [LICENSE](LICENSE)).
+## Following core main branches
+
+The scheduled/manual candidate workflow captures an exact Product/Runtime/Harness
+tuple and validates it in an isolated checkout. It records results and advancement
+as artifacts; it does not automatically adopt new pins or merge an update.
+
+Promote a passing tuple through a dependency update with exact manifest/lockfile
+pins and integration evidence. For rollback, commit the last verified dependency
+pair and lockfile again and validate it; do not rewrite main history or imply that
+a dependency rollback rolls back user storage.
+
+## Documentation and maintenance
+
+- [Integration record](docs/M3C-D-INTEGRATION.md)
+- [Candidate mechanism and rollout](docs/M4A-INTEGRATION.md)
+- [Mainline verification](docs/M4B-MAINLINE-VERIFICATION.md)
+- [Interface contracts](docs/REPOSITORY-SPLIT-CONTRACTS.md)
+- [Ownership inventory](docs/REPOSITORY-SPLIT-INVENTORY.md)
+- [Open maintenance TODO](TODO.md)
+
+Historical phase reports describe their recorded commits and may mention branches
+or PRs that were open at the time. Current split status is stated above. Known
+test-infrastructure failures remain open maintenance work; split completion is not
+a claim that every historical CI run was green.
+
+No npm publication or deployment was performed as part of the split.
+
+License: Apache-2.0; see [LICENSE](LICENSE).
