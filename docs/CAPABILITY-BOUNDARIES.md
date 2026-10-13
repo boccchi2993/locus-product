@@ -17,6 +17,8 @@ cloud_bash
 
 `bash` is the real local browser-machine interface. `cloud_bash` is an unconfigured legacy/escalation stub and is **not** a network fallback. There is currently no separate `edit` tool and no JavaScript shell command.
 
+> [DECISIONS.md D6](DECISIONS.md#d6) 决定保留 cloud_bash：不得以“过度设计”或“简化”为由移除，修改须经所有者批准。
+
 Inside `bash`, the supported registry is discoverable with `help` and currently includes `pwd`, `cd`, `ls`, `cat`, `echo`, `find`, `grep`, `head`, `tail`, `wc`, `sort`, `mv`, `rm`, `python`, `curl`, `which`, and `help`.
 
 The design rule is:
@@ -162,6 +164,8 @@ It owns:
 - MCP integration,
 - event delivery to the UI.
 
+> 已被 [DECISIONS.md D3](DECISIONS.md#d3) 部分取代：MCP 客户端位于 runtime，凭据只保存在内存中，凭据的持久化由 product 负责并复用现有的“记住 API key”存储；harness 保留 MCP 的组合与审批编排，但不再是 MCP 客户端代码的归属地。
+
 The harness should compose the machine; it should not continuously expand the machine's primitive set.
 
 ## 6. Extension boundaries
@@ -232,6 +236,10 @@ Examples:
 - authenticated retrieval systems.
 
 MCP should be a first-class harness capability. It may have a shell/CLI compatibility frontend, but it should not be forced through stringly-typed bash commands because credentials, schemas, approvals and side effects deserve structured handling.
+
+> 已被 [DECISIONS.md D3](DECISIONS.md#d3) 部分取代：MCP 客户端位于 runtime，凭据只保存在内存中，凭据的持久化由 product 负责；harness 保留组合与审批编排。
+
+> [DECISIONS.md D4](DECISIONS.md#d4) 裁决了本节与 DESIGN-PRINCIPLES §3、§4 之间的矛盾：MCP 工具以 provider 原生工具形式暴露，既不强制走字符串化的 shell 命令，也不新增核心原语；工具列表只在任务边界变化（随 TaskEnvironment 冻结）、排序确定、MCP 工具排在 bash 之后；有副作用的 MCP 工具按其 MCP 工具注解，走与有副作用 HTTP 请求相同的审批流程。
 
 ## 7. RAG boundary
 

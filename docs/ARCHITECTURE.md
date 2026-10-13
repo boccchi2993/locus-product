@@ -50,6 +50,8 @@ Current model-visible tools are exactly:
 - `bash` — the local browser machine;
 - `cloud_bash` — an unconfigured legacy/escalation stub that currently fails.
 
+> [DECISIONS.md D6](DECISIONS.md#d6) 决定保留 cloud_bash：不得以“过度设计”或“简化”为由移除，修改须经所有者批准。
+
 There is no current `edit` tool and no JavaScript shell command.
 
 The bounded shell command registry is the source of truth for dispatch, `help`, `which`, `/usr/bin`, and the system-prompt shell contract. Current commands include `pwd`, `cd`, `ls`, `cat`, `echo`, `find`, `grep`, `head`, `tail`, `wc`, `sort`, `mv`, `rm`, `python`, `curl`, `which`, and `help`.
