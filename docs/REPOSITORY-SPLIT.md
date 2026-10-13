@@ -31,6 +31,8 @@ The product owns a family of explicit runtime/harness compatibility adapters. Ne
 | Persistence | Filesystem storage mechanics through providers | Replay/checkpoint semantics through injected persistence ports | Browser database, migrations, conversation records, attachment storage and recovery wiring |
 | Observability | Structured execution events and measurements | Structured task/model/tool/approval events | Correlation, persistence, projection and presentation |
 
+> 已被 [DECISIONS.md D2](DECISIONS.md#d2) 部分取代：凭据可以存放在任意一层的宿主代码中（不限于 product），只要不进入模型够得着的地方（VFS、Pyodide 内存、工具输出、对话历史）；本表中把凭据供给与授权持有完全外置于 runtime 的表述，仅就凭据存放位置而言不再是约束。REPOSITORY-SPLIT-CONTRACTS §3.5 的 ExecutionAuthorization 端口管理的是副作用操作的审批，与 D2 无关，保持不变。
+
 Dependencies point from the product to the two public APIs. The harness owns the ports it consumes; the runtime owns the APIs it exposes. Product adapters map between them. Each owner documents and tests its contract; a copied shared type file must not become an undeclared synchronization mechanism.
 
 Browser APIs are legitimate runtime dependencies. The runtime may need a CSP creator iframe, Workers and OPFS; it must not need a Locus status-bar element, Vue store, conversation object or HTML element containing worker source. Worker source and bootstrap assets belong to runtime packaging, with explicit embedding/CSP requirements.
