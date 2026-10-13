@@ -27,4 +27,5 @@
 - `npm run dev` — 本地开发（Vite）
 - `npm run build` — 构建打包产物
 - `npm test` — 单元与结构门（Node）
+- `node tests/run-browser-gates.cjs` — 打包产物的浏览器 gate（需要 Chrome）；先运行 `npm run build`，再运行测试，因为部分 gate 检查的是打包产物
 - `npm run preview` — 在 4173 端口预览打包产物
