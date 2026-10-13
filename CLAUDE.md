@@ -29,3 +29,8 @@
 - `npm test` — 单元与结构门（Node）
 - `node tests/run-browser-gates.cjs` — 打包产物的浏览器 gate（需要 Chrome）；先运行 `npm run build`，再运行测试，因为部分 gate 检查的是打包产物
 - `npm run preview` — 在 4173 端口预览打包产物
+
+## 发布
+
+`stable` 分支是 Cloudflare Pages 的生产分支。发布方式：在 `main` 的 CI 全绿后执行 `git push origin main:stable`。
+只有仓库所有者明确要求发布时才能执行；agent 不得自行发布。
