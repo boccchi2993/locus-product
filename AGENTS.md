@@ -32,5 +32,15 @@
 
 ## 发布
 
-`stable` 分支是 Cloudflare Pages 的生产分支。发布方式：在 `main` 的 CI 全绿后执行 `git push origin main:stable`。
-只有仓库所有者明确要求发布时才能执行；agent 不得自行发布。
+线上地址是 https://locus-browser-agent-runtime.pages.dev/ ，对应 Cloudflare Pages 项目 `locus-browser-agent-runtime`。
+这个项目使用 Direct Upload，没有连接 Git：推送任何分支都不会触发部署。
+`stable` 分支记录的是当前线上运行的版本。
+
+只有仓库所有者明确要求发布时才能执行，agent 不得自行发布。发布步骤：
+1. 确认 main 的 CI 全绿，然后执行 `git push origin main:stable`
+2. 在干净的目录中克隆仓库，检出 stable，执行 `npm ci` 和 `npm run build`
+3. 在仓库根目录（functions/ 所在的目录）执行：
+   `npx wrangler pages deploy dist --project-name locus-browser-agent-runtime --branch main`
+   必须带上 `--branch main`：生产分支是 main，不加的话 wrangler 会读取当前分支名 stable，把这次部署当成预览部署
+4. 执行 `npx wrangler pages deployment list --project-name locus-browser-agent-runtime`，
+   确认最新一条记录是 Production 环境，提交号与 stable 一致
