@@ -351,7 +351,7 @@ async function main() {
     check('I-E18 unsure → exactly one probe request, then exactly one image request',
       callsE.length === 2 && callsE[0].body.max_tokens === 64 && !callsE[0].body.tools
         && JSON.stringify(callsE[0].body).includes('image')
-        && callsE[1].body.max_tokens === 2000
+        && callsE[1].body.max_tokens === 8192
         && JSON.stringify(callsE[1].body).includes(SENTINEL_PNG_B64),
       'calls=' + callsE.length + ' shapes=' + JSON.stringify(callsE.map((c) => ({
         mt: c.body.max_tokens, tools: !!c.body.tools,

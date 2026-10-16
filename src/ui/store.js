@@ -398,8 +398,16 @@ const DEFAULTS = {
   model: 'deepseek-flash',
   proxy: '',
   dialect: 'auto',
+  maxTokens: 8192,
   remember: false,
 };
+
+// Settings store everything as strings; maxTokens must be a positive
+// integer (DECISIONS.md D5: user configuration, never inferred).
+function parseMaxTokens(v) {
+  const n = typeof v === 'number' ? v : Number.parseInt(String(v || ''), 10);
+  return Number.isInteger(n) && n > 0 ? n : DEFAULTS.maxTokens;
+}
 
 function sessionGet(key) {
   try { return sessionStorage.getItem(key); } catch (e) { return null; }
@@ -417,9 +425,10 @@ function loadSettings() {
   let cfg = null;
   try { cfg = JSON.parse(sessionGet(SESSION_CONFIG_KEY) || 'null'); } catch (e) {}
   if (!cfg) return s;
-  for (const k of ['apiKey', 'apiBase', 'model', 'proxy', 'dialect']) {
+  for (const k of ['apiKey', 'apiBase', 'model', 'proxy', 'dialect', 'maxTokens']) {
     if (cfg[k]) s[k] = cfg[k];
   }
+  s.maxTokens = parseMaxTokens(s.maxTokens);
   s.remember = true;
   return s;
 }
@@ -1047,6 +1056,11 @@ export function applySettings() {
   productModel.dialect = nextDialect;
   appliedCredentialIdentity = nextIdentity;
   appliedApiKey = productModel.apiKey;
+  const nextMaxTokens = parseMaxTokens(store.settings.maxTokens);
+  store.settings.maxTokens = nextMaxTokens;
+  if (session && typeof session.setMaxTokens === 'function') {
+    session.setMaxTokens(nextMaxTokens);
+  }
   return !!nextIdentity;
 }
 
@@ -2011,9 +2025,10 @@ async function bootPersistence() {
   await PersistenceServiceInstance.ready;
   try {
     const settings = await PersistenceServiceInstance.loadSettings();
-    for (const key of ['apiBase', 'model', 'proxy', 'dialect']) {
+    for (const key of ['apiBase', 'model', 'proxy', 'dialect', 'maxTokens']) {
       if (settings[key]) store.settings[key] = settings[key];
     }
+    store.settings.maxTokens = parseMaxTokens(store.settings.maxTokens);
     applySettings();
     // Settings identify the destination first.  Only then may a remembered
     // credential for that exact provider/adapter/dialect/path be hydrated.
