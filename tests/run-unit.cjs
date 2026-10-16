@@ -41,6 +41,9 @@ const SUITES = [
   // M3c integration: the three parallel agents' dedicated gates (D wiring).
   'm3c-runtime-adapter.test.mjs',
   'm3c-storage-adapters.test.mjs',
+  // Virtual tool-output files in the /home/locus/history view: full
+  // tool-result text served straight from the normalized rows, no copy.
+  'history-tool-outputs.test.mjs',
   'm3c-product-wiring.test.mjs',
   // M4a-A: core-main candidate capture/apply/verify battery — faked npm/git
   // transports, so the real candidate tool is exercised only in rehearsals.
