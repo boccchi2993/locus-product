@@ -119,3 +119,20 @@
 **影响范围**：harness 的历史预算、工具结果写入、恢复与跨 provider 投影；product 的 `/home/locus/history` 视图、提交前预检和设置项。
 
 **被取代的旧表述**：harness `enforceHistoryBudget` “裁到刚好低于预算”的行为，以及“预算固定为 `HISTORY_BUDGET_BYTES`（768 KiB）”的表述。
+
+## D10
+
+**决定**：Capability 以 `.locus` 文件分发并持久安装（详细设计见 [CAPABILITY-INSTALL.md](CAPABILITY-INSTALL.md)）：
+
+1. `.locus` 是 zip 包，根目录的 `LOCUS.md` 是元文件，写明包内的全部文件（路径、大小、SHA-256）、创建者、创建目的和更改记录。文件清单是封闭的：多出或缺少任何文件都拒绝导入。创建者是作者自述，不做签名验证。
+2. 元文件不对模型暴露，只用于核验有效性、记录更改和必要字段。
+3. 导入是信任转换，只能由用户在界面上确认完成；来源可以是本地文件，也可以是 VFS 里的 `.locus` 路径。模型没有任何触发导入的途径。
+4. 已安装的包和启用状态持久化，存放在不挂载进 VFS 的存储里，每次加载重新核对哈希。不一致时提示用户：“继续”等于按当前字节重新锁定并追加更改记录；“本次跳过”则本次不加载、包保留。卸载是单独的操作。
+5. 同一个 id 的版本替换需要确认；替换前启用的，替换后自动启用。用户改过的 skill 实例保持原样，没改过的更新为新默认内容，被新版本删掉的 skill 的实例保留为孤立文件。卸载也保留 skill 实例。
+6. plugin 只以校验过的 wheel 进入 Python，删除源码文本合成路径。
+
+**理由**：单文件便于在手机上导入，也便于模型在自举时产出；持久安装避免每次重载都重新导入；把包放在模型写不到的地方、每次加载都核对哈希，保证导入时的那次信任确认不会被事后绕过。按 D8：第 4 条中“存放在模型写不到的地方”和“加载时重新核对”属于 A 类（安全边界，配对抗测试），其余属于 B 类。
+
+**影响范围**：harness 的 CapabilityManager（增量注册、wheel 负载、skill 实例升级规则）；product 的存储、导入、界面；runtime 删除源码文本合成路径。
+
+**被取代的旧表述**：CAPABILITY-PACKAGE §9（导入只在页面会话内有效）、§10（卸载不是 v1 概念）、§12 中“persistent installed-package catalog”；EXTENSION-MODEL §4 中“legacy `files: {sourceText}` 合成路径”的保留说明；CAPABILITY-BOUNDARIES §11.6 中“page-session only”与“incompatible markers fail loudly and the reset path is Remove + Re-add”。D6 保留的 skill 安装标记机制不变，只改变标记与当前版本不一致时的处理。

@@ -560,6 +560,8 @@ skill upgrade/migration or three-way merge (incompatible markers fail loudly
 and the reset path is Remove + Re-add), no per-skill "Restore default" button,
 no remote skill download or arbitrary user skill install.
 
+> 注：已由 [DECISIONS.md](DECISIONS.md) D10 取代，见 [CAPABILITY-INSTALL.md](CAPABILITY-INSTALL.md)。
+
 ### 11.7 Capability package core (v1, implemented)
 
 `src/capability-package.js` adds the AUTHORING/PACKAGE boundary described

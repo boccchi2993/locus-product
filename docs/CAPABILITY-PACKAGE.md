@@ -468,6 +468,8 @@ Reload may require re-importing the package before it can be enabled again. Pers
 
 This limitation does not block the self-hosting acceptance test, which only requires a subsequent task in the same runtime session.
 
+> 注：已由 [DECISIONS.md](DECISIONS.md) D10 取代，见 [CAPABILITY-INSTALL.md](CAPABILITY-INSTALL.md)。
+
 ## 10. Remove, re-add, and package registration
 
 These are separate operations:
@@ -477,6 +479,8 @@ These are separate operations:
 - **Uninstall package** — not a v1 product concept. Page reload can discard page-session registrations.
 
 Do not overload Remove Capability into an implicit package-manager uninstall.
+
+> 注：已由 [DECISIONS.md](DECISIONS.md) D10 取代，见 [CAPABILITY-INSTALL.md](CAPABILITY-INSTALL.md)。
 
 ## 11. Trusted Plugin Runtime relationship
 
@@ -526,5 +530,7 @@ this boundary is now exercised by tests
 - hidden MCP credential import;
 - new model-facing package-management tools;
 - product commitment to Spreadsheet/DOCX/PDF.
+
+> 注：已由 [DECISIONS.md](DECISIONS.md) D10 取代，见 [CAPABILITY-INSTALL.md](CAPABILITY-INSTALL.md)。
 
 Those can be designed after the package/runtime/import loop is real.

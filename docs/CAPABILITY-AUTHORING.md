@@ -88,6 +88,8 @@ Implement the minimum infrastructure required for a package to exist independent
 8. SkillSourceStore population from the imported bundle;
 9. no automatic MCP authorization.
 
+> 注：已由 [DECISIONS.md](DECISIONS.md) D10 取代，见 [CAPABILITY-INSTALL.md](CAPABILITY-INSTALL.md)。
+
 No product Capability is required yet.
 
 ## 4. Phase B — Trusted Plugin Runtime
