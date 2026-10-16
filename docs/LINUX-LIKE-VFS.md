@@ -27,6 +27,9 @@ This is a userland compatibility goal, not kernel emulation. Locus does not pret
 │       ├── .config/locus/mcp/
 │       ├── .cache/locus/
 │       └── history/             read-only conversation-history view
+│           └── <conversation-id>/
+│               ├── events.jsonl, messages.jsonl, provider-frames.jsonl
+│               └── tool-outputs/<sequence>.txt   full text of one tool result
 ├── tmp/
 └── mnt/
     ├── workspace/               optional user-granted directory
@@ -37,6 +40,8 @@ This is a userland compatibility goal, not kernel emulation. Locus does not pret
 ```
 
 There is intentionally **no active `/usr/local/share/locus/skills` working-copy mount**. SkillDefinitions are publisher templates; enabled capabilities materialize private mutable SkillInstances under `/home/locus/.skills/<capability>/<skill>.skill`.
+
+The `/home/locus/history` tree is a `system-read-only` nested mount backed by the persistence database: every write path is refused. Its `<conversation-id>/tool-outputs/<sequence>.txt` files hold the untruncated text of one tool result each and are what a truncation marker may name. Python does not see this tree — the Python sync mirrors the five root mounts only, and `history/` is a nested mount — so to process one of these files with python, `cp` it to `/tmp` first. Shell reads (`head`/`tail`/`grep -n`) work directly; `cat` is capped at 512 KiB per file.
 
 ## 3. The machine exists without a workspace
 

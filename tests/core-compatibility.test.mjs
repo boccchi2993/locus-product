@@ -68,6 +68,9 @@ const HARNESS_OK = () => Object.freeze({
     providerReplay: true,
     imageInputGate: true,
     capabilityComposition: true,
+    requestBudget: true,
+    toolOutputPath: true,
+    contextWindowBudget: true,
   },
 });
 const pass = () => checkCoreCompatibility({

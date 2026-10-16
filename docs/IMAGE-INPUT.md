@@ -276,11 +276,21 @@ duplicate-inference rules of docs/MODEL-PROTOCOL.md apply unchanged).
 
 ## Request budget
 
-`HISTORY_BUDGET_BYTES` counts what actually hits the wire. Semantic image
+The request budget counts what actually hits the wire. Semantic image
 parts are accounted at their RESOLVED size — `ceil(size/3) × 4` base64
 expansion + framing — not their metadata JSON. A submit whose turn would
 exceed the budget fails BEFORE any task starts with an explicit error;
 `enforceHistoryBudget` remains the run-time backstop.
+
+The submit-time pre-check compares the SMALLEST achievable request —
+system prompt + tools schema + the new user turn — against the effective
+budget (`effectiveRequestBudgetBytes()`, which is min(transport,
+context) when the harness declares `contextWindowBudget`): every older
+task can be dropped at run time (DECISIONS.md D9), so a task that fits
+after that drop is admitted even when the whole history would not. The
+computation uses the harness's `minimumRequestBytes()`; on a harness
+without `requestBudget` it falls back to the whole-history estimate
+against `historyBudgetBytes()` (CONTEXT-MANAGEMENT.md §3.2).
 
 > 注：预算现在可配置，并取传输上限与上下文上限中的较小值；提交前预检改为按"丢弃旧任务后的最小请求"计算。见 [DECISIONS.md](DECISIONS.md) D9 与 [CONTEXT-MANAGEMENT.md](CONTEXT-MANAGEMENT.md)。
 

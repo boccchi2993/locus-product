@@ -43,7 +43,7 @@ Ephemeral state:
 - `/mnt/download` artifacts in v1;
 - active task/process state and the Pyodide worker.
 
-The `/home/locus/history` VFS path is a read-only IndexedDB virtual projection. It is not a second OPFS conversation database.
+The `/home/locus/history` VFS path is a read-only IndexedDB virtual projection. It is not a second OPFS conversation database. Inside each conversation directory, the normalized tool-result rows are additionally served as virtual files `<conversationId>/tool-outputs/<sequence>.txt` — `<sequence>` is the normalized message sequence of that tool result, unique within the conversation. A file's content is the untruncated `toolResult` text of that row; the files exist only while their conversation does (deleting the conversation deletes them with it), and they are served through the same read-only redaction path as the rest of the projection. See docs/CONTEXT-MANAGEMENT.md §3.1.
 
 ## Conversation and replay records
 

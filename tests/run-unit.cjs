@@ -18,6 +18,12 @@ const SUITES = [
   // Max output tokens setting (DECISIONS.md D5): defaults, string↔int
   // persistence round trip, session.setMaxTokens wiring and its guard.
   'max-tokens-settings.test.cjs',
+  // Context-management wiring (P-2, DECISIONS.md D9): the three optional
+  // harness capabilities and their degrade rules, the contextWindow
+  // setting round trip + session wiring, the toolOutputs environment
+  // note, the run-option toolOutputPath and the minimumRequestBytes
+  // submit-time image pre-check.
+  'context-management-wiring.test.mjs',
   'conversation-routing.test.mjs',
   'submit-presentation.test.mjs',
   'store-python-lifecycle.test.mjs',
