@@ -174,8 +174,11 @@ function sourceRelPathRejectReason(raw, opts) {
 
 // Canonical JSON for the lock serialization ONLY: sorted object keys,
 // stable arrays, no whitespace decisions left to the ambient runtime.
-// This is not a general-purpose repo serializer.
-function canonicalJson(value) {
+// This is not a general-purpose repo serializer. Exported for the
+// .locus container layer (src/locus-archive.js), which must serialize
+// the LOCUS.md manifest with the exact same canonical form as the
+// lock — no second copy of the algorithm.
+export function canonicalJson(value) {
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
   if (Array.isArray(value)) return '[' + value.map(canonicalJson).join(',') + ']';
   const keys = Object.keys(value).sort();
