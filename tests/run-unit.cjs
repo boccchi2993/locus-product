@@ -12,6 +12,10 @@ const SUITES = [
   'runtime-visibility.test.cjs',
   'capability-composition.test.cjs',
   'capability-package.test.cjs',
+  // .locus archive container: pack/read/parse/verify round trip, the
+  // hostile-zip diagnostic matrix (hand-built byte arrays), bounded
+  // zip-bomb abort, truncation safety, Python-zipfile cross-check.
+  'locus-archive.test.mjs',
   'skill-instances.test.cjs',
   'presentation.test.cjs',
   'store-defaults.test.cjs',

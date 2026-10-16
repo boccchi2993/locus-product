@@ -22,13 +22,15 @@
 //         __LOCUS_HARNESS_REPLAY_VALIDATION__ tables, eval and new
 //         Function stay out of the production graph.
 //   OWN5  ownership coverage: every JS/Vue file under src/ is reachable
-//         from the entry, EXCEPT the single allowlisted module
-//         src/capability-package.js — the Product authoring/package
-//         boundary whose production-UI wiring is deliberately pending
-//         (its header); the exemption is tied to a REAL consumer by
-//         asserting the packaged storage gate's build input
-//         (tests/m3c-storage-host.html) imports it, so the allowlist
-//         entry fails loudly if that seam ever disappears.
+//         from the entry, EXCEPT the allowlisted pending-wiring pure
+//         modules — src/capability-package.js (the Product
+//         authoring/package boundary) and src/locus-archive.js (the
+//         .locus container layer), both with deliberately pending
+//         production-UI wiring (their headers); each exemption is tied
+//         to a REAL consumer asserted right after (the packaged
+//         storage gate's build input imports capability-package.js;
+//         the locus-archive suite imports locus-archive.js), so an
+//         allowlist entry fails loudly if its seam ever disappears.
 //   OWN6..OWN13  NEGATIVE SELF-PROOFS: each forbidden shape is rebuilt
 //         in a throwaway tree under the OS temp dir and run through the
 //         SAME scanner code; each check asserts the specific violation
@@ -77,7 +79,7 @@ const PUBLIC_CORE_SPECS = {
 const CORE_PREFIXES = ['locus-runtime/', 'locus-harness/'];
 // src/ files allowed to sit OUTSIDE the production closure, each with its
 // pinned justification (OWN5). Forward-slash repo-relative form.
-const CLOSURE_EXEMPT = new Set(['src/capability-package.js']);
+const CLOSURE_EXEMPT = new Set(['src/capability-package.js', 'src/locus-archive.js']);
 const RESIDUAL_TABLES = ['__LOCUS_RUNTIME_CORE__', '__LOCUS_HARNESS_CORE__', '__LOCUS_HARNESS_REPLAY_VALIDATION__'];
 
 function scriptBlocks(fileText, isVue) {
@@ -229,6 +231,14 @@ function deriveClosure(root) {
   check('OWN5.exemption-has-real-consumer',
     existsSync(join(ROOT, exemptPath.split('/').join(sep))) && exemptReallyBuilt,
     'the allowlisted ' + exemptPath + ' must stay a real build input of the packaged storage gate');
+  // Second pending-wiring module: its pinned consumer is the .locus
+  // archive suite, which imports the real module directly.
+  const archiveExempt = [...CLOSURE_EXEMPT][1];
+  const archiveReallyImported = readFileSync(join(ROOT, 'tests', 'locus-archive.test.mjs'), 'utf8')
+    .includes('../src/locus-archive.js');
+  check('OWN5.exemption-has-real-consumer.locus-archive',
+    existsSync(join(ROOT, archiveExempt.split('/').join(sep))) && archiveReallyImported,
+    'the allowlisted ' + archiveExempt + ' must stay a real import of the locus-archive suite');
 }
 
 // ============================================================
