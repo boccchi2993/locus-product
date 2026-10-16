@@ -15,6 +15,9 @@ const SUITES = [
   'skill-instances.test.cjs',
   'presentation.test.cjs',
   'store-defaults.test.cjs',
+  // Max output tokens setting (DECISIONS.md D5): defaults, string↔int
+  // persistence round trip, session.setMaxTokens wiring and its guard.
+  'max-tokens-settings.test.cjs',
   'conversation-routing.test.mjs',
   'submit-presentation.test.mjs',
   'store-python-lifecycle.test.mjs',

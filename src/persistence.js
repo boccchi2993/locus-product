@@ -409,7 +409,7 @@ export class PersistenceService {
   }
 
   async saveSettings(settings) {
-    var keys = ['apiBase', 'model', 'proxy', 'dialect'];
+    var keys = ['apiBase', 'model', 'proxy', 'dialect', 'maxTokens'];
     for (var i = 0; i < keys.length; i++) {
       var key = keys[i];
       await this.put('settings', { key: key, value: persistenceSafeString(settings[key] || '') });

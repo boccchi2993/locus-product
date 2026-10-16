@@ -19,6 +19,11 @@
         <input id="set-model" v-model="store.settings.model" type="text" spellcheck="false" autocomplete="off">
       </div>
       <div class="field">
+        <label for="set-max-tokens">Max output tokens</label>
+        <input id="set-max-tokens" v-model.number="store.settings.maxTokens" type="number" min="1" step="1" inputmode="numeric">
+        <div class="hint">Upper bound for one model reply. Lower it if the provider rejects requests; Locus never guesses it from the model name.</div>
+      </div>
+      <div class="field">
         <label for="set-dialect">API dialect</label>
         <select id="set-dialect" v-model="store.settings.dialect">
           <option value="auto">auto — detect from endpoint</option>
