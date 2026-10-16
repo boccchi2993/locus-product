@@ -99,6 +99,8 @@ NOT YET (v1B and beyond):
   (explicitly labeled LEGACY SYNTHETIC COMPOSITION PATH in the worker) and
   is scheduled for removal/isolation in v1B.
 
+> 注：已由 [DECISIONS.md](DECISIONS.md) D10 取代，见 [CAPABILITY-INSTALL.md](CAPABILITY-INSTALL.md)。
+
 No worker/Plugin network authority, arbitrary model URL, marketplace, PyPI
 resolver, dependency solver, model-triggered install, or new model tool in
 v1.
