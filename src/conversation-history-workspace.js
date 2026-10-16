@@ -12,9 +12,9 @@
 import { WorkspaceAdapter, normalizeWorkspacePath } from './product/runtime-api.js';
 
 // /home/locus/history/<conversationId>/tool-outputs/<sequence>.txt serves
-// the FULL output of one tool result, straight from its normalized row.
-// No copy is stored: the file lives and dies with the conversation's
-// normalized messages.
+// the FULL output of one tool result, straight from its normalized row
+// (docs/CONTEXT-MANAGEMENT.md §3.1). No copy is stored: the file lives and
+// dies with the conversation's normalized messages (DECISIONS.md D9).
 export const HISTORY_MOUNT_PATH = '/home/locus/history';
 const HISTORY_FILES = ['events.jsonl', 'messages.jsonl', 'provider-frames.jsonl'];
 const TOOL_OUTPUTS_DIR = 'tool-outputs';
