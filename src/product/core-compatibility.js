@@ -121,6 +121,18 @@ export const PRODUCT_CORE_REQUIREMENTS = Object.freeze({
         capability: 'capabilityComposition',
         rule: 'capability features are disabled for the task (no refresh, no task environment, no plugin payload, no skill mounts; the runtime returns to core-only); a task with user-enabled capabilities is refused explicitly before any side effect',
       }),
+      Object.freeze({
+        capability: 'requestBudget',
+        rule: 'the submit-time image pre-check falls back to the whole-history estimate against historyBudgetBytes(); run-time trimming is whatever the harness implements',
+      }),
+      Object.freeze({
+        capability: 'toolOutputPath',
+        rule: 'no toolOutputPath run option and no projection option are passed, and the environment notes do not mention full-output files; truncated tool output stays truncated',
+      }),
+      Object.freeze({
+        capability: 'contextWindowBudget',
+        rule: 'the context window setting is saved but not applied (setContextWindow / resetTokenCalibration are never called); only the transport budget applies',
+      }),
     ]),
   }),
 });

@@ -24,6 +24,11 @@
         <div class="hint">Upper bound for one model reply. Lower it if the provider rejects requests; Locus never guesses it from the model name.</div>
       </div>
       <div class="field">
+        <label for="set-context-window">Context window (tokens)</label>
+        <input id="set-context-window" v-model.number="store.settings.contextWindow" type="number" min="1" step="1" inputmode="numeric" placeholder="unknown">
+        <div class="hint">Optional: the model's total context size. When set, Locus keeps each request within it, calibrated from the token counts the provider reports. Leave empty if unknown; Locus never guesses it from the model name.</div>
+      </div>
+      <div class="field">
         <label for="set-dialect">API dialect</label>
         <select id="set-dialect" v-model="store.settings.dialect">
           <option value="auto">auto — detect from endpoint</option>

@@ -60,7 +60,7 @@ import { LocusMutationPolicy } from '../mutation-policy.js';
 import { AttachmentStore, imageContentPart, textContentPart } from '../attachments.js';
 import { PersistenceServiceInstance, LOCUS_HOME_SKELETON } from '../persistence.js';
 import { SkillInstanceStorage, SkillInstanceWorkspace, productTaskVfsMounts } from '../extensions.js';
-import { ConversationHistoryWorkspace } from '../conversation-history-workspace.js';
+import { ConversationHistoryWorkspace, historyToolOutputPath } from '../conversation-history-workspace.js';
 // M2b (repository split): the Product prompt inputs — behavior notes and
 // the descriptionPort adapter over the runtime's PUBLIC describeCommands().
 import { locusEnvironmentNotes, productDescriptionPort } from './product-prompt.js';
@@ -306,6 +306,9 @@ function taskCompatibilityDecision(compatibility) {
     imageInputGate: !missing.includes('imageInputGate'),
     capabilityComposition: !missing.includes('capabilityComposition'),
     nativeToolCalls: !missing.includes('nativeToolCalls'),
+    requestBudget: !missing.includes('requestBudget'),
+    toolOutputPath: !missing.includes('toolOutputPath'),
+    contextWindowBudget: !missing.includes('contextWindowBudget'),
   });
 }
 
@@ -399,6 +402,7 @@ const DEFAULTS = {
   proxy: '',
   dialect: 'auto',
   maxTokens: 8192,
+  contextWindow: null,
   remember: false,
 };
 
@@ -407,6 +411,14 @@ const DEFAULTS = {
 function parseMaxTokens(v) {
   const n = typeof v === 'number' ? v : Number.parseInt(String(v || ''), 10);
   return Number.isInteger(n) && n > 0 ? n : DEFAULTS.maxTokens;
+}
+
+// Optional model context window in tokens (DECISIONS.md D5: user
+// configuration, never inferred). Empty / invalid → null (unknown).
+function parseContextWindow(v) {
+  if (v == null || v === '') return null;
+  const n = typeof v === 'number' ? v : Number.parseInt(String(v), 10);
+  return Number.isInteger(n) && n > 0 ? n : null;
 }
 
 function sessionGet(key) {
@@ -425,10 +437,11 @@ function loadSettings() {
   let cfg = null;
   try { cfg = JSON.parse(sessionGet(SESSION_CONFIG_KEY) || 'null'); } catch (e) {}
   if (!cfg) return s;
-  for (const k of ['apiKey', 'apiBase', 'model', 'proxy', 'dialect', 'maxTokens']) {
+  for (const k of ['apiKey', 'apiBase', 'model', 'proxy', 'dialect', 'maxTokens', 'contextWindow']) {
     if (cfg[k]) s[k] = cfg[k];
   }
   s.maxTokens = parseMaxTokens(s.maxTokens);
+  s.contextWindow = parseContextWindow(s.contextWindow);
   s.remember = true;
   return s;
 }
@@ -739,7 +752,7 @@ function providerSessionsAdapter() {
     getAdapter: (config) => getProviderAdapter(config),
     providerConfig: providerConfig,
     createProviderIdentity: createProviderIdentity,
-    projectHistory: (messages, dialect) => projectNormalizedHistory(messages, dialect),
+    projectHistory: (messages, dialect) => projectNormalizedHistory(messages, dialect, projectionOptions()),
     // Review round F3: the replay validators are Harness semantics — the
     // defaults in createProviderSessions (the harness replay-validation
     // module, through the transfer layer) apply; the Product provides
@@ -815,7 +828,9 @@ export const session = (() => {
   // describeCommands(); the Locus behavior notes come from product-prompt.
   toolPort: productToolPort,
   descriptionPort: productDescriptionPort(whenRuntimeSession),
-  environmentNotes: locusEnvironmentNotes,
+  environmentNotes: (ctx) => locusEnvironmentNotes(Object.assign({}, ctx, {
+    toolOutputs: historyMountActive && harnessDeclaresToolOutputPath(),
+  })),
   emit: handleRuntimeEvent,
   // M2a: the session boundary resets the runtime SESSION (the interpreter
   // inside it dies: globals/modules/tmp — verified assets and the session
@@ -1049,6 +1064,10 @@ export function applySettings() {
       && store.settings.apiKey.trim() === appliedApiKey) {
     store.settings.apiKey = '';
   }
+  // The model identity BEFORE this apply — a changed identity invalidates
+  // the usage-based bytes-per-token calibration (CONTEXT-MANAGEMENT.md
+  // §3.2; D5: measured per provider, never inferred from the name).
+  const previousModelKey = [productModel.apiBase, productModel.model, productModel.dialect].join('\n');
   productModel.apiKey = store.settings.apiKey.trim();
   productModel.apiBase = nextApiBase;
   productModel.model = store.settings.model.trim() || DEFAULTS.model;
@@ -1060,6 +1079,15 @@ export function applySettings() {
   store.settings.maxTokens = nextMaxTokens;
   if (session && typeof session.setMaxTokens === 'function') {
     session.setMaxTokens(nextMaxTokens);
+  }
+  const nextContextWindow = parseContextWindow(store.settings.contextWindow);
+  store.settings.contextWindow = nextContextWindow;
+  if (session && typeof session.setContextWindow === 'function' && harnessDeclaresContextWindow()) {
+    session.setContextWindow(nextContextWindow);
+  }
+  const nextModelKey = [productModel.apiBase, productModel.model, productModel.dialect].join('\n');
+  if (nextModelKey !== previousModelKey && session && typeof session.resetTokenCalibration === 'function') {
+    session.resetTokenCalibration();
   }
   return !!nextIdentity;
 }
@@ -1194,10 +1222,23 @@ async function buildImageUserContent(input, taskCompat) {
   // guess). Over budget → explicit error, no task, no silent dropping.
   // M2b: the Harness budget constant arrives through the entry (no
   // typeof-global read anymore — inventory coupling #9 closed).
-  const budget = historyBudgetBytes();
+  // D9: compares the minimum achievable request (older tasks dropped).
+  const budget = (typeof session.effectiveRequestBudgetBytes === 'function' && (!taskCompat || taskCompat.contextWindowBudget))
+    ? session.effectiveRequestBudgetBytes()
+    : (typeof session.requestBudgetBytes === 'function' && (!taskCompat || taskCompat.requestBudget))
+      ? session.requestBudgetBytes()
+      : historyBudgetBytes();
   let imageBytes = 0;
   for (const p of parts) if (p.type === 'image') imageBytes += imageWireEstimate(p.size);
-  const projected = await session.historyRequestBytes(vfs, capabilityManager && (!taskCompat || taskCompat.capabilityComposition) ? capabilityManager.buildTaskEnvironment() : null) + imageBytes + new TextEncoder().encode(JSON.stringify({ role: 'user', content: parts })).byteLength + 16;
+  const taskEnv = capabilityManager && (!taskCompat || taskCompat.capabilityComposition) ? capabilityManager.buildTaskEnvironment() : null;
+  const newTurnBytes = imageBytes + new TextEncoder().encode(JSON.stringify({ role: 'user', content: parts })).byteLength + 16;
+  // Every older task can be dropped at run time (DECISIONS.md D9), so the
+  // pre-check asks for the smallest achievable request — same rule as the
+  // run-time ladder. Older harnesses keep the whole-history estimate.
+  const useMinimum = typeof session.minimumRequestBytes === 'function' && (!taskCompat || taskCompat.requestBudget);
+  const projected = useMinimum
+    ? await session.minimumRequestBytes(vfs, taskEnv, newTurnBytes)
+    : await session.historyRequestBytes(vfs, taskEnv) + newTurnBytes;
   if (projected > budget) {
     const conv = store.conversations.find((c) => c.id === store.liveConversationId);
     if (conv) {
@@ -1442,7 +1483,7 @@ async function prepareTask(task) {
         // classification and the ready liveness guard compare against
         // the adopted generation.
         task.adoptEpoch(pinnedGeneration);
-        session.history = projectNormalizedHistory(providerSession._projectedHistory, providerConfig().dialect);
+        session.history = projectNormalizedHistory(providerSession._projectedHistory, providerConfig().dialect, projectionOptions());
         delete providerSession._projectedHistory;
       }
       if (providerSession && providerSession._replayBlocked) session.replayBlocked = true;
@@ -1522,6 +1563,13 @@ async function prepareTask(task) {
     const taskImageInput = (taskCompat && !taskCompat.imageInputGate)
       ? taskImageInputDenial(runningConversationId)
       : null;
+    // Full-output files (docs/CONTEXT-MANAGEMENT.md §3.1): only when this
+    // task persists normalized rows (contextBound), the history view is
+    // mounted, and the frozen per-task decision says the harness declares
+    // it. The function must stay synchronous.
+    const toolOutputPath = (contextBound && historyMountActive && (!taskCompat || taskCompat.toolOutputPath))
+      ? (({ sequence }) => historyToolOutputPath(boundConversation.id, sequence))
+      : undefined;
     return {
       status: 'ready',
       epoch: session.generation,
@@ -1532,7 +1580,7 @@ async function prepareTask(task) {
         // flight. One user turn: text + selected image attachments bind
         // into a single provider turn; run() emits ONE task_start.
         try {
-          await session.run(input, { workspace: taskVfs, taskEnvironment, userContent, controller: ctx.controller, emit: ctx.emit, imageInput: taskImageInput || undefined });
+          await session.run(input, { workspace: taskVfs, taskEnvironment, userContent, controller: ctx.controller, emit: ctx.emit, imageInput: taskImageInput || undefined, toolOutputPath });
         } catch (e) {
           // The runner emits the error/terminal pair; this is the Product
           // side of the old catch block (degraded marking + snapshot).
@@ -1639,6 +1687,42 @@ async function mountExternalHandle(handle, persistHandle) {
   return provider;
 }
 
+// True once /home/locus/history is mounted over the persistence service:
+// only then can a tool-output path in history actually be read
+// (docs/CONTEXT-MANAGEMENT.md §3.1, DECISIONS.md D9 principle 2).
+let historyMountActive = false;
+export function historyToolOutputsActive() { return historyMountActive; }
+
+// The harness declaration for the WHOLE session (not per task): used by
+// the environment notes and the projection option.
+function harnessDeclaresToolOutputPath() {
+  try {
+    const caps = harnessDeclaration();
+    return !!(caps && caps.capabilities && caps.capabilities.toolOutputPath);
+  } catch (e) { return false; }
+}
+
+// The companion gate for the context-window setting (CONTEXT-MANAGEMENT.md
+// §3.4): the setting is always SAVED, but setContextWindow is only called
+// when this harness generation actually declares the capability — the
+// frozen per-task rule "saved but not applied" for an older harness.
+function harnessDeclaresContextWindow() {
+  try {
+    const caps = harnessDeclaration();
+    return !!(caps && caps.capabilities && caps.capabilities.contextWindowBudget);
+  } catch (e) { return false; }
+}
+
+// Product side of the D9 projection option (docs/CONTEXT-MANAGEMENT.md
+// §3.1): rows projected for a harness that declared toolOutputPath carry
+// the virtual full-output file path for that row. Only when the history
+// view is actually mounted — a path the model cannot read must never be
+// advertised.
+function projectionOptions() {
+  if (!historyMountActive || !harnessDeclaresToolOutputPath()) return undefined;
+  return { toolOutputPathForRow: (row) => historyToolOutputPath(row && row.conversationId, row && row.sequence) };
+}
+
 async function mountDurableStorage() {
   if (!PersistenceServiceInstance) return;
   try {
@@ -1654,6 +1738,7 @@ async function mountDurableStorage() {
   } catch (e) { reportPersistenceIssue(e, 'Durable plugin storage unavailable; using an empty plugin mount'); }
   try {
     vfs.mount('/home/locus/history', new ConversationHistoryWorkspace(PersistenceServiceInstance), 'system-read-only');
+    historyMountActive = true;
   } catch (e) { reportPersistenceIssue(e, 'Conversation history mount unavailable'); }
 }
 
@@ -2025,10 +2110,11 @@ async function bootPersistence() {
   await PersistenceServiceInstance.ready;
   try {
     const settings = await PersistenceServiceInstance.loadSettings();
-    for (const key of ['apiBase', 'model', 'proxy', 'dialect', 'maxTokens']) {
+    for (const key of ['apiBase', 'model', 'proxy', 'dialect', 'maxTokens', 'contextWindow']) {
       if (settings[key]) store.settings[key] = settings[key];
     }
     store.settings.maxTokens = parseMaxTokens(store.settings.maxTokens);
+    store.settings.contextWindow = parseContextWindow(store.settings.contextWindow);
     applySettings();
     // Settings identify the destination first.  Only then may a remembered
     // credential for that exact provider/adapter/dialect/path be hydrated.
