@@ -35,6 +35,7 @@ The repository keeps documentation beside code so architecture changes, tests, a
 | [NETWORK-RUNTIME.md](NETWORK-RUNTIME.md) | HTTP routing, retry, and approval semantics |
 | [APPROVALS.md](APPROVALS.md) | Suspend/resume approval framework |
 | [MODEL-PROTOCOL.md](MODEL-PROTOCOL.md) | Provider-native history and replay |
+| [CONTEXT-MANAGEMENT.md](CONTEXT-MANAGEMENT.md) | Context management design: append-only history, request budget, truncated-output retrieval |
 | [PERSISTENCE.md](PERSISTENCE.md) | IndexedDB/OPFS and recovery semantics |
 | [IMAGE-INPUT.md](IMAGE-INPUT.md) | Image/perception boundary |
 

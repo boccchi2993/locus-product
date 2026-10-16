@@ -282,6 +282,8 @@ expansion + framing — not their metadata JSON. A submit whose turn would
 exceed the budget fails BEFORE any task starts with an explicit error;
 `enforceHistoryBudget` remains the run-time backstop.
 
+> 注：预算现在可配置，并取传输上限与上下文上限中的较小值；提交前预检改为按"丢弃旧任务后的最小请求"计算。见 [DECISIONS.md](DECISIONS.md) D9 与 [CONTEXT-MANAGEMENT.md](CONTEXT-MANAGEMENT.md)。
+
 ## Upload / submit lifecycle
 
 The composer keeps working as before ("→ Upload files", attachment chips
