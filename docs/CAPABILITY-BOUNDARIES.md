@@ -522,6 +522,8 @@ mutation, a higher-risk class than ordinary workspace writes:
   become or shadow a skill: only declared instance paths are mutable, and
   even a model acting on injected file content hits the confirmation gate.
 
+> 注：预算现在可配置，并取传输上限与上下文上限中的较小值；提交前预检改为按"丢弃旧任务后的最小请求"计算。见 [DECISIONS.md](DECISIONS.md) D9 与 [CONTEXT-MANAGEMENT.md](CONTEXT-MANAGEMENT.md)。
+
 ### 11.4 MCP semantics (v1)
 
 - A capability references MCP requirements by id; the requirement state
