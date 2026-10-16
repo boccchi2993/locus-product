@@ -242,6 +242,40 @@ fallback protocol takes over. Parse errors, timeouts, 401/402/403/429,
 5xx and cancellations never trigger a resend: the inference may already
 have happened and been billed.
 
+## 5b. History budget and cache stability
+
+Every model request carries the serialized provider history under a byte
+budget. The harness enforces it with a ladder that protects the request
+prefix, because a stable prefix is what makes provider-side prompt
+caching effective (deepseek/openai-style endpoints cache by prefix
+automatically):
+
+1. **Append-only steady state.** A history entry is final when it is
+   written; nothing rewrites it while the request fits the budget.
+2. **Low-water drop of old tasks.** When the budget is exceeded, whole
+   tasks are dropped from the OLDEST `_taskStart` boundary at once, down
+   to 60% of the budget — one cut instead of one per turn, so the prefix
+   stays identical across the following turns. Assistant messages are
+   never modified (byte-exact replay), and tool call/result pairs are
+   only ever removed as whole tasks.
+3. **In-task elision of old tool results.** If the current task alone is
+   still over budget, older tool results inside the current task are
+   replaced copy-on-write with a short stub (skipping the most recent 4);
+   entries whose full output was persisted under `/home/locus/history`
+   name that file in the stub so the model can retrieve it.
+4. **Budget exceeded** → the request fails with `history_budget`, as
+   before.
+
+Restored (reloaded) history gets its `_taskStart` boundaries rebuilt
+inside the replay paths (raw frames and projection), so the first trim
+after a reload cuts the same way the pre-reload ladder would — the
+restored history is not dropped in one piece.
+
+The full design (budget ladder, context-window budget calibration,
+truncation markers naming full-output files) lives in
+[CONTEXT-MANAGEMENT.md](CONTEXT-MANAGEMENT.md); the four governing
+principles are DECISIONS.md D9.
+
 ## 6. UI presentation policy
 
 Locus is an agent harness, so execution transparency is valuable.
