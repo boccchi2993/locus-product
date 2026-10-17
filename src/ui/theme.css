@@ -768,3 +768,24 @@ input, select, textarea { font-family: inherit; font-size: inherit; color: inher
 .capability-state[data-state="ready"] { color: var(--ok); border-color: currentColor; }
 .capability-state[data-state="needs-connection"] { color: var(--warn); border-color: currentColor; }
 .capability-state[data-state="error"] { color: var(--error); border-color: currentColor; }
+
+/* capability packages (D10 install UI) */
+.capability-import-dialog {
+  margin-top: 8px; padding: 10px 12px;
+  border: 1px solid var(--accent); border-radius: 10px;
+  background: var(--surface);
+}
+.capability-import-title { font-weight: 600; font-size: 13px; }
+.capability-import-row { flex-wrap: wrap; margin-top: 4px; }
+.capability-import-row .rail-btn { margin-top: 0; }
+.capability-import-path { flex: 1; min-width: 0; }
+.capability-import-actions { margin-top: 8px; }
+.capability-import-body-wrap { margin-top: 6px; }
+.capability-import-body-wrap summary { cursor: pointer; font-size: 11.5px; color: var(--faint); }
+.capability-import-body {
+  margin: 6px 0 0; padding: 8px;
+  max-height: 180px; overflow: auto;
+  font-family: var(--mono); font-size: 11px; line-height: 1.5;
+  white-space: pre-wrap; word-break: break-word;
+  background: var(--surface-soft); border: 1px solid var(--border-soft); border-radius: 6px;
+}

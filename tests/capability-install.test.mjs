@@ -32,6 +32,14 @@
 //   CI18 schema 4: reset() wipes records + bytes; clearConversations keeps
 //   CI19 memory mode lists durable === false
 //   CI20 a stale commit token reports the inspection as expired
+//   CI21 F1 fix: version replacement re-enables a package the boot
+//        verification skipped (wasEnabled from the record's enabled bit)
+//   CI22 F2 fix: capabilityPackageList is read-only — no idle gate, works
+//        while a task runs
+//   CI23 beginCapabilityImportFromBytes: valid → summary, bad → diagnostics
+//   CI24 confirmCapabilityImport: installs + clears the dialog + refreshes
+//        the list; a refused commit keeps the dialog with the error
+//   CI25 cancelCapabilityImport: drops the dialog, writes nothing
 //
 // Service-level cases drive createCapabilityPackages directly (real
 // CapabilityManager + memory PersistenceService, per
@@ -811,6 +819,158 @@ function harnessDeclarationVariant({ capabilityPackages = true } = {}) {
     const err = await rejectionOf(rig.service.commit('no-such-token', {}));
     check('CI20 expired-token error', !!err && /inspection expired/.test(err.message),
       err && err.message);
+  }
+
+  // ---------- CI21. F1: replacement re-enables a boot-skipped package ----------
+  {
+    section('CI21 F1: replace re-enables a package the boot verification skipped');
+    const v1 = await packProject({ version: '1.0.0' });
+    let v1Digest = null;
+    {
+      const m = await loadStore(null);
+      await m.whenBooted;
+      const { summary } = await installViaStore(m, v1, { enable: true });
+      v1Digest = summary.digest;
+      // Forge: same manifest (the record digest still matches), one file's
+      // bytes drifted — the boot path then SKIPS the package (never
+      // registered) while the record keeps enabled: true.
+      const read = await LA.readLocusArchive(v1.bytes);
+      const files = new Map(read.files);
+      files.set('skills/skill-a/SKILL.md', new TextEncoder().encode('adversarial v1 drift\n'));
+      await sharedPersistence.writeCapabilityPackageBytes(CAP_ID, v1Digest,
+        await LA.writeLocusArchive(files, read.locusMd));
+    }
+    {
+      const m = await loadStore(null, { reset: false }); // the "restart"
+      await m.whenBooted;
+      const n = m.store.capabilityPackageNotices.find((x) => x.id === CAP_ID);
+      const record = await recordOf(sharedPersistence, CAP_ID);
+      check('CI21 restart skips v1: mismatch notice, unregistered, record enabled=true',
+        !!n && n.status === 'mismatch'
+        && m.capabilityManager.isPackage(CAP_ID) === false
+        && !!record && record.enabled === true && record.verification === 'mismatch-skipped',
+        JSON.stringify({ notices: m.store.capabilityPackageNotices, enabled: record && record.enabled }));
+      const v2 = await packProject({ version: '2.0.0' });
+      const s2 = await m.inspectCapabilityPackage(v2.bytes);
+      check('CI21 v2 inspect: replace, no mismatch acceptance (different version)',
+        s2.ok === true && s2.kind === 'replace' && s2.needsMismatchAcceptance === false,
+        JSON.stringify(s2.ok ? { kind: s2.kind, needs: s2.needsMismatchAcceptance } : s2.diagnostics));
+      const done = await m.commitCapabilityPackage(s2.token, {});
+      check('CI21 v2 lands ready (F1: wasEnabled read from the record)', done.state === 'ready' && done.unchanged === false,
+        JSON.stringify(done));
+      const updated = await recordOf(sharedPersistence, CAP_ID);
+      check('CI21 record now v2 and still enabled',
+        !!updated && updated.version === '2.0.0' && updated.enabled === true);
+      check('CI21 v2 registered', m.capabilityManager.isPackage(CAP_ID) === true);
+    }
+  }
+
+  // ---------- CI22. F2: the list is read-only ----------
+  {
+    section('CI22 F2: capabilityPackageList works while a task is running');
+    const m = await loadStore(null);
+    await m.whenBooted;
+    const packed = await packProject();
+    await installViaStore(m, packed);
+    // The established running-task shape (the fake-session pattern): a
+    // task object with a controller on the live session, plus the busy flag.
+    const controller = new AbortController();
+    m.session.task = { controller };
+    m.store.busy = true;
+    try {
+      const list = await m.capabilityPackageList();
+      check('CI22 list succeeds mid-task', !!list && list.durable === false
+        && Array.isArray(list.packages) && list.packages.some((p) => p.id === CAP_ID),
+        JSON.stringify(list && list.packages.map((p) => p.id)));
+      check('CI22 the UI support gate still reports supported',
+        m.capabilityPackagesSupported() === true);
+    } finally {
+      m.store.busy = false;
+      if (m.session.task && m.session.task.controller === controller) m.session.task = null;
+    }
+  }
+
+  // ---------- CI23. the import dialog state: begin/inspect ----------
+  {
+    section('CI23 beginCapabilityImportFromBytes: summary vs diagnostics');
+    const m = await loadStore(null);
+    await m.whenBooted;
+    const packed = await packProject();
+    await m.beginCapabilityImportFromBytes(packed.bytes, 'packed.locus');
+    check('CI23 valid package sets source/label/summary', !!m.store.capabilityImport
+      && m.store.capabilityImport.source === 'file'
+      && m.store.capabilityImport.label === 'packed.locus'
+      && !!m.store.capabilityImport.summary
+      && m.store.capabilityImport.summary.ok === true
+      && typeof m.store.capabilityImport.summary.token === 'string'
+      && !m.store.capabilityImport.diagnostics,
+      JSON.stringify(m.store.capabilityImport
+        ? { source: m.store.capabilityImport.source, label: m.store.capabilityImport.label } : null));
+    const bad = new Uint8Array([0, 1, 2, 3, 4, 5]);
+    await m.beginCapabilityImportFromBytes(bad, 'bad.locus');
+    check('CI23 bad package sets diagnostics, no summary', !!m.store.capabilityImport
+      && m.store.capabilityImport.source === 'file'
+      && m.store.capabilityImport.label === 'bad.locus'
+      && Array.isArray(m.store.capabilityImport.diagnostics)
+      && m.store.capabilityImport.diagnostics.length > 0
+      && !m.store.capabilityImport.summary,
+      JSON.stringify(m.store.capabilityImport && m.store.capabilityImport.diagnostics));
+    check('CI23 neither inspect wrote anything',
+      (await recordOf(sharedPersistence, CAP_ID)) === null
+      && m.capabilityManager.isPackage(CAP_ID) === false);
+  }
+
+  // ---------- CI24. confirmCapabilityImport ----------
+  {
+    section('CI24 confirm: installs, clears the dialog, refreshes the list');
+    const m = await loadStore(null);
+    await m.whenBooted;
+    const packed = await packProject();
+    await m.beginCapabilityImportFromBytes(packed.bytes, 'packed.locus');
+    await m.confirmCapabilityImport();
+    check('CI24 confirm clears the dialog', m.store.capabilityImport === null,
+      JSON.stringify(m.store.capabilityImport));
+    const record = await recordOf(sharedPersistence, CAP_ID);
+    check('CI24 package installed', !!record && record.id === CAP_ID
+      && m.capabilityManager.isPackage(CAP_ID) === true);
+    check('CI24 the installed list refreshed', Array.isArray(m.store.capabilityPackages.packages)
+      && m.store.capabilityPackages.packages.some((p) => p.id === CAP_ID),
+      JSON.stringify(m.store.capabilityPackages.packages.map((p) => p.id)));
+    // Refusal path: a running task rejects the commit; the dialog stays
+    // with the error and the package is untouched.
+    const v2 = await packProject({ version: '2.0.0' });
+    await m.beginCapabilityImportFromBytes(v2.bytes, 'v2.locus');
+    const controller = new AbortController();
+    m.session.task = { controller };
+    m.store.busy = true;
+    try {
+      await m.confirmCapabilityImport();
+    } finally {
+      m.store.busy = false;
+      if (m.session.task && m.session.task.controller === controller) m.session.task = null;
+    }
+    check('CI24 refused confirm keeps the dialog with the error', !!m.store.capabilityImport
+      && !!m.store.capabilityImport.summary
+      && typeof m.store.capabilityImport.error === 'string'
+      && /task is running/.test(m.store.capabilityImport.error),
+      JSON.stringify(m.store.capabilityImport && m.store.capabilityImport.error));
+    check('CI24 the refused replacement changed nothing',
+      (await recordOf(sharedPersistence, CAP_ID)).version === '1.0.0');
+  }
+
+  // ---------- CI25. cancelCapabilityImport writes nothing ----------
+  {
+    section('CI25 cancel: drops the dialog, zero writes');
+    const m = await loadStore(null);
+    await m.whenBooted;
+    const packed = await packProject();
+    await m.beginCapabilityImportFromBytes(packed.bytes, 'packed.locus');
+    m.cancelCapabilityImport();
+    check('CI25 dialog cleared', m.store.capabilityImport === null);
+    check('CI25 nothing was written',
+      (await recordOf(sharedPersistence, CAP_ID)) === null
+      && m.capabilityManager.isPackage(CAP_ID) === false
+      && m.store.capabilityPackages.packages.length === 0);
   }
 
   console.log('---');

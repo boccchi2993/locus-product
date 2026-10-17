@@ -80,6 +80,14 @@
         <div v-for="a in store.artifacts" :key="a.path" class="artifact-row">
           <span class="artifact-path" :title="'/mnt/download/' + a.path">{{ a.path }}</span>
           <span class="artifact-size">{{ humanSize(a.size) }}</span>
+          <button
+            v-if="isLocusArtifact(a.path)"
+            class="artifact-download"
+            type="button"
+            :disabled="store.busy || store.cancelling"
+            :data-testid="'artifact-import-' + a.path.split('/').join('-')"
+            @click="importArtifact(a.path)"
+          >Import</button>
           <button class="artifact-download" type="button" @click="downloadArtifact(a.path)">Download</button>
         </div>
       </div>
@@ -121,7 +129,10 @@
 <script setup>
 import { reactive, computed, watch } from 'vue';
 import { Telemetry } from '../telemetry.js';
-import { store, activeConversation, mountFolder, reconnectWorkspace, refreshArtifacts, downloadArtifact } from '../ui/store.js';
+import {
+  store, activeConversation, mountFolder, reconnectWorkspace, refreshArtifacts,
+  downloadArtifact, beginCapabilityImportFromPath, capabilityPackagesSupported,
+} from '../ui/store.js';
 
 /* global Telemetry */
 
@@ -164,5 +175,22 @@ function humanSize(n) {
   if (bytes < 1024) return bytes + ' B';
   if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
   return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+// ---------- capability package import from /mnt/download (D10 §4) ----------
+// A .locus artifact offers an Import button next to Download. The click is
+// USER-only: the model has no path to beginCapabilityImportFromPath. The
+// settings panel opens immediately; the confirmation dialog appears inside
+// it once the inspect completes (unsupported cores never show the button).
+function isLocusArtifact(path) {
+  return typeof path === 'string' && path.endsWith('.locus') && capabilityPackagesSupported();
+}
+
+async function importArtifact(path) {
+  try {
+    await beginCapabilityImportFromPath('/mnt/download/' + path);
+  } finally {
+    store.settingsOpen = true;
+  }
 }
 </script>

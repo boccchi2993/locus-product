@@ -255,6 +255,7 @@ export async function acceptCapabilityPackageMismatch(id) {
     const result = await capabilityPackages.acceptMismatch(id);
     store.capabilityPackageNotices = store.capabilityPackageNotices.filter((n) => n.id !== id);
     syncCapabilityProjection();
+    await refreshCapabilityPackages();
     return result;
   });
 }
@@ -262,8 +263,9 @@ export async function acceptCapabilityPackageMismatch(id) {
 // “本次跳过”: drop the queued notice WITHOUT touching storage — the
 // package stays installed, unloaded, and the notice re-appears on the
 // next boot while the bytes still mismatch.
-export function dismissCapabilityPackageNotice(id) {
+export async function dismissCapabilityPackageNotice(id) {
   store.capabilityPackageNotices = store.capabilityPackageNotices.filter((n) => n.id !== id);
+  await refreshCapabilityPackages();
 }
 
 export async function uninstallCapabilityPackage(id) {
@@ -273,14 +275,92 @@ export async function uninstallCapabilityPackage(id) {
     const result = await capabilityPackages.uninstall(id);
     store.capabilityPackageNotices = store.capabilityPackageNotices.filter((n) => n.id !== id);
     syncCapabilityProjection();
+    await refreshCapabilityPackages();
     return result;
   });
 }
 
 export async function capabilityPackageList() {
-  assertCapabilitiesIdle();
+  // A pure READ projection (review F2): the settings panel refreshes it on
+  // mount, including while a task runs — so unlike the install mutators it
+  // carries no idle gate and no storage-mutation window. The harness
+  // support gate stays.
   assertCapabilityPackagesSupported();
-  return withStorageMutation(async () => capabilityPackages.list());
+  return capabilityPackages.list();
+}
+
+// Whether THIS core generation offers capability packages at all (the UI
+// gate): the service exists AND the harness declares the capability.
+export function capabilityPackagesSupported() {
+  return !!capabilityPackages && harnessDeclaresCapabilityPackages();
+}
+
+// ---------- the import dialog + installed-list UI state (C1-P3) ----------
+// Both entry points — the settings panel and the /mnt/download list —
+// share ONE in-flight import: store.capabilityImport is
+//   null
+//   | { source: 'file' | 'path', label, summary }    — awaiting confirm
+//   | { source, label, diagnostics }                 — refused / failed
+//   | { source, label, summary, error }              — confirm failed
+export async function beginCapabilityImportFromBytes(bytes, label) {
+  try {
+    const result = await inspectCapabilityPackage(bytes);
+    if (result.ok) {
+      store.capabilityImport = { source: 'file', label, summary: result };
+    } else {
+      store.capabilityImport = { source: 'file', label, diagnostics: result.diagnostics };
+    }
+  } catch (e) {
+    store.capabilityImport = {
+      source: 'file',
+      label,
+      diagnostics: [{ code: 'capability_import_failed', path: '', message: e.message }],
+    };
+  }
+}
+
+export async function beginCapabilityImportFromPath(vfsPath) {
+  const p = String(vfsPath || '');
+  try {
+    const result = await inspectCapabilityPackageFromPath(p);
+    if (result.ok) {
+      store.capabilityImport = { source: 'path', label: p, summary: result };
+    } else {
+      store.capabilityImport = { source: 'path', label: p, diagnostics: result.diagnostics };
+    }
+  } catch (e) {
+    store.capabilityImport = {
+      source: 'path',
+      label: p,
+      diagnostics: [{ code: 'capability_import_failed', path: '', message: e.message }],
+    };
+  }
+}
+
+export async function confirmCapabilityImport() {
+  const current = store.capabilityImport;
+  const summary = current && current.summary;
+  if (!summary) return;
+  try {
+    await commitCapabilityPackage(summary.token, {
+      acceptMismatch: summary.needsMismatchAcceptance === true,
+    });
+    store.capabilityImport = null;
+    await refreshCapabilityPackages();
+  } catch (e) {
+    store.capabilityImport = { ...current, error: e.message || String(e) };
+  }
+}
+
+export function cancelCapabilityImport() {
+  store.capabilityImport = null;
+}
+
+// The installed-packages projection for the settings panel. A no-op on a
+// core generation without packages (the panel shows the unsupported line).
+export async function refreshCapabilityPackages() {
+  if (!capabilityPackagesSupported()) return;
+  store.capabilityPackages = await capabilityPackageList();
 }
 
 // ---------- runtime session lifecycle (M2a + review round) ----------
@@ -618,6 +698,13 @@ export const store = reactive({
   // 'mismatch' notices offer 继续/本次跳过; dismissed ones are dropped
   // without touching storage.
   capabilityPackageNotices: [],
+  // The one in-flight import shown by the confirmation dialog (both entry
+  // points — the settings panel and the /mnt/download list — share it):
+  // null | { source: 'file' | 'path', label, summary } | { source, label, diagnostics }
+  capabilityImport: null,
+  // The installed-packages projection for the settings panel (D10 §5):
+  // { durable, packages: [...] } from capabilityPackageList().
+  capabilityPackages: { durable: true, packages: [] },
   telemetryVersion: 0, // bumped on tool_result so rails re-read Telemetry.records
 });
 

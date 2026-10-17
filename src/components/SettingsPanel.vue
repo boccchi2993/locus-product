@@ -65,6 +65,145 @@
 
       <section class="storage-controls" data-testid="capabilities-section">
         <div class="section-label">Capabilities</div>
+
+        <!-- Capability packages (D10 / C1-P3). Everything the package or the
+             archive carries (author, purpose, body, component displayNames,
+             diagnostic messages) is UNTRUSTED model-adjacent content: it is
+             rendered exclusively through text interpolation — never v-html,
+             never innerHTML, never a URL attribute. The body is a plain
+             monospace, line-preserving text block; no Markdown rendering. -->
+
+        <!-- Import confirmation dialog (both entry points share it) -->
+        <div v-if="store.capabilityImport" class="capability-import-dialog" data-testid="capability-import-dialog">
+          <template v-if="store.capabilityImport.diagnostics">
+            <div class="capability-import-title">This package cannot be imported</div>
+            <div data-testid="capability-import-diagnostics">
+              <div v-for="(d, i) in store.capabilityImport.diagnostics" :key="i" class="hint">
+                {{ d.code }}: {{ d.message }}
+              </div>
+            </div>
+            <div class="capability-row capability-import-actions">
+              <button class="rail-btn" type="button" data-testid="capability-import-cancel" @click="cancelCapabilityImport()">Close</button>
+            </div>
+          </template>
+          <template v-else-if="importSummary && importSummary.kind === 'same'">
+            <div class="capability-import-title">Import capability package</div>
+            <div class="hint">This exact package is already installed.</div>
+            <div class="capability-row capability-import-actions">
+              <button class="rail-btn" type="button" data-testid="capability-import-cancel" @click="cancelCapabilityImport()">Close</button>
+            </div>
+          </template>
+          <template v-else-if="importSummary">
+            <div class="capability-import-title">Import capability package</div>
+            <div class="hint"><span class="mono">{{ importSummary.id }}</span> · <span class="mono">{{ importSummary.version }}</span></div>
+            <div class="hint">Author (self-declared): {{ importSummary.author }}</div>
+            <div class="hint">Purpose: {{ importSummary.purpose }}</div>
+            <div class="hint">Plugins ({{ importSummary.components.plugins.length }}): {{ displayNames(importSummary.components.plugins) }}</div>
+            <div class="hint">Skills ({{ importSummary.components.skills.length }}): {{ displayNames(importSummary.components.skills) }}</div>
+            <div class="hint">MCP ({{ importSummary.components.mcps.length }}): {{ displayNames(importSummary.components.mcps) }}</div>
+            <div class="hint">Files: {{ importSummary.fileCount }} · {{ humanSize(importSummary.totalBytes) }}</div>
+            <div v-if="importSummary.kind === 'replace' && importSummary.existing" class="hint">
+              Replaces version {{ importSummary.existing.version }} with {{ importSummary.version }}.
+            </div>
+            <div v-if="importSummary.kind === 'replace' && importSummary.existing && importSummary.existing.enabled" class="hint">
+              It will be re-enabled after the replacement.
+            </div>
+            <div v-if="importSummary.kind === 'replace' && importSummary.orphanedSkills && importSummary.orphanedSkills.length"
+              class="hint" data-testid="capability-import-orphans">
+              No longer included: {{ importSummary.orphanedSkills.join(', ') }}.
+              Their files stay under /home/locus/.skills/{{ importSummary.id }}/ but will not be used.
+            </div>
+            <div v-if="importSummary.needsMismatchAcceptance" class="hint storage-notice" data-testid="capability-import-mismatch">
+              The package content does not match its LOCUS.md file list:
+              {{ (importSummary.mismatched || []).join(', ') }}.
+              Continue only if you trust this change; it will be recorded in the package changelog.
+            </div>
+            <details class="capability-import-body-wrap">
+              <summary data-testid="capability-import-body-toggle">Show package content (LOCUS.md)</summary>
+              <pre class="capability-import-body" data-testid="capability-import-body">{{ importSummary.body }}</pre>
+            </details>
+            <div class="hint">Importing runs this package's code inside Locus's Python environment.</div>
+            <div v-if="store.capabilityImport.error" class="hint storage-notice" data-testid="capability-import-error">
+              {{ store.capabilityImport.error }}
+            </div>
+            <div class="capability-row capability-import-actions">
+              <button class="rail-btn" type="button" data-testid="capability-import-cancel" @click="cancelCapabilityImport()">Cancel</button>
+              <button class="rail-btn" type="button" data-testid="capability-import-confirm"
+                :disabled="importing" @click="confirmImport()">
+                {{ importSummary.needsMismatchAcceptance ? 'Continue and import' : 'Import' }}
+              </button>
+            </div>
+          </template>
+        </div>
+
+        <!-- Unsupported core: everything below is hidden -->
+        <div v-if="!capabilityPackagesSupported()" class="hint" data-testid="capability-packages-unsupported">
+          This Locus core version does not support installing capability packages.
+        </div>
+        <template v-else>
+          <div class="capability-row capability-import-row">
+            <button class="rail-btn" type="button" data-testid="capability-import-file"
+              :disabled="store.busy || store.cancelling" @click="pickImportFile">Import .locus file</button>
+            <input ref="importFileInput" data-testid="capability-import-file-input" type="file" accept=".locus"
+              style="display:none" @change="onImportFileChanged">
+            <input class="capability-import-path" data-testid="capability-import-path" v-model="importPath"
+              type="text" placeholder="/mnt/download/example.locus" spellcheck="false" autocomplete="off">
+            <button class="rail-btn" type="button" data-testid="capability-import-path-button"
+              :disabled="store.busy || store.cancelling" @click="importFromPath">Import from path</button>
+          </div>
+
+          <div v-if="store.capabilityPackages && store.capabilityPackages.durable === false"
+            class="hint" data-testid="capability-packages-not-durable">
+            This browser cannot keep installed packages; they will need to be imported again after a reload.
+          </div>
+
+          <!-- Boot-time verification notices (§5.3) -->
+          <div v-for="n in store.capabilityPackageNotices" :key="n.id" class="capability-item"
+            :data-testid="'capability-notice-' + n.id">
+            <div v-if="n.status === 'mismatch'" class="hint">
+              {{ n.id }} {{ n.version }} was not loaded: its content no longer matches the recorded file list
+              ({{ (n.mismatched || []).join(', ') }}).
+            </div>
+            <div v-else class="hint">
+              {{ n.id }} {{ n.version }} could not be loaded: {{ n.message }}.
+            </div>
+            <div v-if="uninstallArmId === n.id" class="hint">
+              The package is removed; its guidance files under /home/locus/.skills/{{ n.id }}/ are kept.
+            </div>
+            <div class="capability-row">
+              <button v-if="n.status === 'mismatch'" class="rail-btn" type="button"
+                :disabled="store.busy || store.cancelling"
+                :data-testid="'capability-notice-accept-' + n.id" @click="acceptNotice(n.id)">Continue (re-pin)</button>
+              <button v-if="n.status === 'corrupt'" class="rail-btn danger" type="button"
+                :disabled="store.busy || store.cancelling"
+                :data-testid="(uninstallArmId === n.id ? 'capability-notice-uninstall-confirm-' : 'capability-notice-uninstall-') + n.id"
+                @click="noticeUninstall(n.id)">{{ uninstallArmId === n.id ? 'Confirm uninstall' : 'Uninstall' }}</button>
+              <button class="rail-btn" type="button" :data-testid="'capability-notice-skip-' + n.id"
+                @click="dismissNotice(n.id)">Skip this time</button>
+            </div>
+          </div>
+
+          <!-- Installed packages (D10 §5) -->
+          <div v-for="p in store.capabilityPackages.packages" :key="p.id" class="capability-item"
+            :data-testid="'capability-package-' + p.id">
+            <div class="capability-row">
+              <span class="capability-name">{{ p.id }}</span>
+              <span class="mono">{{ p.version }}</span>
+              <span v-if="!p.loaded" class="hint">Not loaded</span>
+              <button v-if="uninstallArmId !== p.id" class="rail-btn danger" type="button"
+                :disabled="store.busy || store.cancelling"
+                :data-testid="'capability-package-uninstall-' + p.id" @click="uninstallArmId = p.id">Uninstall</button>
+              <button v-else class="rail-btn danger" type="button" :disabled="store.busy || store.cancelling"
+                :data-testid="'capability-package-uninstall-confirm-' + p.id" @click="uninstallPackage(p.id)">Confirm uninstall</button>
+            </div>
+            <div v-if="uninstallArmId === p.id" class="hint">
+              The package is removed; its guidance files under /home/locus/.skills/{{ p.id }}/ are kept.
+            </div>
+            <div class="hint">Author (self-declared): {{ p.author }}</div>
+            <div v-if="p.purpose" class="hint">Purpose: {{ p.purpose }}</div>
+          </div>
+        </template>
+
         <div v-if="!capabilities.length" class="hint" data-testid="capabilities-empty">No optional capabilities available yet.</div>
         <div v-for="c in capabilities" :key="c.id" class="capability-item" :data-testid="'capability-' + c.id">
           <div class="capability-row">
@@ -135,6 +274,11 @@ import {
   clearHome as clearHomeData, clearPlugins as clearPluginData,
   forgetApiKeys as forgetStoredApiKeys, resetAllData as resetLocalData,
   refreshImageCapability, recheckImageCapability,
+  capabilityPackagesSupported, refreshCapabilityPackages,
+  beginCapabilityImportFromBytes, beginCapabilityImportFromPath,
+  confirmCapabilityImport as confirmImportAction, cancelCapabilityImport,
+  acceptCapabilityPackageMismatch, dismissCapabilityPackageNotice,
+  uninstallCapabilityPackage,
 } from '../ui/store.js';
 import { computed, onMounted, ref } from 'vue';
 
@@ -201,7 +345,7 @@ function connectMcp(c, m) {
   }
 }
 
-onMounted(() => { refreshImageCapability(); });
+onMounted(() => { refreshImageCapability(); refreshCapabilityPackages(); });
 
 async function recheckCapability() {
   try {
@@ -224,5 +368,112 @@ async function close() {
   await persistSettingsIfNeeded();
   store.settingsOpen = false;
   store.settingsResult = null;
+}
+
+// ---------- capability packages (D10 / C1-P3) ----------
+// Two-step destructive confirmation shared by the installed list and the
+// corrupt-notice uninstall (fixed UI copy, never model-controlled).
+const uninstallArmId = ref(null);
+
+// The import dialog's summary is read through a computed so the template
+// never reaches into possibly-missing fields.
+const importSummary = computed(() => {
+  const c = store.capabilityImport;
+  return c && c.summary ? c.summary : null;
+});
+
+// Local in-flight flag for the confirm button (double-click guard while
+// the commit is running; commit errors stay inside the dialog).
+const importing = ref(false);
+
+const importFileInput = ref(null);
+const importPath = ref('');
+
+function pickImportFile() {
+  if (importFileInput.value) importFileInput.value.click();
+}
+
+async function onImportFileChanged(ev) {
+  const input = ev.target;
+  const file = input.files && input.files[0];
+  input.value = ''; // allow re-picking the same file after a failure
+  if (!file) return;
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  await beginCapabilityImportFromBytes(bytes, file.name);
+}
+
+async function importFromPath() {
+  const p = importPath.value.trim();
+  if (!p) return;
+  await beginCapabilityImportFromPath(p);
+}
+
+async function confirmImport() {
+  importing.value = true;
+  try {
+    await confirmImportAction();
+  } finally {
+    importing.value = false;
+  }
+}
+
+function displayNames(list) {
+  const arr = Array.isArray(list) ? list : [];
+  return arr.length ? arr.map((x) => (x && x.displayName) || (x && x.id) || '?').join(', ') : 'none';
+}
+
+function humanSize(n) {
+  const bytes = Number(n) || 0;
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+async function acceptNotice(id) {
+  try {
+    await acceptCapabilityPackageMismatch(id);
+    refreshCapabilities();
+  } catch (e) {
+    store.storageNotice = e.message || String(e);
+  } finally {
+    uninstallArmId.value = null;
+  }
+}
+
+async function dismissNotice(id) {
+  try {
+    await dismissCapabilityPackageNotice(id);
+    refreshCapabilities();
+  } catch (e) {
+    store.storageNotice = e.message || String(e);
+  } finally {
+    uninstallArmId.value = null;
+  }
+}
+
+async function noticeUninstall(id) {
+  if (uninstallArmId.value !== id) {
+    uninstallArmId.value = id;
+    return;
+  }
+  try {
+    await uninstallCapabilityPackage(id);
+    refreshCapabilities();
+  } catch (e) {
+    store.storageNotice = e.message || String(e);
+  } finally {
+    uninstallArmId.value = null;
+  }
+}
+
+async function uninstallPackage(id) {
+  try {
+    await uninstallCapabilityPackage(id);
+    refreshCapabilities();
+  } catch (e) {
+    store.storageNotice = e.message || String(e);
+  } finally {
+    uninstallArmId.value = null;
+  }
 }
 </script>
