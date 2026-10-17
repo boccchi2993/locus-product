@@ -778,7 +778,20 @@ input, select, textarea { font-family: inherit; font-size: inherit; color: inher
 .capability-import-title { font-weight: 600; font-size: 13px; }
 .capability-import-row { flex-wrap: wrap; margin-top: 4px; }
 .capability-import-row .rail-btn { margin-top: 0; }
-.capability-import-path { flex: 1; min-width: 0; }
+/* Same visual tokens as .field input (the settings panel's other inputs):
+   the path box must not fall back to the browser's default light styling. */
+.capability-import-path {
+  flex: 1; min-width: 0;
+  padding: 8px 11px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg); font-size: 13px; outline: none;
+}
+.capability-import-path:focus { border-color: var(--accent); }
+.capability-package-block {
+  margin-top: 6px; padding: 6px 8px;
+  border: 1px solid var(--border-soft); border-radius: 8px;
+  background: var(--surface-soft);
+}
 .capability-import-actions { margin-top: 8px; }
 .capability-import-body-wrap { margin-top: 6px; }
 .capability-import-body-wrap summary { cursor: pointer; font-size: 11.5px; color: var(--faint); }

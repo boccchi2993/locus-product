@@ -183,21 +183,27 @@
             </div>
           </div>
 
-          <!-- Installed packages (D10 §5) -->
-          <div v-for="p in store.capabilityPackages.packages" :key="p.id" class="capability-item"
+          <!-- Installed packages that could NOT be loaded (D10 §5): a
+               loaded package is shown inside its Capability entry below
+               instead of being duplicated here. -->
+          <div v-for="p in installedNotLoadedPackages" :key="p.id" class="capability-item"
             :data-testid="'capability-package-' + p.id">
             <div class="capability-row">
               <span class="capability-name">{{ p.id }}</span>
               <span class="mono">{{ p.version }}</span>
-              <span v-if="!p.loaded" class="hint">Not loaded</span>
+              <span class="hint">Not loaded</span>
               <button v-if="uninstallArmId !== p.id" class="rail-btn danger" type="button"
                 :disabled="store.busy || store.cancelling"
                 :data-testid="'capability-package-uninstall-' + p.id" @click="uninstallArmId = p.id">Uninstall</button>
               <button v-else class="rail-btn danger" type="button" :disabled="store.busy || store.cancelling"
                 :data-testid="'capability-package-uninstall-confirm-' + p.id" @click="uninstallPackage(p.id)">Confirm uninstall</button>
             </div>
+            <div v-if="packageNoticesById[p.id]" class="hint" :data-testid="'capability-package-reason-' + p.id">
+              {{ packageNoticesById[p.id].status }}: {{ packageNoticesById[p.id].message }}
+            </div>
             <div v-if="uninstallArmId === p.id" class="hint">
-              The package is removed; its guidance files under /home/locus/.skills/{{ p.id }}/ are kept.
+              Uninstall deletes this package from Locus. The package is removed; its guidance files under
+              /home/locus/.skills/{{ p.id }}/ are kept.
             </div>
             <div class="hint">Author (self-declared): {{ p.author }}</div>
             <div v-if="p.purpose" class="hint">Purpose: {{ p.purpose }}</div>
@@ -221,7 +227,9 @@
             Includes: {{ c.includes.plugins }} local software · {{ c.includes.skills }} guidance · {{ c.includes.mcps }} external connections
           </div>
           <div v-if="c.enabled" class="hint" data-testid="capability-remove-warning">
-            Removing this capability also deletes its customized guidance. Re-adding it restores the default guidance.
+            Removing this capability disables it and deletes its customized guidance; re-adding it restores the
+            default guidance.<span v-if="loadedPackagesById[c.id]"> To delete this package from Locus instead, use
+            Uninstall below.</span>
           </div>
           <div v-if="c.enabled && c.error" class="hint">{{ c.error }}</div>
           <template v-if="c.enabled">
@@ -231,6 +239,27 @@
                 :data-testid="'capability-connect-' + c.id" @click="connectMcp(c, m)">Connect</button>
             </div>
           </template>
+          <!-- The installed package this capability came from (D10): shown
+               here INSTEAD of a separate installed-list entry. Everything it
+               renders is untrusted package metadata via text interpolation. -->
+          <div v-if="loadedPackagesById[c.id]" class="capability-package-block"
+            :data-testid="'capability-package-' + c.id">
+            <div class="capability-row">
+              <span class="mono">{{ loadedPackagesById[c.id].id }}</span>
+              <span class="mono">{{ loadedPackagesById[c.id].version }}</span>
+              <button v-if="uninstallArmId !== c.id" class="rail-btn danger" type="button"
+                :disabled="store.busy || store.cancelling"
+                :data-testid="'capability-package-uninstall-' + c.id" @click="uninstallArmId = c.id">Uninstall</button>
+              <button v-else class="rail-btn danger" type="button" :disabled="store.busy || store.cancelling"
+                :data-testid="'capability-package-uninstall-confirm-' + c.id" @click="uninstallPackage(c.id)">Confirm uninstall</button>
+            </div>
+            <div v-if="uninstallArmId === c.id" class="hint">
+              Uninstall deletes this package from Locus. The package is removed; its guidance files under
+              /home/locus/.skills/{{ loadedPackagesById[c.id].id }}/ are kept.
+            </div>
+            <div class="hint">Author (self-declared): {{ loadedPackagesById[c.id].author }}</div>
+            <div v-if="loadedPackagesById[c.id].purpose" class="hint">Purpose: {{ loadedPackagesById[c.id].purpose }}</div>
+          </div>
         </div>
       </section>
 
@@ -298,6 +327,31 @@ const imageCapabilitySummary = computed(() => {
 });
 
 const capabilities = computed(() => store.capabilities);
+
+// Merged package display (presentation only): a package whose load
+// succeeded is rendered inside its Capability entry — keyed by id, the
+// SAME id the capability manager registers it under — and the standalone
+// installed list keeps only packages that could not be loaded. Pure read
+// projections of store state; the install service is untouched.
+const loadedPackagesById = computed(() => {
+  const map = {};
+  const pkgs = store.capabilityPackages && store.capabilityPackages.packages;
+  for (const p of Array.isArray(pkgs) ? pkgs : []) {
+    if (p && p.loaded) map[p.id] = p;
+  }
+  return map;
+});
+
+const installedNotLoadedPackages = computed(() => {
+  const pkgs = store.capabilityPackages && store.capabilityPackages.packages;
+  return (Array.isArray(pkgs) ? pkgs : []).filter((p) => p && !p.loaded);
+});
+
+const packageNoticesById = computed(() => {
+  const map = {};
+  for (const n of store.capabilityPackageNotices || []) map[n.id] = n;
+  return map;
+});
 
 // Two-step destructive confirmation for Remove (fixed UI copy, never a
 // model-controlled ApprovalCard — this is the USER's own button action).
