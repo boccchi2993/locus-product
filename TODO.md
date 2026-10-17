@@ -24,6 +24,31 @@ tracked by their owning repositories; this page is the Product index.
 - Root cause remains unknown. Historical Python E3/B-PY1 errors remain separately
   documented and must not be conflated with CDP readiness failures.
 
+## 3. core-main-candidate red since 2026-10-17
+
+- [ ] **CANDIDATE-RED-2026-10-17** — first failure: scheduled
+  [run 39015719643](https://github.com/boccchi2993/locus-product/actions/runs/39015719643)
+  (2026-10-17 08:00 UTC, product commit 59de0b0, 33s total; previous green was
+  the manual [run 38924363605](https://github.com/boccchi2993/locus-product/actions/runs/38924363605)
+  on 2026-10-16).
+- Captured cores (artifact `core-main-candidate-39015719643`): runtime
+  `a1921cf` (unchanged from the package.json lock), harness `d812869` (the lock
+  is `2a04c79`; harness main advanced through harness PR #11).
+- First failing step: #8 "build the packaged page on the candidate cores".
+  Steps #9 (unit battery) and #10 (browser gates) fail on the same root cause.
+- Error summary:
+  - step 8/10, vite build: `src/main.js (28:30): "registerPluginRuntimeProvider" is not exported by "src/product/harness-api.js", imported by "src/main.js".`
+  - step 9, unit battery: `TEST RUNNER FAIL TypeError: M.registerPluginRuntimeProvider is not a function` at `tests/capability-composition.test.cjs:180`.
+- Classification: (a) expected core-interface incompatibility — not
+  environment, network, npm install, or CDP startup. The candidate applied
+  harness main `d812869`, whose PR #11 removed the `registerPluginRuntimeProvider`
+  export, while Product `src/main.js` still imports it; the rollup import error
+  above is the recorded signal. Distinct from the historical scheduled failure
+  [run 38873796405](https://github.com/boccchi2993/locus-product/actions/runs/38873796405)
+  (2026-10-16, max_tokens probe assertion I-E18, already fixed).
+- Expected fix: Product PR `feat/wheel-only-migration` (C1-L-P).
+- [ ] 该 PR 合并后手动触发一次 core-main-candidate（source=main），转绿后在此处打勾并附 run 链接
+
 ## Completion discipline
 
 Close each item only with a fixing commit, a regression test and actual verification
