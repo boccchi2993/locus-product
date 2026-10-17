@@ -6,7 +6,7 @@
 // Product modules behave on real browser storage as real ES modules over
 // the two product API files (no deep core import anywhere):
 //
-//   P   REAL IndexedDB: schema v3 migration on open, settings round trip,
+//   P   REAL IndexedDB: schema v4 migration on open, settings round trip,
 //       remembered credentials keyed through the REAL harness credential
 //       identity, provider frames, atomic deleteConversation
 //   O   REAL OPFS: home skeleton, privileged plugin write/read, attachment

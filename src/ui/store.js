@@ -59,6 +59,7 @@ import { executeTool, AGENT_TOOL_DEFINITIONS } from '../tools.js';
 import { LocusMutationPolicy } from '../mutation-policy.js';
 import { AttachmentStore, imageContentPart, textContentPart } from '../attachments.js';
 import { PersistenceServiceInstance, LOCUS_HOME_SKELETON } from '../persistence.js';
+import { createCapabilityPackages } from '../capability-packages.js';
 import { SkillInstanceStorage, SkillInstanceWorkspace, productTaskVfsMounts } from '../extensions.js';
 import { ConversationHistoryWorkspace, historyToolOutputPath } from '../conversation-history-workspace.js';
 // M2b (repository split): the Product prompt inputs — behavior notes and
@@ -123,6 +124,25 @@ const capabilityManager = new CapabilityManager({
 });
 export { capabilityManager };
 
+// Installed capability packages (D10): the persistence + import service
+// over the SAME manager. Null when storage is entirely unavailable —
+// every store-level capability-package entry point then refuses loudly
+// (CAPABILITY-INSTALL.md §6.5: the harness gate additionally requires the
+// capabilityPackages declaration before import/loading is offered).
+const capabilityPackages = PersistenceServiceInstance
+  ? createCapabilityPackages({
+    persistence: PersistenceServiceInstance,
+    manager: capabilityManager,
+    now: () => new Date().toISOString(),
+  })
+  : null;
+
+function assertCapabilityPackagesSupported() {
+  if (!capabilityPackages || !harnessDeclaresCapabilityPackages()) {
+    throw new Error('this harness does not support capability packages');
+  }
+}
+
 function syncCapabilityProjection() {
   store.capabilities = capabilityManager ? capabilityManager.listCapabilities() : [];
 }
@@ -163,6 +183,9 @@ export async function enableCapability(id) {
   assertCapabilitiesIdle();
   return withStorageMutation(async () => {
     const state = await capabilityManager.enable(id);
+    // D10: the enabled state of an INSTALLED package survives reload.
+    // Untracked ids (catalog/test capabilities) are ignored by the service.
+    if (capabilityPackages) await capabilityPackages.setEnabled(id, true);
     syncCapabilityProjection();
     return state;
   });
@@ -173,6 +196,7 @@ export async function disableCapability(id) {
   assertCapabilitiesIdle();
   await withStorageMutation(async () => {
     await capabilityManager.disable(id);
+    if (capabilityPackages) await capabilityPackages.setEnabled(id, false);
     syncCapabilityProjection();
   });
 }
@@ -187,6 +211,76 @@ export function setMcpConnectionState(id, state) {
   const next = capabilityManager.setMcpState(id, state);
   syncCapabilityProjection();
   return next;
+}
+
+// ---------- capability package install service (D10, C1-P2) ----------
+// The store-level entry points over src/capability-packages.js. The UI
+// (C1-P3) will call these; the model has no path to any of them. Import
+// and uninstall are between-task actions like enable/disable; inspect is
+// read-only but still refused while a task runs. Everything refuses
+// loudly on a harness generation without the capabilityPackages
+// declaration (the degrade rule: installed packages stay in storage
+// untouched and are not registered).
+export async function inspectCapabilityPackage(bytes) {
+  assertCapabilitiesIdle();
+  assertCapabilityPackagesSupported();
+  return capabilityPackages.inspect(bytes);
+}
+
+export async function inspectCapabilityPackageFromPath(vfsPath) {
+  assertCapabilitiesIdle();
+  assertCapabilityPackagesSupported();
+  const p = String(vfsPath || '');
+  if (!p.endsWith('.locus')) {
+    throw new Error('capability package import expects a .locus path, got: ' + JSON.stringify(p));
+  }
+  const bytes = await vfs.readBytes(p);
+  return capabilityPackages.inspect(bytes);
+}
+
+export async function commitCapabilityPackage(token, opts) {
+  assertCapabilitiesIdle();
+  assertCapabilityPackagesSupported();
+  return withStorageMutation(async () => {
+    const result = await capabilityPackages.commit(token, opts);
+    syncCapabilityProjection();
+    return result;
+  });
+}
+
+export async function acceptCapabilityPackageMismatch(id) {
+  assertCapabilitiesIdle();
+  assertCapabilityPackagesSupported();
+  return withStorageMutation(async () => {
+    const result = await capabilityPackages.acceptMismatch(id);
+    store.capabilityPackageNotices = store.capabilityPackageNotices.filter((n) => n.id !== id);
+    syncCapabilityProjection();
+    return result;
+  });
+}
+
+// “本次跳过”: drop the queued notice WITHOUT touching storage — the
+// package stays installed, unloaded, and the notice re-appears on the
+// next boot while the bytes still mismatch.
+export function dismissCapabilityPackageNotice(id) {
+  store.capabilityPackageNotices = store.capabilityPackageNotices.filter((n) => n.id !== id);
+}
+
+export async function uninstallCapabilityPackage(id) {
+  assertCapabilitiesIdle();
+  assertCapabilityPackagesSupported();
+  return withStorageMutation(async () => {
+    const result = await capabilityPackages.uninstall(id);
+    store.capabilityPackageNotices = store.capabilityPackageNotices.filter((n) => n.id !== id);
+    syncCapabilityProjection();
+    return result;
+  });
+}
+
+export async function capabilityPackageList() {
+  assertCapabilitiesIdle();
+  assertCapabilityPackagesSupported();
+  return withStorageMutation(async () => capabilityPackages.list());
 }
 
 // ---------- runtime session lifecycle (M2a + review round) ----------
@@ -309,6 +403,7 @@ function taskCompatibilityDecision(compatibility) {
     requestBudget: !missing.includes('requestBudget'),
     toolOutputPath: !missing.includes('toolOutputPath'),
     contextWindowBudget: !missing.includes('contextWindowBudget'),
+    capabilityPackages: !missing.includes('capabilityPackages'),
   });
 }
 
@@ -518,6 +613,11 @@ export const store = reactive({
   // stays a plain page-session object (frozen TaskEnvironments must
   // never become Vue reactive proxies).
   capabilities: [],
+  // Capability packages (D10): queued non-loaded notices from the
+  // boot-time verification — { id, version, status, mismatched, message }.
+  // 'mismatch' notices offer 继续/本次跳过; dismissed ones are dropped
+  // without touching storage.
+  capabilityPackageNotices: [],
   telemetryVersion: 0, // bumped on tool_result so rails re-read Telemetry.records
 });
 
@@ -1713,6 +1813,17 @@ function harnessDeclaresContextWindow() {
   } catch (e) { return false; }
 }
 
+// The companion gate for capability packages (CAPABILITY-INSTALL.md §6.5):
+// import and boot-time loading are only offered on a harness generation
+// that declares incremental package registration — on an older one the
+// installed packages stay in storage untouched and are not registered.
+function harnessDeclaresCapabilityPackages() {
+  try {
+    const caps = harnessDeclaration();
+    return !!(caps && caps.capabilities && caps.capabilities.capabilityPackages);
+  } catch (e) { return false; }
+}
+
 // Product side of the D9 projection option (docs/CONTEXT-MANAGEMENT.md
 // §3.1): rows projected for a harness that declared toolOutputPath carry
 // the virtual full-output file path for that row. Only when the history
@@ -2131,6 +2242,18 @@ async function bootPersistence() {
     }
     applySettings();
     await mountDurableStorage();
+    // Installed capability packages (D10): verified BEFORE registration;
+    // a mismatch is reported, never silently loaded. Needs the durable
+    // home mount for skill instances, so it runs after mountDurableStorage.
+    if (capabilityPackages && harnessDeclaresCapabilityPackages()) {
+      try {
+        const results = await capabilityPackages.loadInstalled();
+        store.capabilityPackageNotices = results.filter((r) => r.status !== 'loaded');
+        syncCapabilityProjection();
+      } catch (e) {
+        reportPersistenceIssue(e, 'Installed capability packages could not be loaded');
+      }
+    }
     const rows = await PersistenceServiceInstance.loadConversations();
     if (rows.length) {
       rows.forEach((c) => { if (c.runState === 'running') { c.runState = 'interrupted'; c.status = 'interrupted'; } });
