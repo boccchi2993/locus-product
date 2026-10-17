@@ -1226,6 +1226,14 @@ export async function refreshImageCapability() {
 let appliedCredentialIdentity = null;
 let appliedApiKey = '';
 
+// The model identity a bytes-per-token calibration belongs to
+// (CONTEXT-MANAGEMENT.md §3.2, D5: measured per provider, never inferred
+// from the model name). One shared rule for the change detection in
+// applySettings and for tagging/compare on persistence.
+function currentModelKey() {
+  return [productModel.apiBase, productModel.model, productModel.dialect].join('\n');
+}
+
 export function applySettings() {
   const nextApiBase = store.settings.apiBase.trim() || DEFAULTS.apiBase;
   const nextDialect = store.settings.dialect || 'auto';
@@ -1254,7 +1262,7 @@ export function applySettings() {
   // The model identity BEFORE this apply — a changed identity invalidates
   // the usage-based bytes-per-token calibration (CONTEXT-MANAGEMENT.md
   // §3.2; D5: measured per provider, never inferred from the name).
-  const previousModelKey = [productModel.apiBase, productModel.model, productModel.dialect].join('\n');
+  const previousModelKey = currentModelKey();
   productModel.apiKey = store.settings.apiKey.trim();
   productModel.apiBase = nextApiBase;
   productModel.model = store.settings.model.trim() || DEFAULTS.model;
@@ -1272,7 +1280,7 @@ export function applySettings() {
   if (session && typeof session.setContextWindow === 'function' && harnessDeclaresContextWindow()) {
     session.setContextWindow(nextContextWindow);
   }
-  const nextModelKey = [productModel.apiBase, productModel.model, productModel.dialect].join('\n');
+  const nextModelKey = currentModelKey();
   if (nextModelKey !== previousModelKey && session && typeof session.resetTokenCalibration === 'function') {
     session.resetTokenCalibration();
   }
@@ -1776,6 +1784,17 @@ async function prepareTask(task) {
         } finally {
           if (contextBound && typeof session.setPersistenceContext === 'function') session.setPersistenceContext(null);
           persistenceContext = null;
+          // Persist the calibration the provider just measured (fire and
+          // forget: a failed save only costs one conservative first request
+          // after the next reload).
+          if (PersistenceServiceInstance && harnessDeclaresTokenCalibration()
+            && typeof session.tokenCalibration === 'function') {
+            const samples = session.tokenCalibration();
+            if (samples.length) {
+              PersistenceServiceInstance.saveTokenCalibration(currentModelKey(), samples)
+                .catch((e) => reportPersistenceIssue(e, 'Token calibration could not be saved'));
+            }
+          }
         }
       },
     };
@@ -1908,6 +1927,18 @@ function harnessDeclaresCapabilityPackages() {
   try {
     const caps = harnessDeclaration();
     return !!(caps && caps.capabilities && caps.capabilities.capabilityPackages);
+  } catch (e) { return false; }
+}
+
+// The companion gate for the calibration snapshot persistence
+// (CONTEXT-MANAGEMENT.md §3.2): samples are only saved/restored on a
+// harness generation that declares the snapshot methods — an older one
+// keeps its in-memory calibration and every reload starts from the
+// conservative default.
+function harnessDeclaresTokenCalibration() {
+  try {
+    const caps = harnessDeclaration();
+    return !!(caps && caps.capabilities && caps.capabilities.tokenCalibrationSnapshot);
   } catch (e) { return false; }
 }
 
@@ -2328,6 +2359,17 @@ async function bootPersistence() {
       reportPersistenceIssue(e, 'Remembered credential could not be loaded');
     }
     applySettings();
+    // Restore the calibration ONLY for the same model identity (D5).
+    if (harnessDeclaresTokenCalibration() && typeof session.restoreTokenCalibration === 'function') {
+      try {
+        const saved = await PersistenceServiceInstance.loadTokenCalibration();
+        if (saved && saved.modelKey === currentModelKey() && Array.isArray(saved.samples)) {
+          session.restoreTokenCalibration(saved.samples);
+        }
+      } catch (e) {
+        reportPersistenceIssue(e, 'Token calibration could not be restored');
+      }
+    }
     await mountDurableStorage();
     // Installed capability packages (D10): verified BEFORE registration;
     // a mismatch is reported, never silently loaded. Needs the durable

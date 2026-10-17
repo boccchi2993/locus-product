@@ -72,6 +72,7 @@ const HARNESS_OK = () => Object.freeze({
     toolOutputPath: true,
     contextWindowBudget: true,
     capabilityPackages: true,
+    tokenCalibrationSnapshot: true,
   },
 });
 const pass = () => checkCoreCompatibility({
