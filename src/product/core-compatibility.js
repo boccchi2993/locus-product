@@ -137,6 +137,10 @@ export const PRODUCT_CORE_REQUIREMENTS = Object.freeze({
         capability: 'capabilityPackages',
         rule: 'capability package import and boot-time loading are disabled; installed packages stay in storage untouched and are not registered',
       }),
+      Object.freeze({
+        capability: 'tokenCalibrationSnapshot',
+        rule: 'the bytes-per-token calibration is not persisted; every page load starts from the conservative default',
+      }),
     ]),
   }),
 });

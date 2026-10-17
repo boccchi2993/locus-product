@@ -485,6 +485,15 @@ export class PersistenceService {
     this.secrets.clear();
   }
 
+  // Bytes-per-token calibration (CONTEXT-MANAGEMENT.md §3.2): ONE record,
+  // tagged with the model identity it was measured on (D5).
+  async saveTokenCalibration(modelKey, samples) {
+    return this.put('meta', { key: 'tokenCalibration', modelKey: String(modelKey), samples: samples.slice() });
+  }
+  async loadTokenCalibration() {
+    return this.get('meta', 'tokenCalibration');
+  }
+
   async saveConversation(record) {
     return this.put('conversations', this._redact(record));
   }
