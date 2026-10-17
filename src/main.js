@@ -25,7 +25,7 @@ import * as ui from './ui/store.js';
 // M3c: the harness declaration resolver comes through the PUBLIC transfer
 // layer (the same entry the Product compatibility check reads); the tool
 // executor is the Product tool module's explicit export.
-import { harnessCapabilities, registerPluginRuntimeProvider, ApprovalController, createProviderIdentity } from './product/harness-api.js';
+import { harnessCapabilities, ApprovalController, createProviderIdentity } from './product/harness-api.js';
 import { productTaskVfsMounts, SkillInstanceWorkspace } from './extensions.js';
 import { executeTool } from './tools.js';
 import { PersistenceServiceInstance } from './persistence.js';
@@ -233,7 +233,18 @@ if (e2eMode) {
     // M3c integration: the composition-core page globals are gone — the
     // adapters/classes the browser e2e drives come from their owning
     // modules (harness entry / Product extensions adapter). TEST-ONLY.
-    registerPluginRuntimeProvider: (runtime, provider) => registerPluginRuntimeProvider(runtime, provider),
+    // TEST-ONLY (D10): install a .locus through the REAL import service —
+    // inspect, then commit — exactly the path the UI drives. bytes is a
+    // plain array (structured-clone friendly from Puppeteer/CDP).
+    installPackage: async (bytes, opts) => {
+      const summary = await ui.inspectCapabilityPackage(new Uint8Array(bytes));
+      if (!summary.ok) {
+        const e = new Error('package rejected: ' + summary.diagnostics.map((d) => d.code).join(', '));
+        e.diagnostics = summary.diagnostics;
+        throw e;
+      }
+      return ui.commitCapabilityPackage(summary.token, { acceptMismatch: !!(opts && opts.acceptMismatch) });
+    },
     productTaskVfsMounts: (manager, env) => productTaskVfsMounts(manager, env),
     ApprovalController,
     SkillInstanceWorkspace,
