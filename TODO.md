@@ -23,6 +23,23 @@ tracked by their owning repositories; this page is the Product index.
   exclude a regression.
 - Root cause remains unknown. Historical Python E3/B-PY1 errors remain separately
   documented and must not be conflated with CDP readiness failures.
+- B-PY1 evidence — push CI [run 39000494789](https://github.com/boccchi2993/locus-product/actions/runs/39000494789)
+  (product commit `ff182d2`, the PR #25 merge), browser gates job: the only
+  failure was `B-PY1 python js.fetch denied at the policy layer with the marker`
+  (`e2e-m3c-python-integration: 54 passed, 1 failed`). In the same run
+  `B-PY1b js.fetch produced ZERO requests to the probe (counter oracle)` and
+  `B-PY2` both PASS, and the FAIL payload itself carries `"delta":0`: no request
+  was issued — only the observable form of the denial (the marker) mismatched.
+  Failure output (`gh run view 39000494789 --log-failed`; the gate truncates the
+  captured stdout mid-traceback, so the traceback is embedded and cut short):
+  ```
+  FAIL B-PY1 python js.fetch denied at the policy layer with the marker | {"fail":true,"delta":0,"out":"Traceback (most recent call last):\n  File \"/lib/python312.zip/_pyodide/_base.py\", line 597, in eval_code_async\n    await CodeRunner(\n  File \"/lib/python312.zip/_pyodide/_base.py\", line 411, in run_async\n    coroutine = eval(self.code, globals, locals)\n
+  ```
+  The next mainline commit `59de0b0`'s push CI
+  ([run 39001073229](https://github.com/boccchi2993/locus-product/actions/runs/39001073229))
+  passed the same suite in full (B-PY1 PASS). Not rerun; root cause unknown.
+  This belongs to the Python E3/B-PY1 family above and is not a CDP readiness
+  (RT-CI-001) failure.
 
 ## 3. core-main-candidate red since 2026-10-17
 
