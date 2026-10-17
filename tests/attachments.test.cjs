@@ -27,7 +27,7 @@ const TEXT_BYTES = new Uint8Array([0x68, 0x65, 0x6C, 0x6C, 0x6F]); // "hello"
 async function main() {
   P = await import('../src/persistence.js');
   A = await import('../src/attachments.js');
-  check('S0 schema v3 carries attachments store', P.PERSISTENCE_SCHEMA_VERSION === 3
+  check('S0 schema v4 carries attachments store', P.PERSISTENCE_SCHEMA_VERSION === 4
     && P.PERSISTENCE_STORES.includes('attachments') && P.PERSISTENCE_STORES.includes('capabilities'),
     P.PERSISTENCE_STORES.join(','));
 

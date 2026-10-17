@@ -45,6 +45,7 @@ function resolveRuntimeAliases() {
     SkillSourceStore: harnessApi.SkillSourceStore,
     skillInstancePath: harnessApi.skillInstancePath,
     ApprovalController: harnessApi.ApprovalController,
+    sha256Hex: harnessApi.sha256Hex,
     SkillInstanceStorage: ext.SkillInstanceStorage,
     SkillInstanceWorkspace: ext.SkillInstanceWorkspace,
     MemoryWorkspace: Object.getPrototypeOf(runtimeApi.createMemoryWorkspace({})).constructor,
@@ -193,17 +194,24 @@ async function run() {
       && (await home.read('.skills/cap-a/synthetic-skill.skill')) === SYNTH_SKILL_BODY
       && await home.exists('.skills/cap-a/.locus-installed.json'));
 
-    // Incompatible marker: never auto-overwrite user skills.
+    // Incompatible marker (capabilityVersion differs): C1-H1's §6.3 upgrade
+    // rule (D10) replaces the old "fail loudly" — the user-customized
+    // instance is KEPT untouched, the marker is rewritten to the new
+    // version with the new default's hash, and the capability enables.
     await home.write('.skills/cap-a/synthetic-skill.skill', 'still the users words');
     marker.capabilityVersion = '2';
     await home.write('.skills/cap-a/.locus-installed.json', JSON.stringify(marker));
     const manager5 = rig({ home }).manager;
     const mismatched = await manager5.enable('cap-a');
-    check('L6 capabilityVersion mismatch -> state error, user file untouched', mismatched === 'error'
-      && /do not match the current catalog/.test(manager5.listCapabilities().find((c) => c.id === 'cap-a').error)
-      && (await home.read('.skills/cap-a/synthetic-skill.skill')) === 'still the users words');
+    const upgradedMarker = JSON.parse(await home.read('.skills/cap-a/.locus-installed.json'));
+    check('L6 capabilityVersion mismatch upgrades the marker, user file untouched', mismatched === 'ready'
+      && (await home.read('.skills/cap-a/synthetic-skill.skill')) === 'still the users words'
+      && upgradedMarker.capabilityVersion === '1'
+      && upgradedMarker.skills[0].sourceHash === await M.sha256Hex(new TextEncoder().encode(SYNTH_SKILL_BODY)));
 
-    // Source drift under the same version -> incompatible -> fail loudly.
+    // Source drift under the same version: the marker hash no longer
+    // matches the file, so the file counts as user-customized — the file
+    // is never overwritten; the marker heals to the real default hash.
     const drift = rig();
     await drift.manager.enable('cap-a');
     const driftMarker = JSON.parse(await drift.home.read('.skills/cap-a/.locus-installed.json'));
@@ -211,9 +219,11 @@ async function run() {
     await drift.home.write('.skills/cap-a/.locus-installed.json', JSON.stringify(driftMarker));
     const manager6 = rig({ home: drift.home }).manager;
     const driftState = await manager6.enable('cap-a');
-    check('L7 source hash drift -> state error, no silent overwrite', driftState === 'error'
-      && /do not match the current catalog/.test(manager6.listCapabilities().find((c) => c.id === 'cap-a').error)
-      && (await drift.home.read('.skills/cap-a/synthetic-skill.skill')) === SYNTH_SKILL_BODY);
+    const healedMarker = JSON.parse(await drift.home.read('.skills/cap-a/.locus-installed.json'));
+    check('L7 source hash drift keeps the file, heals the marker hash', driftState === 'ready'
+      && (await drift.home.read('.skills/cap-a/synthetic-skill.skill')) === SYNTH_SKILL_BODY
+      && healedMarker.skills[0].sourceHash === await M.sha256Hex(new TextEncoder().encode(SYNTH_SKILL_BODY))
+      && healedMarker.skills[0].sourceHash !== '0'.repeat(64));
   }
   {
     // Missing default source -> honest error state, nothing materialized.

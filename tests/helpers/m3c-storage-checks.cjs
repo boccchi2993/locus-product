@@ -22,7 +22,7 @@ function runStorageChecks(check, bootData, r) {
     && bootData.modules.capabilityPackage === 'object'
     && bootData.modules.ConversationHistoryWorkspace === 'function',
     JSON.stringify(bootData));
-  check('B1 REAL IndexedDB: schema v3 opened, health healthy',
+  check('B1 REAL IndexedDB: schema v4 opened, health healthy',
     !!bootData && bootData.persistenceMode === 'indexeddb' && bootData.health === 'healthy',
     JSON.stringify(bootData));
   check('B2 REAL OPFS available', !!bootData && bootData.opfsAvailable === true);
