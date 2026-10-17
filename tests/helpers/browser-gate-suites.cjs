@@ -8,6 +8,10 @@
 // must never invent suite names.
 const SUITES = [
   'e2e-ui.cjs',
+  // Capability-install presentation e2e (C1-P3): the /mnt/download Import
+  // entry, the summary dialog (untrusted content stays text), install and
+  // the two-step uninstall over the REAL built app.
+  'e2e-capability-ui.cjs',
   'e2e-responsive.cjs',
   'e2e-grep.cjs',
   'e2e-approval.cjs',
