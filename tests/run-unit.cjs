@@ -33,6 +33,10 @@ const SUITES = [
   // note, the run-option toolOutputPath and the minimumRequestBytes
   // submit-time image pre-check.
   'context-management-wiring.test.mjs',
+  // Token-calibration persistence (CONTEXT-MANAGEMENT.md §3.2, D5/D9):
+  // the bytes-per-token samples survive a reload, tagged with the model
+  // identity they were measured on and restored only for the SAME one.
+  'token-calibration-persistence.test.mjs',
   'conversation-routing.test.mjs',
   'submit-presentation.test.mjs',
   'store-python-lifecycle.test.mjs',

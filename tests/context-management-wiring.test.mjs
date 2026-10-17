@@ -56,7 +56,7 @@ if (typeof globalThis.window === 'undefined') {
 // carries the pre-P-2 optional set — tests toggle the three new semantic
 // capabilities by adding/removing them (same construction family as
 // tests/core-compatibility.test.mjs HARNESS_OK).
-function harnessDeclarationVariant({ requestBudget = true, toolOutputPath = true, contextWindowBudget = true, capabilityPackages = true } = {}) {
+function harnessDeclarationVariant({ requestBudget = true, toolOutputPath = true, contextWindowBudget = true, capabilityPackages = true, tokenCalibrationSnapshot = true } = {}) {
   const capabilities = {
     nativeToolCalls: true,
     textFallbackStrict: true,
@@ -69,6 +69,7 @@ function harnessDeclarationVariant({ requestBudget = true, toolOutputPath = true
   if (toolOutputPath) capabilities.toolOutputPath = true;
   if (contextWindowBudget) capabilities.contextWindowBudget = true;
   if (capabilityPackages) capabilities.capabilityPackages = true;
+  if (tokenCalibrationSnapshot) capabilities.tokenCalibrationSnapshot = true;
   return {
     contractVersion: 1,
     ports: {
