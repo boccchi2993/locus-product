@@ -31,6 +31,14 @@ Closed v1 rules:
 
 Current main has a synthetic provider proof only.
 
+> Implementation status (2026-10-17, after the wheel-only migration): the
+> sentence above is out of date. The synthetic provider proof is GONE — the
+> PluginRuntimeProvider seam and the source-text (files) payload path were
+> deleted from locus-harness (D10 §6), and plugins now enter Python ONLY as
+> verified wheel artifacts inside installed `.locus` capability packages.
+> See [DECISIONS.md](DECISIONS.md) D10 and
+> [CAPABILITY-INSTALL.md](CAPABILITY-INSTALL.md).
+
 ## 4. Trusted Plugin Runtime v1 — milestones
 
 ### v1A — offline wheel bootstrap primitive (implemented)
@@ -98,6 +106,16 @@ NOT YET (v1B and beyond):
 - the legacy `files: {sourceText}` synthetic composition path still exists
   (explicitly labeled LEGACY SYNTHETIC COMPOSITION PATH in the worker) and
   is scheduled for removal/isolation in v1B.
+
+> Implementation status (2026-10-17, after the wheel-only migration): the
+> first three "NOT YET" items are DONE — the CapabilityManager consumes
+> registered wheel artifacts (`registerPackage` artifacts, wheel-only
+> payloads), the Capability Package import UI ships, and installed packages
+> persist across reloads with boot-time re-verification. The legacy
+> source-text path is deleted from the harness (D10 §6); the runtime-side
+> `files` branch in the worker is removed by the locus-runtime repository,
+> not here. See [DECISIONS.md](DECISIONS.md) D10 and
+> [CAPABILITY-INSTALL.md](CAPABILITY-INSTALL.md).
 
 > 注：已由 [DECISIONS.md](DECISIONS.md) D10 取代，见 [CAPABILITY-INSTALL.md](CAPABILITY-INSTALL.md)。
 

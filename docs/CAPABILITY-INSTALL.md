@@ -261,6 +261,8 @@ runtime：C1 不需要改动。删除旧路径时，runtime worker 里的 `files
 
 C1 完成后接 C2（参考 Capability 端到端验收）。
 
+C1-L（删除源码文本合成路径）按仓库拆成了三个 PR：harness 的删除已合并（PR #11，main@d812869e，2026-10-17，含 `wheelOnlyPlugins` 能力声明）；product 的配套迁移（锁定升级、测试迁移到真实 .locus 包 + 导入服务、wheel 夹具）见 product 的 `feat/wheel-only-migration` PR；runtime 侧 worker 里 `files` 分支的删除仍在 runtime 仓库进行（未开始）。
+
 ---
 
 ## 10. 所有者的决定（2026-10-17）
