@@ -64,7 +64,7 @@ tracked by their owning repositories; this page is the Product index.
   [run 38873796405](https://github.com/boccchi2993/locus-product/actions/runs/38873796405)
   (2026-10-16, max_tokens probe assertion I-E18, already fixed).
 - Expected fix: Product PR `feat/wheel-only-migration` (C1-L-P).
-- [ ] 该 PR 合并后手动触发一次 core-main-candidate（source=main），转绿后在此处打勾并附 run 链接
+- [x] 该 PR 合并后手动触发一次 core-main-candidate（source=main），转绿后在此处打勾并附 run 链接 — 绿：[run 39039496986](https://github.com/boccchi2993/locus-product/actions/runs/39039496986)（2026-10-17 手动触发；candidate 元组 product `453789d0` × runtime `9e2ee039` × harness `d812869e`，apply/build/unit/browser 各阶段全过）
 
 ## Completion discipline
 
