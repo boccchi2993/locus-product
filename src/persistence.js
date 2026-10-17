@@ -20,7 +20,7 @@ import {
   createCredentialIdentity,
 } from './product/harness-api.js';
 
-export const PERSISTENCE_SCHEMA_VERSION = 3;
+export const PERSISTENCE_SCHEMA_VERSION = 4;
 export const PERSISTENCE_DB_NAME = 'locus';
 
 // One canonical home layout.  The VFS consumes the same value when it
@@ -35,6 +35,7 @@ export const PERSISTENCE_STORES = [
   'conversations', 'presentationEvents', 'providerSessions',
   'providerFrames', 'normalizedMessages', 'settings', 'secrets',
   'workspaceHandles', 'meta', 'attachments', 'capabilities',
+  'capabilityPackages',
 ];
 
 function persistenceUuid(prefix) {
@@ -159,6 +160,12 @@ function persistenceUpgrade(db, oldVersion, newVersion, tx) {
     db.createObjectStore('attachments', { keyPath: 'id' }).createIndex('sha256', 'sha256', { unique: false });
     db.createObjectStore('capabilities', { keyPath: 'key' });
   }
+  if (oldVersion < 4) {
+    // Capability packages (docs/CAPABILITY-INSTALL.md §5): one record per
+    // installed capability id. The package BYTES live in OPFS under
+    // capability-packages/ — a directory that is NEVER mounted into the VFS.
+    db.createObjectStore('capabilityPackages', { keyPath: 'id' });
+  }
 }
 
 function persistenceRequest(request) {
@@ -205,6 +212,9 @@ export class PersistenceService {
     // Memory-mode backing for content-addressed attachment bytes (the OPFS
     // path is unavailable). Keyed by storageKey (sha256 hex).
     this.memoryAttachmentBytes = new Map();
+    // Memory-mode backing for .locus package bytes (no OPFS). Keyed by
+    // id + '/' + digest — mirrors the OPFS capability-packages/<id>/ layout.
+    this.memoryCapabilityPackageBytes = new Map();
     this.persistenceHealth = 'healthy'; // healthy | degraded | unavailable
     this.lastPersistenceError = null;
     this.ready = this.init();
@@ -826,6 +836,110 @@ export class PersistenceService {
     } catch (e) { this._throwPersistenceError(e, 'clear attachments'); }
   }
 
+  // ---------- capability packages (docs/CAPABILITY-INSTALL.md §5) ----------
+  // Records in the 'capabilityPackages' IDB store; the .locus archive bytes
+  // in OPFS capability-packages/<id>/<digest>.locus. That OPFS directory is
+  // not mounted anywhere in the VFS: the model can neither read nor write it.
+
+  _validateCapabilityPackageId(id) {
+    if (typeof id !== 'string' || !/^[a-z0-9][a-z0-9._-]*$/.test(id)) {
+      throw new Error('invalid capability package id: ' + String(id));
+    }
+  }
+
+  _validateCapabilityPackageDigest(digest) {
+    if (typeof digest !== 'string' || !/^[0-9a-f]{64}$/.test(digest)) {
+      throw new Error('invalid capability package digest: ' + String(digest));
+    }
+  }
+
+  async saveCapabilityPackage(record) { return this.put('capabilityPackages', record); }
+
+  async loadCapabilityPackages() { return this.all('capabilityPackages'); }
+
+  async deleteCapabilityPackage(id) { return this.delete('capabilityPackages', id); }
+
+  async writeCapabilityPackageBytes(id, digest, bytes) {
+    await this.ready;
+    this._validateCapabilityPackageId(id);
+    this._validateCapabilityPackageDigest(digest);
+    var data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    try {
+      if (!this.opfsRoot) {
+        this.memoryCapabilityPackageBytes.set(id + '/' + digest, data.slice());
+        return;
+      }
+      var dir = await this.opfsDirectory(['capability-packages', id], true);
+      var writable = await (await dir.getFileHandle(digest + '.locus', { create: true })).createWritable();
+      await writable.write(data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength));
+      await writable.close();
+    } catch (e) { this._throwPersistenceError(e, 'write capability package bytes'); }
+  }
+
+  async readCapabilityPackageBytes(id, digest) {
+    await this.ready;
+    this._validateCapabilityPackageId(id);
+    this._validateCapabilityPackageDigest(digest);
+    try {
+      if (!this.opfsRoot) {
+        var cached = this.memoryCapabilityPackageBytes.get(id + '/' + digest);
+        if (!cached) {
+          var missing = new Error('capability package bytes not found: ' + id + '/' + digest);
+          missing.name = 'NotFoundError';
+          throw missing;
+        }
+        return cached.slice();
+      }
+      var dir = await this.opfsDirectory(['capability-packages', id], false);
+      var f = await (await dir.getFileHandle(digest + '.locus', { create: false })).getFile();
+      return new Uint8Array(await f.arrayBuffer());
+    } catch (e) {
+      if (e && (e.name === 'NotFoundError' || e.cause && e.cause.name === 'NotFoundError')) {
+        if (e.name === 'NotFoundError') throw e;
+        var notFound = new Error('capability package bytes not found: ' + id + '/' + digest);
+        notFound.name = 'NotFoundError';
+        throw notFound;
+      }
+      this._throwPersistenceError(e, 'read capability package bytes');
+    }
+  }
+
+  async deleteCapabilityPackageBytes(id, digest) {
+    await this.ready;
+    this._validateCapabilityPackageId(id);
+    if (digest === null) {
+      // Uninstall: remove the whole capability-packages/<id> directory.
+      // A missing directory is already in the requested state — silent.
+      if (!this.opfsRoot) {
+        var prefix = id + '/';
+        for (var key of Array.from(this.memoryCapabilityPackageBytes.keys())) {
+          if (key.startsWith(prefix)) this.memoryCapabilityPackageBytes.delete(key);
+        }
+        return;
+      }
+      try {
+        var root = await this.opfsDirectory(['capability-packages'], false);
+        await root.removeEntry(id, { recursive: true });
+      } catch (e) {
+        if (e && (e.name === 'NotFoundError' || e.cause && e.cause.name === 'NotFoundError')) return;
+        this._throwPersistenceError(e, 'delete capability package bytes');
+      }
+      return;
+    }
+    this._validateCapabilityPackageDigest(digest);
+    try {
+      if (!this.opfsRoot) {
+        this.memoryCapabilityPackageBytes.delete(id + '/' + digest);
+        return;
+      }
+      var dir = await this.opfsDirectory(['capability-packages', id], false);
+      await dir.removeEntry(digest + '.locus');
+    } catch (e) {
+      if (e && (e.name === 'NotFoundError' || e.cause && e.cause.name === 'NotFoundError')) return;
+      this._throwPersistenceError(e, 'delete capability package bytes');
+    }
+  }
+
   async reset() {
     await this.clearConversations();
     await this.clear('settings');
@@ -836,6 +950,11 @@ export class PersistenceService {
     // to serve conversations) and the Harness capability registry.
     await this.clearAttachments();
     await this.clear('capabilities');
+    // Full wipe also removes every installed capability package: the
+    // records, the OPFS archive bytes and the memory-mode byte cache.
+    await this.clear('capabilityPackages');
+    if (this.opfsRoot) await this._clearOpfsDir(['capability-packages']);
+    this.memoryCapabilityPackageBytes.clear();
     this.secrets.clear();
     await this.clearHome();
     await this.clearPlugins();

@@ -202,7 +202,7 @@ flowchart TD
    - `pythonExtensionKeyOf` 改为包含每个 wheel 的 `sha256`（`id@version#sha256`），这样重新锁定或升级后解释器一定会重建。
 3. **删除源码文本合成路径**：`validatePluginPayload` 不再接受 `files`；`buildTaskEnvironment` 与 `pythonExtensionPayload` 中的 `files` 分支删除。现有使用 `files` 的测试全部改为使用 wheel 夹具（runtime 仓库已有的 `locus_test_plugin-1.0.0-py3-none-any.whl`），断言强度不变。这一步单独成 PR（见 §9）。
 4. **skill 实例的升级规则**（§6.3）。
-5. **能力声明**：`harnessCapabilities().capabilities.capabilityPackages = true`（增量注册 + wheel payload）。product 把它列为**必需**能力（导入功能依赖它；缺失时导入入口隐藏，并在设置里说明原因）。
+5. **能力声明**：`harnessCapabilities().capabilities.capabilityPackages = true`（增量注册 + wheel payload）。product 把它列为可选能力，缺失时禁用导入与启动加载，已安装的包原样保留在存储中。
 
 ### 6.3 skill 实例的升级规则
 

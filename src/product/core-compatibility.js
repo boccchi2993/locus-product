@@ -133,6 +133,10 @@ export const PRODUCT_CORE_REQUIREMENTS = Object.freeze({
         capability: 'contextWindowBudget',
         rule: 'the context window setting is saved but not applied (setContextWindow / resetTokenCalibration are never called); only the transport budget applies',
       }),
+      Object.freeze({
+        capability: 'capabilityPackages',
+        rule: 'capability package import and boot-time loading are disabled; installed packages stay in storage untouched and are not registered',
+      }),
     ]),
   }),
 });
