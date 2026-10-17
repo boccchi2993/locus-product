@@ -58,11 +58,16 @@ const ASSET_CACHE_DIRS = [
 const INSTANCE_A = '/home/locus/.skills/cap-a/synthetic-skill.skill';
 const INSTANCE_B = '/home/locus/.skills/cap-b/synthetic-skill.skill';
 
-const SYNTH_PLUGIN_SRC = 'def answer():\n    return 42\n';
+// The committed, proven Package Core wheel — the plugin enters Python ONLY
+// as a verified wheel artifact inside the installed .locus package (D10 §6).
+const TEST_PLUGIN_WHEEL_PATH = path.join(__dirname, 'fixtures', 'capability-package',
+  'minimal', 'plugins', 'locus-test-plugin', 'artifacts', 'locus_test_plugin-1.0.0-py3-none-any.whl');
+
+// Only the skills-only capabilities stay on the TEST-ONLY catalog
+// injection; the plugin-bearing synthetic-capability arrives as an
+// installed .locus package (see main()).
 const SYNTH_CATALOGS = {
-  plugins: [
-    { id: 'synthetic-python-plugin', version: '1', displayName: 'Synthetic Python Plugin', runtime: 'python', authority: 'none', provides: { pythonImports: ['locus_test_plugin'] } },
-  ],
+  plugins: [],
   skills: [
     { id: 'synthetic-skill', version: '1', displayName: 'Synthetic Skill', description: 'How to use the synthetic capability.' },
   ],
@@ -70,7 +75,6 @@ const SYNTH_CATALOGS = {
   capabilities: [
     { id: 'cap-a', version: '1', displayName: 'Capability A', description: 'TEST ONLY.', plugins: [], skills: ['synthetic-skill'], mcps: [] },
     { id: 'cap-b', version: '1', displayName: 'Capability B', description: 'TEST ONLY.', plugins: [], skills: ['synthetic-skill'], mcps: [] },
-    { id: 'synthetic-capability', version: '1', displayName: 'Synthetic Capability', description: 'TEST ONLY.', plugins: ['synthetic-python-plugin'], skills: [], mcps: [] },
   ],
 };
 
@@ -183,11 +187,35 @@ async function main() {
       + '  var next = window.__siE2E.replies.length ? window.__siE2E.replies.shift() : "done.";'
       + '  return Promise.resolve({ content: next, rawMessage: { role: "assistant", content: next }, stopReason: "end_turn", truncated: false });'
       + '}; "capturer installed"');
+    // TEST-ONLY composition setup: the skills-only catalog injection, then
+    // the plugin-bearing synthetic-capability installed as a REAL .locus
+    // package through the REAL import service (D10 §6 — the
+    // PluginRuntimeProvider seam this suite used to drive is gone).
     await evaluate(cdp,
-      'window.__locus.capabilityComposition.injectTestCatalog(' + JSON.stringify(SYNTH_CATALOGS) + ', ' + JSON.stringify(SYNTH_SOURCES) + ');'
-      + 'window.__locus.capabilityComposition.registerPluginRuntimeProvider("python", { prepare: async function () {'
-      + '  return { files: { "locus_test_plugin.py": ' + JSON.stringify(SYNTH_PLUGIN_SRC) + ' }, imports: ["locus_test_plugin"] };'
-      + '} }); "injected"');
+      'window.__locus.capabilityComposition.injectTestCatalog(' + JSON.stringify(SYNTH_CATALOGS) + ', ' + JSON.stringify(SYNTH_SOURCES) + '); "injected"');
+    const { buildFixturePackage } = await import('./helpers/locus-fixtures.mjs');
+    const WHEEL = new Uint8Array(await fs.readFile(TEST_PLUGIN_WHEEL_PATH));
+    const PKG_SYNTH_B64 = Buffer.from(await buildFixturePackage({
+      id: 'synthetic-capability', version: '1.0.0',
+      displayName: 'Synthetic Capability', description: 'TEST ONLY.',
+      plugin: {
+        id: 'synthetic-python-plugin', version: '1',
+        wheel: WHEEL, wheelFilename: 'locus_test_plugin-1.0.0-py3-none-any.whl',
+        pythonImports: ['locus_test_plugin'],
+        displayName: 'Synthetic Python Plugin', description: 'TEST ONLY wheel fixture.',
+      },
+      skills: [],
+      purpose: 'TEST ONLY plugin-bearing fixture (installed, never enabled).',
+    })).toString('base64');
+    const synthCommit = await evaluate(cdp,
+      '(async function () {'
+      + ' var bin = atob(' + JSON.stringify(PKG_SYNTH_B64) + ');'
+      + ' var bytes = new Uint8Array(bin.length);'
+      + ' for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);'
+      + ' return await window.__locus.capabilityComposition.installPackage(bytes); })()');
+    check('SI0 the plugin-bearing capability installed through the REAL import service (disabled)',
+      synthCommit && synthCommit.id === 'synthetic-capability' && synthCommit.state === 'disabled'
+      && synthCommit.unchanged === false, JSON.stringify(synthCommit));
 
     // ---- helpers ----
     const armReplies = (replies) => evaluate(cdp,
@@ -436,9 +464,20 @@ async function main() {
     await waitForRuntimeCondition(cdp,
       'window.__locus.vfs.mounts.some(function (m) { return m.path === "/home/locus/history"; })',
       { process: chrome, phase: 'si-reload-home', timeoutMs: 20000 });
-    const r1prod = await evaluate(cdp, 'window.__locus.capabilityComposition.list().length');
-    check('R1a after reload the production manager starts empty (page-session state)',
-      r1prod === 0, String(r1prod));
+    // D10 §5: the installed package is PERSISTENT — the reload's boot-time
+    // load re-registers it (still disabled). What must reset is the
+    // page-session injected catalog: after reload the manager holds the
+    // package and NOTHING else.
+    await waitForRuntimeCondition(cdp,
+      '(function () { var m = window.__locus.capabilityComposition.manager();'
+      + ' var l = window.__locus.capabilityComposition.list();'
+      + ' return l.length === 1 && l[0].id === "synthetic-capability" && m.isPackage(l[0].id) && l[0].state === "disabled"; })()',
+      { process: chrome, phase: 'si-reload-package-load', timeoutMs: 20000 });
+    const r1prod = await evaluate(cdp,
+      '(function () { var m = window.__locus.capabilityComposition.manager();'
+      + ' return window.__locus.capabilityComposition.list().map(function (c) { return c.id + ":" + c.state + ":pkg=" + m.isPackage(c.id); }); })()');
+    check('R1a after reload only the persistent installed package survives; injected page-session catalog state is gone',
+      JSON.stringify(r1prod) === JSON.stringify(['synthetic-capability:disabled:pkg=true']), JSON.stringify(r1prod));
     await evaluate(cdp,
       'window.__locus.capabilityComposition.injectTestCatalog(' + JSON.stringify(SYNTH_CATALOGS) + ', ' + JSON.stringify(SYNTH_SOURCES) + ');'
       + 'window.__locus.store.settingsOpen = true; "re-injected"');

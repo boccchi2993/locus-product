@@ -24,12 +24,23 @@
 const fs = require('fs/promises');
 const os = require('os');
 const path = require('path');
+const fsSync = require('fs');
+const nodeCrypto = require('crypto');
 const {
   closeChrome, connectToTarget, launchChrome, waitForCdp,
   waitForPageTarget, waitForRuntimeCondition,
 } = require('./helpers/chrome.cjs');
 
 const HOST_URL = process.env.E2E_HOST_URL || 'http://127.0.0.1:4173/tests/runtime-host.html';
+
+// The committed, proven wheel fixture rides the L block's prepare payload:
+// since the D10 §6 wheel-only migration the runtime session's python
+// extension modules are wheel payloads (size+sha256 verified by the
+// harness, byte identity re-verified by the worker).
+const LIVE_WHEEL = fsSync.readFileSync(path.join(__dirname, 'fixtures', 'capability-package',
+  'minimal', 'plugins', 'locus-test-plugin', 'artifacts', 'locus_test_plugin-1.0.0-py3-none-any.whl'));
+const LIVE_WHEEL_SHA = nodeCrypto.createHash('sha256').update(LIVE_WHEEL).digest('hex');
+const LIVE_WHEEL_B64 = LIVE_WHEEL.toString('base64');
 
 let passed = 0, failed = 0;
 function check(name, cond, detail) {
@@ -184,7 +195,12 @@ async function main() {
       const busyWhileParked = pk.session.status().busyExecutions;
       let prepareApplied = false;
       const pp = pk.session.prepare({ python: { key: 'env-live', modules: [
-        { pluginId: 'locus-live-plugin', imports: ['locus_live_plugin'], files: { '__init__.py': 'x = 1\\n' } },
+        { pluginId: 'locus-live-plugin', imports: ['locus_live_plugin'], wheels: [(function () {
+          var bin = atob('${LIVE_WHEEL_B64}');
+          var b = new Uint8Array(bin.length);
+          for (var i = 0; i < bin.length; i++) b[i] = bin.charCodeAt(i);
+          return { filename: 'locus_test_plugin-1.0.0-py3-none-any.whl', format: 'python-wheel', size: ${LIVE_WHEEL.length}, sha256: '${LIVE_WHEEL_SHA}', bytes: b };
+        })()] },
       ] } }).then((r) => { prepareApplied = true; return r; }).catch((e) => e);
       await new Promise((r) => setTimeout(r, 25));
       const prepareWaited = prepareApplied === false && pk.session.status().extensionKey === null;

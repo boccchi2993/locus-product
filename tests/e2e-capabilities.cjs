@@ -4,13 +4,15 @@
 // bytes) through the ?e2e=1 seams with a TEST-ONLY synthetic catalog:
 //
 //   E1  production catalog empty: clean boot, "No optional capabilities"
-//   E2  synthetic catalog injection: UI lists the capability
+//   E2  synthetic catalog injection + REAL .locus package installs: the
+//       UI lists the capabilities
 //   E3  Add -> state ready; durable instance + install marker materialized
 //   E4  system prompt contains the capability index + skill instance path
 //   E5  system prompt does NOT contain the skill body marker
 //   E6  cat ~/.skills/... during the task -> body readable (lazy loading)
 //   E7  ordinary `import locus_test_plugin` inside python -> 42
-//       (pre-READY install, no lazy-install-on-import, no network)
+//       (the plugin wheel installed offline through the REAL import
+//       service before READY, no lazy-install-on-import, no network)
 //   E8  Remove -> NEXT task's prompt/environment no longer carry it
 //   E9  the old task snapshot stays frozen and unchanged
 //   E10 shared plugin referenced by two capabilities resolves ONCE
@@ -20,6 +22,14 @@
 //   E13 /mnt/plugins introspection read-only (real shell, real fork)
 //   E14 the old read-only skill mount is gone; instances live under ~/.skills
 //   E15 capability introspection read-only
+//
+// D10 §6 wheel-only migration: the plugin-bearing capabilities
+// (synthetic-capability / cap-a / cap-b) are installed as REAL .locus
+// packages — node builds them with the real packLocus over the real
+// memory workspace (helpers/locus-fixtures.mjs) around the committed
+// locus_test_plugin wheel, and the page installs them through the REAL
+// import service (capabilityComposition.installPackage). Only the
+// skills-only MCP capability stays on injectTestCatalog.
 //
 // Mutable-skill-instance approval/lifecycle proofs live in
 // tests/e2e-skill-instances.cjs.
@@ -46,18 +56,21 @@ const ASSET_CACHE_DIRS = [
   path.join(ROOT, '..', 'Locus-browser-agent-runtime', 'tmp-f04b-probe', 'pyodide'),
 ];
 
-const SYNTH_PLUGIN_SRC = 'def answer():\n    return 42\n';
+// The committed, proven Package Core wheel (locus_test_plugin.answer()
+// == 42) — the same bytes the synthetic-capability package ships and the
+// runtime installs offline through Pyodide before READY.
+const TEST_PLUGIN_WHEEL_PATH = path.join(__dirname, 'fixtures', 'capability-package',
+  'minimal', 'plugins', 'locus-test-plugin', 'artifacts', 'locus_test_plugin-1.0.0-py3-none-any.whl');
 // The skill's default Markdown source lives in a real fixture file; the
 // descriptor is metadata ONLY and the source is injected into the
 // SkillSourceStore (never inline on the catalog entry). Loaded in main().
 const FIXTURE_SKILL_PATH = path.join(__dirname, 'fixtures', 'skills', 'synthetic-skill', 'SKILL.md');
 let SYNTH_SKILL_BODY = '';
 
+// Only the skills-only capability stays on the TEST-ONLY catalog
+// injection; the plugin-bearing ones arrive as installed packages.
 const SYNTH_CATALOGS = {
-  plugins: [
-    { id: 'synthetic-python-plugin', version: '1', displayName: 'Synthetic Python Plugin', runtime: 'python', authority: 'none', provides: { pythonImports: ['locus_test_plugin'] } },
-    { id: 'shared-plugin', version: '2', displayName: 'Shared Plugin', runtime: 'python', authority: 'none', provides: { pythonImports: [] } },
-  ],
+  plugins: [],
   skills: [
     { id: 'synthetic-skill', version: '1', displayName: 'Synthetic Skill', description: 'How to use the synthetic capability.' },
   ],
@@ -65,9 +78,6 @@ const SYNTH_CATALOGS = {
     { id: 'synthetic-service', displayName: 'Synthetic Service', description: 'TEST ONLY authority' },
   ],
   capabilities: [
-    { id: 'synthetic-capability', version: '1', displayName: 'Synthetic Capability', description: 'TEST ONLY composition proof.', plugins: ['synthetic-python-plugin'], skills: ['synthetic-skill'], mcps: [] },
-    { id: 'cap-a', version: '1', displayName: 'Capability A', description: 'Shares a plugin and the skill definition.', plugins: ['shared-plugin'], skills: ['synthetic-skill'], mcps: [] },
-    { id: 'cap-b', version: '1', displayName: 'Capability B', description: 'Shares the same plugin and skill definition.', plugins: ['shared-plugin'], skills: ['synthetic-skill'], mcps: [] },
     { id: 'synthetic-mcp-capability', version: '1', displayName: 'Synthetic MCP Capability', description: 'Requires an external authority.', plugins: [], skills: ['synthetic-skill'], mcps: ['synthetic-service'] },
   ],
 };
@@ -108,6 +118,59 @@ async function main() {
 
   SYNTH_SKILL_BODY = await fs.readFile(FIXTURE_SKILL_PATH, 'utf8');
   SYNTH_SOURCES = { 'synthetic-skill': { version: '1', source: SYNTH_SKILL_BODY } };
+
+  // Build the REAL .locus packages for the plugin-bearing capabilities
+  // (D10 §6): the committed locus_test_plugin wheel rides inside each
+  // package; cap-a/cap-b share byte-identical plugin descriptor + wheel so
+  // their registration co-exists (shared-component semantics).
+  const { buildFixturePackage } = await import('./helpers/locus-fixtures.mjs');
+  const WHEEL = new Uint8Array(await fs.readFile(TEST_PLUGIN_WHEEL_PATH));
+  const WHEEL_FILENAME = 'locus_test_plugin-1.0.0-py3-none-any.whl';
+  const SHARED_SKILL = {
+    id: 'synthetic-skill', version: '1',
+    displayName: 'Synthetic Skill', description: 'How to use the synthetic capability.',
+    body: SYNTH_SKILL_BODY,
+  };
+  const PKG_BYTES = {
+    'synthetic-capability': await buildFixturePackage({
+      id: 'synthetic-capability', version: '1.0.0',
+      displayName: 'Synthetic Capability', description: 'TEST ONLY composition proof.',
+      plugin: {
+        id: 'synthetic-python-plugin', version: '1',
+        wheel: WHEEL, wheelFilename: WHEEL_FILENAME,
+        pythonImports: ['locus_test_plugin'],
+        displayName: 'Synthetic Python Plugin', description: 'TEST ONLY wheel fixture.',
+      },
+      skills: [SHARED_SKILL],
+      purpose: 'TEST ONLY composition proof.',
+    }),
+    'cap-a': await buildFixturePackage({
+      id: 'cap-a', version: '1.0.0',
+      displayName: 'Capability A', description: 'Shares a plugin and the skill definition.',
+      plugin: {
+        id: 'shared-plugin', version: '2',
+        wheel: WHEEL, wheelFilename: WHEEL_FILENAME,
+        pythonImports: [],
+        displayName: 'Shared Plugin', description: 'TEST ONLY shared wheel fixture.',
+      },
+      skills: [SHARED_SKILL],
+      purpose: 'TEST ONLY shared-component proof.',
+    }),
+    'cap-b': await buildFixturePackage({
+      id: 'cap-b', version: '1.0.0',
+      displayName: 'Capability B', description: 'Shares the same plugin and skill definition.',
+      plugin: {
+        id: 'shared-plugin', version: '2',
+        wheel: WHEEL, wheelFilename: WHEEL_FILENAME,
+        pythonImports: [],
+        displayName: 'Shared Plugin', description: 'TEST ONLY shared wheel fixture.',
+      },
+      skills: [SHARED_SKILL],
+      purpose: 'TEST ONLY shared-component proof.',
+    }),
+  };
+  const PKG_B64 = Object.fromEntries(Object.entries(PKG_BYTES)
+    .map(([id, bytes]) => [id, Buffer.from(bytes).toString('base64')]));
 
   // ---- build (always fresh, same policy as e2e-network) ----
   console.log('# building dist (vite build)');
@@ -195,14 +258,31 @@ async function main() {
       { process: chrome, phase: 'cap-empty-ui', timeoutMs: 10000, predicate: (v) => String(v).includes('No optional capabilities available yet') });
     check('E1b empty-catalog UI message', String(e1empty).includes('No optional capabilities available yet'), e1empty);
 
-    // ---- E2: inject the TEST-ONLY synthetic catalog + sources + provider ----
+    // ---- E2: inject the TEST-ONLY catalog + install the REAL packages ----
+    // Order is load-bearing: injectTestCatalog REPLACES the manager
+    // catalogs (wiping any package registrations), so the catalog lands
+    // first and the .locus packages install through the REAL import
+    // service afterwards — exactly the path the UI drives.
     await evaluate(cdp,
-      'window.__locus.capabilityComposition.injectTestCatalog(' + JSON.stringify(SYNTH_CATALOGS) + ', ' + JSON.stringify(SYNTH_SOURCES) + ');'
-      + 'window.__locus.capabilityComposition.registerPluginRuntimeProvider("python", { prepare: async function () {'
-      + '  return { files: { "locus_test_plugin.py": ' + JSON.stringify(SYNTH_PLUGIN_SRC) + ' }, imports: ["locus_test_plugin"] };'
-      + '} }); "injected"');
+      'window.__locus.capabilityComposition.injectTestCatalog(' + JSON.stringify(SYNTH_CATALOGS) + ', ' + JSON.stringify(SYNTH_SOURCES) + '); "injected"');
+    const installPkg = (id) => evaluate(cdp,
+      '(async function () {'
+      + ' var bin = atob(' + JSON.stringify(PKG_B64[id]) + ');'
+      + ' var bytes = new Uint8Array(bin.length);'
+      + ' for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);'
+      + ' return await window.__locus.capabilityComposition.installPackage(bytes); })()');
+    const pkgCommits = {};
+    for (const id of ['synthetic-capability', 'cap-a', 'cap-b']) {
+      const commit = await installPkg(id);
+      pkgCommits[id] = commit;
+      console.log('# installed ' + id + ' -> ' + JSON.stringify(commit));
+    }
+    check('E2-installs three .locus packages installed through the REAL import service',
+      pkgCommits['synthetic-capability'] && pkgCommits['cap-a'] && pkgCommits['cap-b']
+      && ['synthetic-capability', 'cap-a', 'cap-b'].every((id) => pkgCommits[id].unchanged === false),
+      JSON.stringify(pkgCommits));
     const e2list = await evaluate(cdp, 'window.__locus.capabilityComposition.list().map(function (c) { return c.id + ":" + c.state; })');
-    check('E2a injected catalog lists four capabilities, all disabled',
+    check('E2a injected catalog + installed packages list four capabilities, all disabled',
       e2list.length === 4 && e2list.every((s) => s.endsWith(':disabled')), JSON.stringify(e2list));
     await waitForRuntimeCondition(cdp,
       '!!document.querySelector(\'[data-testid="capability-synthetic-capability"]\')',
