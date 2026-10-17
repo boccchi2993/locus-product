@@ -36,14 +36,15 @@
 //          are all denied with ZERO probe requests; the strict-CSP creator
 //          iframe hosts the worker on the product page
 //   B-PLG  the plugin payload path through the PRODUCT composition:
-//          registerPluginRuntimeProvider('python', ...) → CapabilityManager
-//          enable → session.prepare installs BEFORE READY → import works
-//          (pandas coexists); a broken payload (same plugin id, new
-//          version) reconfigures, fails the smoke import honestly, is NOT
-//          silently served by the stale payload (the configured key names
-//          the broken version) and never falls back to the network;
-//          recovery with a good payload; a DISABLED capability returns to
-//          core-only (extensionKey null) and the import fails honestly
+//          a .locus package (real wheel, real import service) registers the
+//          plugin → CapabilityManager enable → session.prepare installs the
+//          wheel offline BEFORE READY → import works (pandas coexists); a
+//          broken-wheel replacement (same plugin id, new version) reconfigures,
+//          fails the smoke import honestly, is NOT silently served by the
+//          stale payload (the configured key names the broken version+sha)
+//          and never falls back to the network; recovery with the good
+//          package; a DISABLED capability returns to core-only (extensionKey
+//          null) and the import fails honestly
 //   B-LIFE cancel + session boundary DURING python execution through the
 //          REAL chain: already-dispatched effects settle truthfully (file
 //          exists), later effects never dispatch (file absent), the tool
@@ -68,6 +69,7 @@ const fsSync = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
+const nodeCrypto = require('crypto');
 const {
   allocateFreePort, closeChrome, closeManagedProcess, connectToTarget,
   launchChrome, launchManagedProcess, waitForCdp, waitForHttp,
@@ -83,27 +85,31 @@ const ROOT = path.join(__dirname, '..');
 const VITE_CLI = path.join(ROOT, 'node_modules', 'vite', 'bin', 'vite.js');
 const { base: PYODIDE_CDN, manifest: PY_MANIFEST } = loadPythonManifest();
 
-const GOOD_PLUGIN_SRC = fsSync.readFileSync(
-  path.join(__dirname, 'fixtures', 'm3c-python', 'locus_m3c_plugin.py'), 'utf8');
-const BROKEN_PLUGIN_SRC = fsSync.readFileSync(
-  path.join(__dirname, 'fixtures', 'm3c-python', 'locus_m3c_plugin_broken.py'), 'utf8');
+// The committed REAL wheel fixtures (tests/fixtures/m3c-python/, see its
+// README for the deterministic regeneration + sha256). The good wheel
+// smoke-imports and answers 42; the broken wheel packs deliberately
+// invalid Python so the interpreter's smoke import fails the boot closed.
+const GOOD_WHEEL = new Uint8Array(fsSync.readFileSync(
+  path.join(__dirname, 'fixtures', 'm3c-python', 'locus_m3c_plugin-1.0.0-py3-none-any.whl')));
+const BROKEN_WHEEL = new Uint8Array(fsSync.readFileSync(
+  path.join(__dirname, 'fixtures', 'm3c-python', 'locus_m3c_plugin_broken-1.0.0-py3-none-any.whl')));
+const GOOD_WHEEL_SHA = nodeCrypto.createHash('sha256').update(GOOD_WHEEL).digest('hex');
+const BROKEN_WHEEL_SHA = nodeCrypto.createHash('sha256').update(BROKEN_WHEEL).digest('hex');
 const FIXTURE_SKILL = fsSync.readFileSync(
   path.join(__dirname, 'fixtures', 'skills', 'synthetic-skill', 'SKILL.md'), 'utf8');
 
 const INSTANCE_A = '/home/locus/.skills/cap-a/synthetic-skill.skill';
 const PYTHON_NETWORK_DENIED = 'Python network access is disabled in Locus';
 
-// Synthetic catalogs — TEST-ONLY injection through the documented
-// injectTestCatalog seam; production catalogs stay empty. The plugin
-// version IS the extension key, so the broken variant reconfigures the
-// interpreter instead of silently reusing the good payload.
-function m3cCatalogs(pluginVersion) {
+// Synthetic catalog — TEST-ONLY injection through the documented
+// injectTestCatalog seam; production catalogs stay empty. D10 §6: the
+// plugin-bearing capability is NOT in the catalog — it arrives as an
+// installed .locus package whose wheel rides the bootstrap message, so the
+// extension key is `id@version#<wheel sha256>` (the broken replacement
+// reconfigures the interpreter because its wheel sha differs).
+function m3cCatalogs() {
   return {
-    plugins: [{
-      id: 'm3c-python-plugin', version: String(pluginVersion),
-      displayName: 'M3C Python Plugin', runtime: 'python', authority: 'none',
-      provides: { pythonImports: ['locus_m3c_plugin'] },
-    }],
+    plugins: [],
     skills: [{
       id: 'synthetic-skill', version: '1', displayName: 'Synthetic Skill',
       description: 'M3c review B synthetic skill.',
@@ -111,7 +117,6 @@ function m3cCatalogs(pluginVersion) {
     mcps: [],
     capabilities: [
       { id: 'cap-a', version: '1', displayName: 'Capability A', description: 'TEST ONLY.', plugins: [], skills: ['synthetic-skill'], mcps: [] },
-      { id: 'm3c-plugin-cap', version: '1', displayName: 'M3C Plugin Capability', description: 'TEST ONLY.', plugins: ['m3c-python-plugin'], skills: [], mcps: [] },
     ],
   };
 }
@@ -282,19 +287,45 @@ async function main() {
     const pyCmd = (code) => "python <<'PY'\n" + (Array.isArray(code) ? code.join('\n') : code) + '\nPY';
 
     await wireSettings();
-    // TEST-ONLY composition setup: synthetic catalogs + the python plugin
-    // runtime provider (the documented provider seam — a real wheel loader
-    // would implement the same seam). Production catalogs stay empty.
+    // TEST-ONLY composition setup: the skills-only catalog injection, then
+    // the plugin-bearing m3c capability installed as a REAL .locus package
+    // through the REAL import service (D10 §6 — the provider seam this
+    // gate used to drive is gone; the wheel rides the bootstrap message).
+    // Production catalogs stay empty.
     await evaluate(cdp,
       'window.__locus.capabilityComposition.injectTestCatalog('
-      + literal(m3cCatalogs(1)) + ', ' + literal(SKILL_SOURCES) + '); "catalog"');
-    const registerProvider = (sourceText) => evaluate(cdp,
-      'window.__locus.capabilityComposition.registerPluginRuntimeProvider("python", '
-      + '{ prepare: async function () { return { files: { "locus_m3c_plugin.py": '
-      + literal(sourceText) + ' }, imports: ["locus_m3c_plugin"] }; } }); "provider"');
-    await registerProvider(GOOD_PLUGIN_SRC);
+      + literal(m3cCatalogs()) + ', ' + literal(SKILL_SOURCES) + '); "catalog"');
+    const { buildFixturePackage } = await import('./helpers/locus-fixtures.mjs');
+    const m3cPkgBytes = async (version, pluginVersion, wheel) => buildFixturePackage({
+      id: 'm3c-plugin-cap', version,
+      displayName: 'M3C Plugin Capability', description: 'TEST ONLY.',
+      plugin: {
+        id: 'm3c-python-plugin', version: pluginVersion,
+        wheel, wheelFilename: wheel === GOOD_WHEEL
+          ? 'locus_m3c_plugin-1.0.0-py3-none-any.whl'
+          : 'locus_m3c_plugin_broken-1.0.0-py3-none-any.whl',
+        pythonImports: ['locus_m3c_plugin'],
+        displayName: 'M3C Python Plugin', description: 'TEST ONLY wheel fixture.',
+      },
+      skills: [],
+      purpose: 'TEST ONLY wheel-install proof (' + version + ').',
+    });
+    const GOOD_PKG_B64 = Buffer.from(await m3cPkgBytes('1.0.0', '1', GOOD_WHEEL)).toString('base64');
+    const BROKEN_PKG_B64 = Buffer.from(await m3cPkgBytes('2.0.0', '2', BROKEN_WHEEL)).toString('base64');
+    const installPackageB64 = (b64) => evaluate(cdp,
+      '(async function () {'
+      + ' var bin = atob(' + literal(b64) + ');'
+      + ' var bytes = new Uint8Array(bin.length);'
+      + ' for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);'
+      + ' return await window.__locus.capabilityComposition.installPackage(bytes); })()');
+    const goodInstall = await installPackageB64(GOOD_PKG_B64);
+    check('B-SETUP the m3c plugin package installed through the REAL import service',
+      goodInstall && goodInstall.id === 'm3c-plugin-cap' && goodInstall.state === 'disabled'
+      && goodInstall.unchanged === false, JSON.stringify(goodInstall));
     const enableCap = (id) => evaluate(cdp,
       '(async function () { var s = await window.__locus.capabilityComposition.enable(' + literal(id) + '); return s; })()');
+    const enableState = (id) => evaluate(cdp,
+      '(function () { var c = window.__locus.capabilityComposition.list().filter(function (x) { return x.id === ' + literal(id) + '; })[0]; return c ? c.state : null; })()');
     check('B-SETUP cap-a (skills) enabled ready', (await enableCap('cap-a')) === 'ready');
     const capList = await evaluate(cdp, 'window.__locus.capabilityComposition.list()'
       + '.filter(function (c) { return c.id === "cap-a"; })[0].state');
@@ -658,21 +689,24 @@ async function main() {
       ], 'completed', 300000, 'm3c-py-plg1');
       const plg1res = await toolResults('B-PLG1 plugin import');
       const plg1State = await pyState();
-      check('B-PLG1 the Product-composed plugin really installed BEFORE READY: import answers 42, pandas coexists',
+      check('B-PLG1 the Product-composed plugin wheel really installed offline BEFORE READY: import answers 42, pandas coexists',
         plg1res.some((r) => r.success === true && r.output.includes('ANSWER 42') && r.output.includes('DF 22')),
         JSON.stringify(plg1res.map((r) => String(r.output).slice(0, 200))));
-      check('B-PLG1b the interpreter carries the composed payload key',
-        plg1State.extensionKey === 'm3c-python-plugin@1', JSON.stringify(plg1State));
+      check('B-PLG1b the interpreter carries the composed payload key (version + wheel sha)',
+        plg1State.extensionKey === 'm3c-python-plugin@1#' + GOOD_WHEEL_SHA, JSON.stringify(plg1State));
       check('B-PLG1c the payload rebuild fetched ZERO assets (verified cache; payload rides the bootstrap message, never the network)',
         (await assetFetches()) === bootAssetsBefore, 'delta=' + ((await assetFetches()) - bootAssetsBefore));
 
-      // Broken payload: SAME plugin id, version 2 → a genuinely different
-      // extension key → prepare reconfigures → smoke import fails the boot.
-      await evaluate(cdp, 'window.__locus.capabilityComposition.injectTestCatalog('
-        + literal(m3cCatalogs(2)) + ', ' + literal(SKILL_SOURCES) + '); "catalog2"');
-      await registerProvider(BROKEN_PLUGIN_SRC);
-      check('B-PLG2 the broken-payload capability still enables (the payload is structurally valid; compilation is the interpreter\'s verdict)',
-        (await enableCap('m3c-plugin-cap')) === 'ready');
+      // Broken wheel: SAME plugin id, version 2 → a genuinely different
+      // extension key (version + wheel sha256) → the replacement
+      // reconfigures the interpreter. D10 §5 keeps a replaced package
+      // enabled, so the commit itself lands ready; compilation remains the
+      // interpreter's verdict at the smoke import.
+      const brokenInstall = await installPackageB64(BROKEN_PKG_B64);
+      check('B-PLG2 the broken-wheel replacement landed ready through the REAL import service (structurally valid wheel; auto re-enabled per D10)',
+        brokenInstall && brokenInstall.id === 'm3c-plugin-cap' && brokenInstall.state === 'ready'
+        && brokenInstall.unchanged === false
+        && (await enableState('m3c-plugin-cap')) === 'ready', JSON.stringify(brokenInstall));
       const plg2Assets = await assetFetches();
       await pushResponses([
         toolCall('m3c-plg2', pyCmd("import locus_m3c_plugin\nprint('M3C-B-PLG-NEVER', locus_m3c_plugin.answer())")),
@@ -688,18 +722,20 @@ async function main() {
         /smoke import failed/i.test(plg2Out) && !plg2Out.includes('M3C-B-PLG-NEVER')
         && plg2State.interpreter !== 'ready' && plg2State.projected !== 'ready',
         JSON.stringify({ out: plg2Out.slice(0, 260), state: plg2State }));
-      check('B-PLG2b no silent fallback: the configured key names the BROKEN version (not the stale good payload)',
-        plg2State.extensionKey === 'm3c-python-plugin@2', JSON.stringify(plg2State));
+      check('B-PLG2b no silent fallback: the configured key names the BROKEN version+wheel sha (not the stale good payload)',
+        plg2State.extensionKey === 'm3c-python-plugin@2#' + BROKEN_WHEEL_SHA, JSON.stringify(plg2State));
       check('B-PLG2c the failed payload install fetched ZERO assets and ZERO probe requests',
         (await assetFetches()) === plg2Assets && probeBeyondAllowed() === 0,
         'assets delta=' + ((await assetFetches()) - plg2Assets) + ' probeBeyond=' + probeBeyondAllowed());
 
-      // Recovery: good payload under version 3.
-      await evaluate(cdp, 'window.__locus.capabilityComposition.injectTestCatalog('
-        + literal(m3cCatalogs(3)) + ', ' + literal(SKILL_SOURCES) + '); "catalog3"');
-      await registerProvider(GOOD_PLUGIN_SRC);
-      check('B-PLG3 the good-payload capability re-enables ready',
-        (await enableCap('m3c-plugin-cap')) === 'ready');
+      // Recovery: the good package again (version 1, wheel sha differs from
+      // the broken payload's — the key change forces the interpreter
+      // rebuild), installed through the REAL import service.
+      const recoveryInstall = await installPackageB64(GOOD_PKG_B64);
+      check('B-PLG3 the good-package replacement landed ready and re-enabled',
+        recoveryInstall && recoveryInstall.id === 'm3c-plugin-cap' && recoveryInstall.state === 'ready'
+        && recoveryInstall.unchanged === false
+        && (await enableState('m3c-plugin-cap')) === 'ready', JSON.stringify(recoveryInstall));
       const plg3 = await runTask('B-PLG3 recovery import', [
         toolCall('m3c-plg3', pyCmd("import locus_m3c_plugin\nprint('ANSWER', locus_m3c_plugin.answer())")),
         finalAnswer('B-PLG3 done'),
