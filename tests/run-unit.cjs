@@ -16,6 +16,11 @@ const SUITES = [
   // hostile-zip diagnostic matrix (hand-built byte arrays), bounded
   // zip-bomb abort, truncation safety, Python-zipfile cross-check.
   'locus-archive.test.mjs',
+  // Capability package install service (C1-P2, D10): inspect/commit
+  // over the real archive + package core + manager, boot-time
+  // verification, mismatch accept/skip, replacement rollback, uninstall,
+  // the model-unreachable storage boundary (CI14), schema 4.
+  'capability-install.test.mjs',
   'skill-instances.test.cjs',
   'presentation.test.cjs',
   'store-defaults.test.cjs',
