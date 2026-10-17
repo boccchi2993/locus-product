@@ -8,8 +8,8 @@
 // Deterministic for identical inputs (packLocus computes every size and
 // SHA-256 itself; nothing is hand-written), so re-running a suite always
 // produces the same digests.
-import * as LA from '../src/locus-archive.js';
-import { createMemoryWorkspace } from '../src/product/runtime-api.js';
+import * as LA from '../../src/locus-archive.js';
+import { createMemoryWorkspace } from '../../src/product/runtime-api.js';
 
 // skill: { id, version = '1', displayName, description, body }
 // plugin: null | {
