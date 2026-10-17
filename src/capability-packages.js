@@ -273,11 +273,19 @@ export function createCapabilityPackages({ persistence, manager, now }) {
 
     const existing = entry.existing;
     let wasEnabled = false;
-    if (existing && manager.isPackage(id)) {
-      wasEnabled = manager.capabilityState(id) !== 'disabled';
-      // keepInstances: true — the skill instance directory survives the
-      // replacement; the §6.3 upgrade rule takes over on re-enable.
-      await manager.unregisterPackage(id, { keepInstances: true });
+    if (existing) {
+      // A registered package reads the LIVE manager state; one the boot
+      // verification skipped (never registered — §5.3) only has the
+      // record's enabled bit. Either way D10 keeps it: enabled before
+      // the replacement, re-enabled after.
+      wasEnabled = manager.isPackage(id)
+        ? manager.capabilityState(id) !== 'disabled'
+        : !!existing.enabled;
+      if (manager.isPackage(id)) {
+        // keepInstances: true — the skill instance directory survives the
+        // replacement; the §6.3 upgrade rule takes over on re-enable.
+        await manager.unregisterPackage(id, { keepInstances: true });
+      }
     }
 
     try {
