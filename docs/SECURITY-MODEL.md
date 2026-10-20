@@ -33,7 +33,7 @@ This is a concrete no-network authority contract, not proof against every imagin
 
 ## 5. Network authority
 
-NetworkRuntime accepts bounded HTTP/HTTPS only. Ambient credentials are omitted, unsafe headers filtered, sizes/deadlines bounded, and private relay targets refused.
+NetworkRuntime accepts bounded HTTP/HTTPS only. Ambient credentials are omitted, unsafe headers filtered, sizes/deadlines bounded, and private relay targets refused. (Explicit credential variables are the one exception: see DECISIONS D1 and C3-CREDENTIALS-MCP §4. The model writes only the variable name; the host substitutes the value at send time, and only for a matching binding.)
 
 GET/HEAD retry only on genuine initial transport failure. Side-effecting methods are approval-gated and sent exactly once.
 
