@@ -79,12 +79,21 @@ const runtimeApi = await import('../src/product/runtime-api.js');
 const ext = await import('../src/extensions.js');
 const persistenceMod = await import('../src/persistence.js');
 const svcMod = await import('../src/capability-packages.js');
+const credSvcMod = await import('../src/credentials.js');
 
 const CAP_ID = 'ci-capability';
 const OTHER_CAP_ID = 'other-capability';
 const PLUGIN_ID = 'ci-plugin';
 const MARKER = 'LOCUS-MD-MARKER-7f3a';
 const WHEEL_NAME = 'ci_plugin-1.0.0-py3-none-any.whl';
+
+// C3 fixture credential declarations (v1 and a binding-changed v2).
+const CRED_DECL_V1 = [{
+  name: 'CI_CRED_KEY', label: 'CI credential', description: 'TEST ONLY.',
+  origin: 'https://api.example.test', pathPrefix: '/v1/tools/',
+  header: 'Authorization', scheme: 'Bearer',
+}];
+const CRED_DECL_V2 = [Object.assign({}, CRED_DECL_V1[0], { pathPrefix: '/v2/tools/' })];
 
 // ---------- fixture builders ----------
 
@@ -102,21 +111,23 @@ function skillBody(id, version) {
 }
 
 async function projectWorkspace({ id = CAP_ID, version = '1.0.0', pluginId = PLUGIN_ID,
-  skillIds = ['skill-a', 'skill-b'], skillBodies = null, wheelSeed = 1 } = {}) {
+  skillIds = ['skill-a', 'skill-b'], skillBodies = null, wheelSeed = 1, credentials = null } = {}) {
   const ws = runtimeApi.createMemoryWorkspace({
     maxBytes: LA.LOCUS_LIMITS.maxTotalBytes,
     maxFileBytes: LA.LOCUS_LIMITS.maxFileBytes,
   });
+  const capabilityDescriptor = {
+    id, version,
+    displayName: 'CI Capability ' + id,
+    description: 'TEST ONLY fixture for the capability install service.',
+    plugins: [pluginId],
+    skills: skillIds.slice(),
+    mcps: [],
+  };
+  if (credentials) capabilityDescriptor.credentials = credentials;
   const capabilities = {
     schemaVersion: 1,
-    capability: {
-      id, version,
-      displayName: 'CI Capability ' + id,
-      description: 'TEST ONLY fixture for the capability install service.',
-      plugins: [pluginId],
-      skills: skillIds.slice(),
-      mcps: [],
-    },
+    capability: capabilityDescriptor,
   };
   await ws.write('capability.json', JSON.stringify(capabilities, null, 2) + '\n');
   await ws.write('plugins/' + pluginId + '/plugin.json', JSON.stringify({
@@ -193,10 +204,12 @@ async function packWithMissingFile() {
 // Fixed clock: deterministic installed/updated timestamps.
 const SERVICE_NOW = () => '2026-10-17T10:00:00.000Z';
 
-function serviceRig() {
-  const persistence = new persistenceMod.PersistenceService();
+function serviceRig(opts = {}) {
+  const persistence = opts.persistence || new persistenceMod.PersistenceService();
   const home = runtimeApi.createMemoryWorkspace({ name: 'home', dirs: ['.skills'] });
-  const storage = new ext.SkillInstanceStorage({ resolveHome: () => home });
+  // instances === null: the C3 enable-failure rig (a capability with
+  // skills cannot materialize → manager.enable lands in state 'error').
+  const storage = opts.instances === null ? null : new ext.SkillInstanceStorage({ resolveHome: () => home });
   const manager = new harnessApi.CapabilityManager({
     catalogs: {
       capabilities: harnessApi.CAPABILITY_CATALOG,
@@ -207,8 +220,13 @@ function serviceRig() {
     sources: new harnessApi.SkillSourceStore(),
     instances: storage,
   });
-  const service = svcMod.createCapabilityPackages({ persistence, manager, now: SERVICE_NOW });
-  return { persistence, manager, home, storage, service };
+  // C3: the credentials service rides the SAME manager (the real default
+  // composition; credentials === false exercises the no-service wiring).
+  const credentials = opts.credentials === false
+    ? null
+    : credSvcMod.createCredentialService({ persistence, manager });
+  const service = svcMod.createCapabilityPackages({ persistence, manager, now: SERVICE_NOW, credentials });
+  return { persistence, manager, home, storage, service, credentials };
 }
 
 async function installViaService(rig, packed, opts = {}) {
@@ -325,14 +343,19 @@ function harnessDeclarationVariant({ capabilityPackages = true } = {}) {
     const rig = serviceRig();
     const packed = await packProject();
     const { summary, commit } = await installViaService(rig, packed);
-    check('CI2 commit result', commit.id === CAP_ID && commit.unchanged === false
-      && commit.state === 'disabled', JSON.stringify(commit));
+    // C3 O1 (owner decision, 2026-10-18): a FIRST install auto-enables.
+    // Was: commit.state === 'disabled' → now the commit lands enabled.
+    check('CI2 commit result (C3 O1: first install auto-enables)',
+      commit.id === CAP_ID && commit.unchanged === false
+      && commit.state === 'ready' && commit.enabled === true, JSON.stringify(commit));
     const record = await recordOf(rig.persistence, CAP_ID);
-    check('CI2 record written disabled + verified', !!record && record.enabled === false
+    check('CI2 record written enabled + verified (C3 O1: was enabled === false)',
+      !!record && record.enabled === true
       && record.verification === 'ok' && record.version === '1.0.0' && record.digest === summary.digest,
       JSON.stringify(record && { enabled: record.enabled, verification: record.verification }));
-    check('CI2 registered and listed disabled', rig.manager.isPackage(CAP_ID) === true
-      && rig.manager.listCapabilities().some((c) => c.id === CAP_ID && c.state === 'disabled'));
+    check('CI2 registered and listed enabled (C3 O1: was disabled)',
+      rig.manager.isPackage(CAP_ID) === true
+      && rig.manager.listCapabilities().some((c) => c.id === CAP_ID && c.state === 'ready' && c.enabled === true));
     const stored = await rig.persistence.readCapabilityPackageBytes(CAP_ID, record.digest);
     const reread = await LA.readLocusArchive(stored);
     const reparsed = reread.ok ? LA.parseLocusMd(reread.locusMd) : null;
@@ -558,8 +581,11 @@ function harnessDeclarationVariant({ capabilityPackages = true } = {}) {
     await installViaService(rig, packed);
     const before = await recordOf(rig.persistence, CAP_ID);
     const again = await rig.service.inspect(packed.bytes);
-    check('CI10 second inspect reports same', again.ok === true && again.kind === 'same'
-      && again.existing && again.existing.version === '1.0.0' && again.existing.enabled === false,
+    // C3 O1: the first install above auto-enabled the package, so the
+    // existing record reads enabled (was: enabled === false).
+    check('CI10 second inspect reports same (C3 O1: existing.enabled is now true)',
+      again.ok === true && again.kind === 'same'
+      && again.existing && again.existing.version === '1.0.0' && again.existing.enabled === true,
       JSON.stringify(again.ok ? { kind: again.kind } : again.diagnostics));
     const done = await rig.service.commit(again.token, {});
     check('CI10 same commit reports unchanged', done.unchanged === true && done.id === CAP_ID);
@@ -971,6 +997,115 @@ function harnessDeclarationVariant({ capabilityPackages = true } = {}) {
       (await recordOf(sharedPersistence, CAP_ID)) === null
       && m.capabilityManager.isPackage(CAP_ID) === false
       && m.store.capabilityPackages.packages.length === 0);
+  }
+
+  // ---------- CI26. C3: first install auto-enable survives a restart ----------
+  {
+    section('CI26 C3 O1: auto-enabled install reloads enabled');
+    const packed = await packProject();
+    const shared = new persistenceMod.PersistenceService();
+    {
+      const rig = serviceRig({ persistence: shared });
+      const { commit } = await installViaService(rig, packed);
+      check('CI26 first install lands enabled (C3 O1)',
+        commit.enabled === true && commit.state === 'ready', JSON.stringify(commit));
+    }
+    {
+      // "Restart": a fresh manager + service over the SAME persistence.
+      const rig = serviceRig({ persistence: shared });
+      const results = await rig.service.loadInstalled();
+      const record = await recordOf(rig.persistence, CAP_ID);
+      check('CI26 the reload restores the enabled package',
+        results.length === 1 && results[0].status === 'loaded'
+        && !!record && record.enabled === true
+        && rig.manager.isEnabled(CAP_ID) === true
+        && rig.manager.capabilityState(CAP_ID) === 'ready',
+        JSON.stringify({ results, enabled: record && record.enabled }));
+    }
+  }
+
+  // ---------- CI27. C3 O1: enable failure keeps the package, disabled ----------
+  {
+    section('CI27 C3 O1: enable failure → installed, disabled, no throw');
+    const rig = serviceRig({ instances: null }); // no instance storage → enable fails
+    const packed = await packProject();
+    const { commit } = await installViaService(rig, packed);
+    check('CI27 the commit reports enabled:false with the reason',
+      commit.enabled === false && typeof commit.enableError === 'string' && commit.enableError.length > 0
+      && commit.state === 'error',
+      JSON.stringify(commit));
+    const record = await recordOf(rig.persistence, CAP_ID);
+    check('CI27 the package stays installed and DISABLED (record bit)',
+      !!record && record.enabled === false && record.version === '1.0.0');
+    const list = await rig.service.list();
+    check('CI27 the package is still listed',
+      list.packages.length === 1 && list.packages[0].id === CAP_ID
+      && list.packages[0].enabled === false, JSON.stringify(list.packages));
+  }
+
+  // ---------- CI28. C3: replace keeps the enabled/disabled state (D10) ----------
+  {
+    section('CI28 D10 matrix: replace enabled/disabled behaves as before');
+    for (const oldEnabled of [true, false]) {
+      const rig = serviceRig();
+      const v1 = await packProject({ version: '1.0.0' });
+      await installViaService(rig, v1);
+      if (oldEnabled) await rig.manager.enable(CAP_ID); // auto-enabled already; idempotent
+      else {
+        await rig.manager.disable(CAP_ID);
+        await rig.service.setEnabled(CAP_ID, false);
+      }
+      const v2 = await packProject({ version: '2.0.0' });
+      const s2 = await rig.service.inspect(v2.bytes);
+      const done = await rig.service.commit(s2.token, {});
+      check('CI28 old ' + (oldEnabled ? 'enabled' : 'disabled') + ' → new '
+        + (oldEnabled ? 'enabled' : 'disabled') + ' (unchanged behavior)',
+        done.unchanged === false
+        && (done.state === 'ready') === oldEnabled
+        && rig.manager.isEnabled(CAP_ID) === oldEnabled,
+        JSON.stringify({ state: done.state, isEnabled: rig.manager.isEnabled(CAP_ID) }));
+    }
+  }
+
+  // ---------- CI29. C3: commit/uninstall route through the credentials ----------
+  {
+    section('CI29 credentials: commit replace + uninstall drive the service');
+    const rig = serviceRig();
+    const v1 = await packProject({ version: '1.0.0', credentials: CRED_DECL_V1 });
+    const { summary: s1 } = await installViaService(rig, v1);
+    check('CI29 the registered credential starts needs-connection',
+      rig.manager.listCapabilities().some((c) => c.id === CAP_ID
+        && c.credentials.some((x) => x.name === 'CI_CRED_KEY' && x.state === 'needs-connection')),
+      JSON.stringify(rig.manager.listCapabilities().map((c) => c.credentials)));
+    await rig.credentials.connect('CI_CRED_KEY', 'ci-cred-value-123456', { remember: true });
+    check('CI29 connected through the service', rig.credentials.summary('CI_CRED_KEY').state === 'connected');
+    // Version replace, binding UNCHANGED → stays connected.
+    const v2 = await packProject({ version: '2.0.0', credentials: CRED_DECL_V1 });
+    const s2 = await rig.service.inspect(v2.bytes);
+    check('CI29 v2 inspect: replace', s2.ok === true && s2.kind === 'replace', JSON.stringify(s2.ok ? s2.kind : s2.diagnostics));
+    await rig.service.commit(s2.token, {});
+    check('CI29 unchanged binding keeps the connection through the replace',
+      rig.credentials.summary('CI_CRED_KEY').state === 'connected');
+    // Version replace, binding CHANGED (pathPrefix) → needs-reconfirm, value kept.
+    const v3 = await packProject({ version: '3.0.0', credentials: CRED_DECL_V2 });
+    const s3 = await rig.service.inspect(v3.bytes);
+    await rig.service.commit(s3.token, {});
+    check('CI29 changed binding flips to needs-reconfirm with the value kept',
+      rig.credentials.summary('CI_CRED_KEY').state === 'needs-reconfirm'
+      && rig.credentials.summary('CI_CRED_KEY').hasValue === true,
+      JSON.stringify(rig.credentials.summary('CI_CRED_KEY')));
+    // Uninstall removes the binding + remembered value.
+    await rig.service.uninstall(CAP_ID);
+    check('CI29 uninstall removed the credential data',
+      rig.credentials.summary('CI_CRED_KEY').state === null
+      && rig.credentials.summary('CI_CRED_KEY').hasValue === false
+      && rig.credentials.summary('CI_CRED_KEY').last4 === null,
+      JSON.stringify(rig.credentials.summary('CI_CRED_KEY')));
+    const bindingsRow = await rig.persistence.get('meta', 'credentialBindings');
+    check('CI29 binding records gone after uninstall',
+      !bindingsRow || !bindingsRow.bindings.length, JSON.stringify(bindingsRow));
+    const s1digestGone = await rejectionOf(rig.persistence.readCapabilityPackageBytes(CAP_ID, s1.digest));
+    check('CI29 v1 bytes cleaned', !!s1digestGone && s1digestGone.name === 'NotFoundError');
   }
 
   console.log('---');

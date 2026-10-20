@@ -30,6 +30,7 @@ export function createLocusToolPort(deps) {
   const definitions = typeof deps.definitions === 'function' ? deps.definitions : null;
   const mutationPolicy = typeof deps.mutationPolicy === 'function' ? deps.mutationPolicy : null;
   const authorization = typeof deps.authorization === 'function' ? deps.authorization : null;
+  const credentials = typeof deps.credentials === 'function' ? deps.credentials : null;
 
   return {
     definitions() {
@@ -54,6 +55,11 @@ export function createLocusToolPort(deps) {
         // The execution authorization port (the product adapter supplies
         // the chat identity on its side; the runtime request carries none).
         authorization: authorization ? authorization() : undefined,
+        // C3: the credential port (src/product/credential-port.js) — the
+        // runtime resolves `$NAME` header references through it. Absent on
+        // a harness generation without the capabilityCredentials
+        // declaration (curl credential variables then stay literal).
+        credentials: credentials ? credentials() : undefined,
       };
       return deps.execute(c.name, c.input, workspace, o);
     },

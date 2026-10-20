@@ -319,9 +319,13 @@ async function main() {
       + ' for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);'
       + ' return await window.__locus.capabilityComposition.installPackage(bytes); })()');
     const goodInstall = await installPackageB64(GOOD_PKG_B64);
-    check('B-SETUP the m3c plugin package installed through the REAL import service',
-      goodInstall && goodInstall.id === 'm3c-plugin-cap' && goodInstall.state === 'disabled'
-      && goodInstall.unchanged === false, JSON.stringify(goodInstall));
+    check('B-SETUP the m3c plugin package installed through the REAL import service (C3 O1: the install auto-enables)',
+      goodInstall && goodInstall.id === 'm3c-plugin-cap' && goodInstall.state === 'ready'
+      && goodInstall.enabled === true && goodInstall.unchanged === false, JSON.stringify(goodInstall));
+    // C3 O1: a FIRST install auto-enables. This suite exercises the plugin
+    // surface with the capability DISABLED until B-PLG0 (the intervening
+    // python tasks must run core-only), so the premise is restored here.
+    await evaluate(cdp, '(async function () { await window.__locus.capabilityComposition.disable("m3c-plugin-cap"); return "off"; })()');
     const enableCap = (id) => evaluate(cdp,
       '(async function () { var s = await window.__locus.capabilityComposition.enable(' + literal(id) + '); return s; })()');
     const enableState = (id) => evaluate(cdp,

@@ -209,6 +209,11 @@ export class PersistenceService {
     this.opfsAvailable = false;
     this.initializationError = null;
     this.secrets = new Set();
+    // C3: values the page holds in memory but deliberately does NOT store
+    // (capability-credential keys without "remember"). Kept in a separate
+    // set so _loadSecrets() can re-union them after every store reload
+    // instead of silently dropping them from the redaction set.
+    this.volatileSecrets = new Set();
     // Memory-mode backing for content-addressed attachment bytes (the OPFS
     // path is unavailable). Keyed by storageKey (sha256 hex).
     this.memoryAttachmentBytes = new Map();
@@ -416,6 +421,27 @@ export class PersistenceService {
       ? await persistenceRequest(this.db.transaction('secrets', 'readonly').objectStore('secrets').getAll())
       : Array.from(this.memory.secrets.values());
     this.secrets = new Set(rows.map(function (r) { return r.value; }).filter(function (v) { return typeof v === 'string' && v; }));
+    // C3: memory-held (volatile) values survive the reload of the store —
+    // they stay redacted in conversations/records for this page session.
+    var self = this;
+    this.volatileSecrets.forEach(function (v) { if (v) self.secrets.add(v); });
+  }
+
+  // C3: register/unregister a memory-only secret value in the redaction
+  // set. Idempotent; removing an absent value is a no-op. Unregistering
+  // leaves the value in the redaction set until the next _loadSecrets()
+  // rebuilds it from the store — conservative on purpose: redacting a
+  // value that no longer occurs anywhere is invisible, while dropping a
+  // value another still-live row (or race) holds is not.
+  addVolatileSecret(v) {
+    if (typeof v !== 'string' || !v) return;
+    this.volatileSecrets.add(v);
+    this.secrets.add(v);
+  }
+
+  removeVolatileSecret(v) {
+    if (typeof v !== 'string' || !v) return;
+    this.volatileSecrets.delete(v);
   }
 
   async saveSettings(settings) {
@@ -483,6 +509,29 @@ export class PersistenceService {
   async forgetApiKeys() {
     await this.clear('secrets');
     this.secrets.clear();
+    this.volatileSecrets.clear();
+  }
+
+  // ---------- C3 persistent approvals (meta key approvalPersistentGrants) ----------
+  // One sorted, de-duplicated string array of policyKeys. Consumed through
+  // the approval controller's persistentGrants port; "Reset all data"
+  // clears it with the rest of `meta`.
+  async loadApprovalGrants() {
+    var row = await this.get('meta', 'approvalPersistentGrants');
+    return row && Array.isArray(row.keys)
+      ? row.keys.filter(function (k) { return typeof k === 'string' && k; })
+      : [];
+  }
+
+  async saveApprovalGrants(keys) {
+    var seen = new Set();
+    var clean = [];
+    (Array.isArray(keys) ? keys : []).forEach(function (k) {
+      if (typeof k === 'string' && k && !seen.has(k)) { seen.add(k); clean.push(k); }
+    });
+    clean.sort();
+    await this.put('meta', { key: 'approvalPersistentGrants', keys: clean });
+    return clean;
   }
 
   // Bytes-per-token calibration (CONTEXT-MANAGEMENT.md §3.2): ONE record,
@@ -965,6 +1014,7 @@ export class PersistenceService {
     if (this.opfsRoot) await this._clearOpfsDir(['capability-packages']);
     this.memoryCapabilityPackageBytes.clear();
     this.secrets.clear();
+    this.volatileSecrets.clear();
     await this.clearHome();
     await this.clearPlugins();
   }

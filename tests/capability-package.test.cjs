@@ -702,6 +702,124 @@ async function patchManifest(ws, rel, transform) {
       jsonDiag(v));
   }
 
+  // ===================== C3 credentials in capability.json =====================
+  // The minimal fixture has NO credentials: its lock serialization and
+  // manifest digest must stay BYTE-IDENTICAL to the pre-C3 values (pinned
+  // below) so already-installed packages are never judged "changed".
+  {
+    const cpMod = await import('../src/capability-package.js');
+    const LA = await import('../src/locus-archive.js');
+
+    // C3-P1: pinned pre-C3 digests of the minimal fixture package.
+    {
+      const ws = await fixtureWorkspace();
+      const built = await LCP.buildProject({ workspace: ws, root: '' });
+      check('C3-P1 builds the credential-free fixture', built.ok === true, jsonDiag(built));
+      const lockJson = cpMod.canonicalJson(built.bundle.lock) + '\n';
+      const lockSha = sha256HexNode(new TextEncoder().encode(lockJson));
+      check('C3-P1 lock serialization is byte-identical to the pre-C3 lock',
+        lockSha === '99c37ffecec4f3f5f4e754f322e5d999397220cae1ad0c99e0a6f9ea0f9c6332',
+        lockSha);
+      const packed = await LA.packLocus({
+        workspace: ws, root: '',
+        author: 'locus-test',
+        purpose: 'minimal test capability package',
+        body: '# minimal\n\nA minimal test capability package.\n',
+      });
+      check('C3-P1 packs cleanly', packed.ok === true, jsonDiag(packed));
+      const digest = await LA.manifestDigest(packed.manifest);
+      check('C3-P1 manifest digest is unchanged from the pre-C3 value',
+        digest === 'baae5a2b92e970732d0328a13b6e26efb27a81b6ad64782bad21d4415c5cf60a',
+        digest);
+      // An empty credentials array is the normalize-to-nothing case: it
+      // MUST NOT appear in the lock (that is the digest-stability rule).
+      const wsEmpty = await patchedWs((w) => patchManifest(w, 'capability.json',
+        (j) => { j.capability.credentials = []; }));
+      const builtEmpty = await LCP.buildProject({ workspace: wsEmpty, root: '' });
+      check('C3-P1b an empty credentials array is omitted from the lock',
+        builtEmpty.ok === true
+        && builtEmpty.bundle.lock.capability.credentials === undefined
+        && cpMod.canonicalJson(builtEmpty.bundle.lock) + '\n' === lockJson,
+        jsonDiag(builtEmpty));
+    }
+
+    // C3-P2: a valid credentials declaration rides the descriptor and the
+    // lock; the harness validator normalized it (header lowercased).
+    {
+      const ws = await patchedWs((w) => patchManifest(w, 'capability.json', (j) => {
+        j.capability.credentials = [{
+          name: 'FIXTURE_KEY',
+          label: 'Fixture key',
+          description: 'TEST ONLY routing metadata.',
+          origin: 'https://api.example.test',
+          pathPrefix: '/v1/tools/',
+          header: 'Authorization',
+          scheme: 'Bearer',
+        }];
+      }));
+      const v = await LCP.validateProject({ workspace: ws, root: '' });
+      check('C3-P2 a valid credentials declaration validates',
+        v.ok === true && v.normalized.capability.credentials.length === 1
+        && v.normalized.capability.credentials[0].name === 'FIXTURE_KEY'
+        && v.normalized.capability.credentials[0].header === 'authorization',
+        jsonDiag(v));
+      const built = await LCP.buildProject({ workspace: ws, root: '' });
+      check('C3-P2 the lock carries the declared credentials',
+        built.ok === true
+        && Array.isArray(built.bundle.lock.capability.credentials)
+        && built.bundle.lock.capability.credentials.length === 1
+        && built.bundle.lock.capability.credentials[0].origin === 'https://api.example.test',
+        jsonDiag(built));
+      const summary = LCP.inspectBundle(built.bundle);
+      check('C3-P2 the inspect summary carries the credentials when declared',
+        Array.isArray(summary.capability.credentials)
+        && summary.capability.credentials[0].name === 'FIXTURE_KEY'
+        && summary.capability.credentials[0].scheme === 'Bearer',
+        JSON.stringify(summary.capability));
+    }
+
+    // C3-P3: credentials that is not an array is a Product diagnostic.
+    {
+      const ws = await patchedWs((w) => patchManifest(w, 'capability.json',
+        (j) => { j.capability.credentials = 'FIXTURE_KEY'; }));
+      const v = await LCP.validateProject({ workspace: ws, root: '' });
+      check('C3-P3 a non-array credentials is a package_field_invalid diagnostic',
+        v.ok === false && !!diagOf(v, 'package_field_invalid', 'capability.json'),
+        jsonDiag(v));
+    }
+
+    // C3-P4: an invalid credential ITEM surfaces the Harness validator's
+    // exact error text as the diagnostic message.
+    {
+      const ws = await patchedWs((w) => patchManifest(w, 'capability.json', (j) => {
+        j.capability.credentials = [{
+          name: 'FIXTURE_KEY', label: 'Fixture key',
+          origin: 'http://api.example.test', pathPrefix: '/v1/tools/',
+          header: 'Authorization', scheme: 'Bearer',
+        }];
+      }));
+      const v = await LCP.validateProject({ workspace: ws, root: '' });
+      const d = diagOf(v, 'package_descriptor_invalid', 'capability.json');
+      check('C3-P4 an invalid credential item fails with the harness error text',
+        v.ok === false && !!d && /"origin" must be an https origin/.test(d.message),
+        jsonDiag(v));
+      const built = await LCP.buildProject({ workspace: ws, root: '' });
+      check('C3-P4 buildProject refuses the invalid item too',
+        built.ok === false && !!diagOf(built, 'package_descriptor_invalid', 'capability.json'),
+        jsonDiag(built));
+    }
+
+    // C3-P5: the credential-free summary stays free of the key entirely.
+    {
+      const ws = await fixtureWorkspace();
+      const built = await LCP.buildProject({ workspace: ws, root: '' });
+      const summary = LCP.inspectBundle(built.bundle);
+      check('C3-P5 a credential-free summary has no credentials key',
+        summary.capability.credentials === undefined,
+        JSON.stringify(Object.keys(summary.capability)));
+    }
+  }
+
   console.log('---');
   console.log(failed ? failed + ' check(s) FAILED' : 'all ' + passed + ' checks passed');
   process.exit(failed ? 1 : 0);

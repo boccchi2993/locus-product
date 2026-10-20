@@ -213,9 +213,14 @@ async function main() {
       + ' var bytes = new Uint8Array(bin.length);'
       + ' for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);'
       + ' return await window.__locus.capabilityComposition.installPackage(bytes); })()');
-    check('SI0 the plugin-bearing capability installed through the REAL import service (disabled)',
-      synthCommit && synthCommit.id === 'synthetic-capability' && synthCommit.state === 'disabled'
-      && synthCommit.unchanged === false, JSON.stringify(synthCommit));
+    check('SI0 the plugin-bearing capability installed through the REAL import service (C3 O1: the install auto-enables)',
+      synthCommit && synthCommit.id === 'synthetic-capability' && synthCommit.state === 'ready'
+      && synthCommit.enabled === true && synthCommit.unchanged === false, JSON.stringify(synthCommit));
+    // C3 O1: a FIRST install auto-enables. THIS suite's premise is an
+    // installed-but-disabled package (its purpose string says so), so the
+    // premise is restored here — every downstream disabled-state assertion
+    // (R1 reload, R2 remove) keeps its meaning.
+    await evaluate(cdp, '(async function () { await window.__locus.capabilityComposition.disable("synthetic-capability"); return "off"; })()');
 
     // ---- helpers ----
     const armReplies = (replies) => evaluate(cdp,

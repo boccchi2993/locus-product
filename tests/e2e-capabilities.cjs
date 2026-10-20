@@ -281,6 +281,13 @@ async function main() {
       pkgCommits['synthetic-capability'] && pkgCommits['cap-a'] && pkgCommits['cap-b']
       && ['synthetic-capability', 'cap-a', 'cap-b'].every((id) => pkgCommits[id].unchanged === false),
       JSON.stringify(pkgCommits));
+    // C3 O1: FIRST installs auto-enable (each commit above landed
+    // enabled:true). This suite's flow starts from the installed-but-
+    // disabled premise (E3 exercises the Add control), restored here.
+    await evaluate(cdp,
+      '(async function () { await window.__locus.capabilityComposition.disable("synthetic-capability");'
+      + ' await window.__locus.capabilityComposition.disable("cap-a");'
+      + ' await window.__locus.capabilityComposition.disable("cap-b"); return "off"; })()');
     const e2list = await evaluate(cdp, 'window.__locus.capabilityComposition.list().map(function (c) { return c.id + ":" + c.state; })');
     check('E2a injected catalog + installed packages list four capabilities, all disabled',
       e2list.length === 4 && e2list.every((s) => s.endsWith(':disabled')), JSON.stringify(e2list));
