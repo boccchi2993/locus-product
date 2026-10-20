@@ -503,6 +503,7 @@ async function main() {
           (fail, out) => ({ marker: out.includes(PYTHON_NETWORK_DENIED) }));
         check('B-PY1 python js.fetch denied at the policy layer with the marker',
           verdict.fail && verdict.marker, JSON.stringify(verdict).slice(0, 300));
+        console.log('DIAG B-PY1 FULL ' + JSON.stringify(verdict));
         check('B-PY1b js.fetch produced ZERO requests to the probe (counter oracle)',
           verdict.delta === 0, 'delta=' + verdict.delta);
       }
