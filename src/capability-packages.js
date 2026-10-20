@@ -47,16 +47,10 @@ function randomToken() {
   return 'tok-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
 }
 
-export function createCapabilityPackages({ persistence, manager, now, credentials }) {
+export function createCapabilityPackages({ persistence, manager, now }) {
   if (!persistence) throw new Error('createCapabilityPackages requires a persistence port');
   if (!manager) throw new Error('createCapabilityPackages requires a CapabilityManager');
   const clock = typeof now === 'function' ? now : () => new Date().toISOString();
-  // Optional C3 credential service (src/credentials.js): commit's version
-  // replacement and uninstall route through it when present. Absent on a
-  // harness generation without the capabilityCredentials declaration —
-  // packages with credentials still install, their credentials simply
-  // stay unresolved.
-  const credentialService = credentials || null;
 
   // token -> { id, version, kind, files, manifest, body, mismatched,
   //            pkgInput, components, needsMismatchAcceptance, existing }
@@ -279,12 +273,6 @@ export function createCapabilityPackages({ persistence, manager, now, credential
 
     const existing = entry.existing;
     let wasEnabled = false;
-    // C3: the OLD version's credential declarations, captured before the
-    // unregister — afterReplace needs them to disconnect credentials the
-    // new version dropped. Unknown when the old package was never
-    // registered this session (boot-skipped) — orphan records are then
-    // cleaned by the next restore().
-    let oldCredentials = null;
     if (existing) {
       // A registered package reads the LIVE manager state; one the boot
       // verification skipped (never registered — §5.3) only has the
@@ -294,13 +282,6 @@ export function createCapabilityPackages({ persistence, manager, now, credential
         ? manager.capabilityState(id) !== 'disabled'
         : !!existing.enabled;
       if (manager.isPackage(id)) {
-        const cap = manager.listCapabilities().find((c) => c.id === id);
-        if (cap && Array.isArray(cap.credentials)) {
-          oldCredentials = cap.credentials.map((c) => ({
-            name: c.name, origin: c.origin, pathPrefix: c.pathPrefix,
-            header: c.header, scheme: c.scheme,
-          }));
-        }
         // keepInstances: true — the skill instance directory survives the
         // replacement; the §6.3 upgrade rule takes over on re-enable.
         await manager.unregisterPackage(id, { keepInstances: true });
@@ -317,10 +298,6 @@ export function createCapabilityPackages({ persistence, manager, now, credential
         try {
           await loadOne(existing, { registerOnly: true });
           if (wasEnabled) await manager.enable(id);
-          // Best-effort credential-state restoration: unregister/re-register
-          // reset the old version's credentials to needs-connection; the
-          // unchanged bindings re-connect from the in-memory values.
-          if (credentialService) await credentialService.afterReplace(id, oldCredentials);
         } catch (ignored) { /* best-effort rollback; the original error still wins */ }
       }
       if (!existing || existing.digest !== digest) {
@@ -343,39 +320,10 @@ export function createCapabilityPackages({ persistence, manager, now, credential
     };
     await persistence.saveCapabilityPackage(record);
 
-    // C3 O1 (first-install auto-enable): a NEW package is enabled right
-    // after registration. Enable failure keeps the package installed and
-    // DISABLED (the record's enabled bit reverts; the manager's error
-    // entry carries the reason) — commit does not throw and does not roll
-    // the installation back.
-    if (!existing) {
-      let enableError = null;
-      try {
-        await setEnabled(id, true);
-        const enabledState = await manager.enable(id);
-        if (enabledState === 'error') {
-          const cap = manager.listCapabilities().find((c) => c.id === id);
-          enableError = (cap && cap.error) ? cap.error : 'capability enable failed';
-          await setEnabled(id, false);
-        }
-      } catch (e) {
-        enableError = e && e.message ? e.message : String(e);
-        try { await setEnabled(id, false); } catch (ignored) { /* the record stays as-is */ }
-      }
-      const result = { id, state: manager.capabilityState(id), unchanged: false, enabled: enableError === null };
-      if (enableError) result.enableError = enableError;
-      return result;
-    }
-
     if (existing && existing.digest !== digest) {
       await persistence.deleteCapabilityPackageBytes(id, existing.digest);
     }
     if (wasEnabled) await manager.enable(id);
-    // C3: version replacement landed — reconcile credential bindings
-    // against the NEW declarations (keep / needs-reconfirm / disconnect).
-    if (credentialService) {
-      await credentialService.afterReplace(id, oldCredentials);
-    }
 
     return { id, state: manager.capabilityState(id), unchanged: false };
   }
@@ -513,13 +461,6 @@ export function createCapabilityPackages({ persistence, manager, now, credential
 
   // ---------- uninstall (§4.7; D10 keeps the skill instances) ----------
   async function uninstall(id) {
-    // C3 §3.2: uninstalling deletes the capability's credential bindings
-    // and values FIRST — while the credential names are still registered,
-    // so the manager state update can run. A boot-skipped (unregistered)
-    // package's leftover bindings are removed through its records.
-    if (credentialService) {
-      await credentialService.removeForCapability(id);
-    }
     if (manager.isPackage(id)) {
       await manager.unregisterPackage(id, { keepInstances: true });
     }
