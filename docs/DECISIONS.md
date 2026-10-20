@@ -16,7 +16,7 @@
 
 **决定**：Locus 只有一条安全边界：一边是模型能控制的内容（模型生成的命令和 Python 代码、读取的文件、工具输出），另一边是宿主代码。runtime、harness、product 三层运行在同一个 JS 环境中，层与层之间是模块化边界，不是安全边界。
 
-所有现有的“模型 vs 宿主”约束都保持不变：工具输出是不可信数据；Python 没有网络；curl 不携带 ambient 凭据；有副作用的请求需要审批且只发送一次；只读挂载在 shell 和 Python 两侧都只读；修改 skill 实例需要确认；relay 拒绝私网目标；模型不能自动信任自己生成的扩展代码。
+所有现有的“模型 vs 宿主”约束都保持不变：工具输出是不可信数据；Python 没有网络；curl 不携带 ambient 凭据；（释义，2026-10-18 所有者）：模型在命令中不写出凭据本身，只能写凭据变量名；变量只在 NetworkRuntime 发送时解析，且仅当目标地址匹配该凭据的绑定（C3 §3）。浏览器 cookie 等 ambient 凭据仍然一律不携带。有副作用的请求需要审批且只发送一次；只读挂载在 shell 和 Python 两侧都只读；修改 skill 实例需要确认；relay 拒绝私网目标；模型不能自动信任自己生成的扩展代码。
 
 **理由**：三层代码同处一个 JS 环境，跨层不存在可强制执行的隔离，把层间当作安全边界会给出虚假的保证；需要对抗性测试守住的是“模型可控内容 vs 宿主”这一条边界。
 
@@ -46,13 +46,15 @@
 
 ## D4
 
-**决定**：MCP 工具以 provider 原生工具的形式暴露给模型。为了保证提示词缓存命中，工具列表只在任务边界发生变化（随 TaskEnvironment 冻结），排序确定，MCP 工具排在 bash 之后。有副作用的 MCP 工具，按其 MCP 工具注解，走与有副作用 HTTP 请求相同的审批流程。
+**决定**：MCP 通过 shell 命令 `mcp` 暴露给模型（`mcp servers` / `mcp tools <server>` / `mcp describe <server> <tool>` / `mcp call <server> <tool> <json|@file>`），不作为 provider 原生工具。模型可见的工具列表固定为 `bash`、`cloud_bash`。结构化处理放在客户端：参数在发送前按工具的 `inputSchema` 校验；审批按“服务器 + 工具名”判定，走与有副作用 HTTP 请求相同的审批流程；凭据与会话由客户端管理（D2、D3）。
 
-**理由**：解决 CAPABILITY-BOUNDARIES §6.3（MCP 需要结构化处理、不该塞进字符串化 shell 命令）与 DESIGN-PRINCIPLES §3、§4（不扩核心原语集合）之间的矛盾：provider 原生工具满足结构化要求，任务边界冻结与确定排序满足缓存与可预期性要求，核心原语集合不变。
+**理由**：固定的工具列表让提示缓存稳定，也不需要按任务边界冻结和排序工具列表；结构化要求由客户端满足，不依赖“原生工具”这一形式；工具定义按需查询，不每轮占用上下文。
 
-**影响范围**：harness（模型可见工具列表的装配、冻结与排序）、runtime（MCP 工具注入）、既有副作用审批流程（复用，不新设权限模型）。
+**影响范围**：runtime（`mcp` 命令与客户端）、harness（审批编排）、product（服务器配置与凭据 UI）。
 
-**被取代的旧表述**：CAPABILITY-BOUNDARIES §6.3 中“MCP 应作为 harness 一等能力、可具备 shell/CLI 兼容前端”的表述，就暴露方式而言被本条裁决：走 provider 原生工具。
+**修订记录**：2026-10-18 所有者改写。原决定为“MCP 工具以 provider 原生工具形式暴露，工具列表随 TaskEnvironment 冻结”。
+
+**被取代的旧表述**：CAPABILITY-BOUNDARIES §6.3 中‘MCP 应作为 harness 一等能力、可具备 shell/CLI 兼容前端’的表述，就暴露方式而言被本条裁决：走 shell 命令 `mcp`。
 
 ## D5
 

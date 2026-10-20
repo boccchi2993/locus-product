@@ -239,7 +239,7 @@ MCP should be a first-class harness capability. It may have a shell/CLI compatib
 
 > 已被 [DECISIONS.md D3](DECISIONS.md#d3) 部分取代：MCP 客户端位于 runtime，凭据只保存在内存中，凭据的持久化由 product 负责；harness 保留组合与审批编排。
 
-> [DECISIONS.md D4](DECISIONS.md#d4) 裁决了本节与 DESIGN-PRINCIPLES §3、§4 之间的矛盾：MCP 工具以 provider 原生工具形式暴露，既不强制走字符串化的 shell 命令，也不新增核心原语；工具列表只在任务边界变化（随 TaskEnvironment 冻结）、排序确定、MCP 工具排在 bash 之后；有副作用的 MCP 工具按其 MCP 工具注解，走与有副作用 HTTP 请求相同的审批流程。
+> [DECISIONS.md D4](DECISIONS.md#d4)（2026-10-18 改写）裁决了本节的暴露方式：MCP 通过 shell 命令 `mcp` 暴露，模型可见的工具固定为 `bash`、`cloud_bash`；结构化处理（参数校验、按服务器 + 工具审批、凭据与会话）放在客户端。详见 [C3-CREDENTIALS-MCP.md](C3-CREDENTIALS-MCP.md) §7。
 
 ## 7. RAG boundary
 

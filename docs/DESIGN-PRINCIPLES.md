@@ -16,6 +16,8 @@ Expose ordinary paths, a bounded Unix-like shell, and familiar library APIs. Int
 
 > 本条与 [CAPABILITY-BOUNDARIES §6.3](CAPABILITY-BOUNDARIES.md#63-mcp-authority) 之间的矛盾已由 [DECISIONS.md D4](DECISIONS.md#d4) 裁决：MCP 工具以 provider 原生工具形式暴露（任务边界冻结、排序确定、排在 bash 之后），不需要模型学习字符串化的 MCP shell 命令。
 
+> 已被 [DECISIONS.md D4](DECISIONS.md#d4)（2026-10-18 改写）取代：MCP 通过 shell 命令 `mcp` 暴露。
+
 ## 4. Keep the core primitive set small
 
 The browser substrate has four categories:
@@ -28,6 +30,8 @@ The browser substrate has four categories:
 A domain request does not become a new core primitive just because it is common.
 
 > 本条与 [CAPABILITY-BOUNDARIES §6.3](CAPABILITY-BOUNDARIES.md#63-mcp-authority) 之间的矛盾已由 [DECISIONS.md D4](DECISIONS.md#d4) 裁决：MCP 工具以 provider 原生工具形式暴露，随 TaskEnvironment 在任务边界冻结、排序确定、排在 bash 之后；它们不是新的核心原语，本条“核心原语集合保持小”不受影响。
+
+> 已被 [DECISIONS.md D4](DECISIONS.md#d4)（2026-10-18 改写）取代：MCP 通过 shell 命令 `mcp` 暴露。
 
 ## 5. Capability is the user abstraction
 

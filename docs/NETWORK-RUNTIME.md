@@ -85,7 +85,7 @@ scheme — is rejected client-side with `network_unsupported_scheme` before any
 backend is contacted (curl must never hand those to browser fetch).
 Credentials embedded in the URL (`https://user:pass@host/`) are rejected.
 Requests do not inherit ambient browser credentials; explicit application headers such as
-`Authorization` are governed by the header policy below.
+`Authorization` are governed by the header policy below. (Explicit credential variables are the one exception: see DECISIONS D1 and C3-CREDENTIALS-MCP §4. The model writes only the variable name; the host substitutes the value at send time, and only for a matching binding.)
 
 URLs are parsed with `new URL(...)` only — never regex-split. The canonical
 request identity is the WHATWG-canonicalized

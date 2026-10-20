@@ -88,9 +88,18 @@ A `confirmation` cannot be upgraded to `scope: 'session'`.
 - Suspend/resume stays inside the same Agent task and Promise.
 - Pending requests are ephemeral control-plane state, not provider/presentation history.
 
+## Persistent grants (C3 §6)
+
+- A `permission` request may opt into `scope: 'persistent'` ("Always allow").
+- Only allow-class outcomes may carry it, and the request must have a `policyKey`; `capability` and `confirmation` requests can never be persisted.
+- Decision order: persistent grant → session grant → prompt.
+- Storage is provided by the product through a port; reset-all-data clears it, and the user can remove individual grants in Settings.
+- Network `policyKey`s are per-origin, so "Always allow" covers every side-effecting request under that origin.
+
+See [C3-CREDENTIALS-MCP.md](C3-CREDENTIALS-MCP.md) §6.
+
 ## Not v1
 
-- persistent allow rules / "always allow";
 - automatic risk-classifier/auto-review approval;
 - organization policy language or policy sync;
 - production MCP permission flows;
@@ -275,12 +284,12 @@ that contract (see "Observer failures" above). A second concurrent
 states), calm and Cowork-like — not an alarm, not a fullscreen modal:
 
 ```
-┌──────────────────────────────────────────┐
-│ Approval required                        │
-│ Locus wants permission to:               │
-│ <action summary>                         │
-│ [Deny] [Allow once] [Allow for session]  │
-└──────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────┐
+│ Approval required                                      │
+│ Locus wants permission to:                             │
+│ <action summary>                                       │
+│ [Deny] [Allow once] [Allow for session] [Always allow] │
+└────────────────────────────────────────────────────────┘
 ```
 
 - While pending, the task is still RUNNING (`runState` stays `running`);
