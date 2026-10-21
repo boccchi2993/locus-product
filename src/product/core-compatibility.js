@@ -141,6 +141,14 @@ export const PRODUCT_CORE_REQUIREMENTS = Object.freeze({
         capability: 'tokenCalibrationSnapshot',
         rule: 'the bytes-per-token calibration is not persisted; every page load starts from the conservative default',
       }),
+      Object.freeze({
+        capability: 'capabilityCredentials',
+        rule: 'capability credentials are disabled as a whole: no credential service is built, no credentials port is injected into the runtime (curl credential variables fail as unknown), no Connect/Disconnect state is tracked, and installed packages declaring credentials keep them unresolved',
+      }),
+      Object.freeze({
+        capability: 'persistentApprovalGrants',
+        rule: '"Always allow" is unavailable: the approval controller is created without the persistentGrants port, no durable grant is loaded at boot or stored on a decision, and every permission request asks again',
+      }),
     ]),
   }),
 });

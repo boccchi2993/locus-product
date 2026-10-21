@@ -329,8 +329,19 @@ function validateCapabilityManifest(parsed, logicalPath, diagnostics) {
     return null;
   }
   rejectUnknownFields(parsed.capability,
-    ['id', 'version', 'displayName', 'description', 'plugins', 'skills', 'mcps'],
+    ['id', 'version', 'displayName', 'description', 'plugins', 'skills', 'mcps', 'credentials'],
     logicalPath, 'capability descriptor', diagnostics);
+  // C3: the Product layer only decides that a declared credentials list is
+  // an array; the per-item schema (name/origin/pathPrefix/header/scheme)
+  // is the Harness descriptor validator's contract — its exact error text
+  // surfaces through normalizeDescriptor below as a structured diagnostic.
+  if (parsed.capability.credentials !== undefined
+    && !Array.isArray(parsed.capability.credentials)) {
+    diagnostics.push(packageDiagnostic('package_field_invalid', logicalPath,
+      'capability descriptor field "credentials" must be an array, got '
+      + typeof parsed.capability.credentials));
+    return null;
+  }
   return normalizeDescriptor('capability', parsed.capability, logicalPath, diagnostics);
 }
 
@@ -975,9 +986,19 @@ export async function buildProject(opts) {
     throw new Error('capability package: build did not materialize every planned file');
   }
 
+  // The lock's capability descriptor comes from the Harness validator,
+  // which normalizes an ABSENT credentials list to an empty array. The
+  // lock omits an EMPTY list so a credential-free package serializes
+  // byte-identically to its pre-C3 lock (digest stability for already
+  // installed packages); a non-empty list rides verbatim.
+  const lockCapability = Object.assign({}, normalized.capability);
+  if (Array.isArray(lockCapability.credentials) && lockCapability.credentials.length === 0) {
+    delete lockCapability.credentials;
+  }
+
   const lock = {
     schemaVersion: PACKAGE_SCHEMA_VERSION,
-    capability: normalized.capability,
+    capability: lockCapability,
     plugins: normalized.plugins.map((p) => ({
       descriptor: p.descriptor,
       artifacts: artifactEntries.get(p.descriptor.id) || [],
@@ -1013,13 +1034,25 @@ export function inspectBundle(bundle) {
   const lock = bundle.lock;
   let totalBytes = 0;
   for (const f of lock.files) totalBytes += f.size;
+  const capability = {
+    id: lock.capability.id,
+    version: lock.capability.version,
+    displayName: lock.capability.displayName,
+    description: lock.capability.description,
+  };
+  // C3: routing metadata only (never values) — shown only when declared.
+  if (Array.isArray(lock.capability.credentials) && lock.capability.credentials.length) {
+    capability.credentials = lock.capability.credentials.map((c) => ({
+      name: c.name,
+      label: c.label,
+      origin: c.origin,
+      pathPrefix: c.pathPrefix,
+      header: c.header,
+      scheme: c.scheme,
+    }));
+  }
   return {
-    capability: {
-      id: lock.capability.id,
-      version: lock.capability.version,
-      displayName: lock.capability.displayName,
-      description: lock.capability.description,
-    },
+    capability,
     plugins: lock.plugins.map((p) => ({
       id: p.descriptor.id,
       version: p.descriptor.version,

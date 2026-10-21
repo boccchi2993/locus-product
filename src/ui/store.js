@@ -60,6 +60,8 @@ import { LocusMutationPolicy } from '../mutation-policy.js';
 import { AttachmentStore, imageContentPart, textContentPart } from '../attachments.js';
 import { PersistenceServiceInstance, LOCUS_HOME_SKELETON } from '../persistence.js';
 import { createCapabilityPackages } from '../capability-packages.js';
+import { createCredentialService } from '../credentials.js';
+import { createProductCredentialPort } from '../product/credential-port.js';
 import { SkillInstanceStorage, SkillInstanceWorkspace, productTaskVfsMounts } from '../extensions.js';
 import { ConversationHistoryWorkspace, historyToolOutputPath } from '../conversation-history-workspace.js';
 // M2b (repository split): the Product prompt inputs — behavior notes and
@@ -124,6 +126,15 @@ const capabilityManager = new CapabilityManager({
 });
 export { capabilityManager };
 
+// C3 credentials (docs/C3-CREDENTIALS-MCP.md §3): the connection service
+// over the SAME manager. Null on a harness generation without the
+// capabilityCredentials declaration — the whole feature is off then (no
+// binding storage, no states, no runtime credential port). Built BEFORE
+// the package service so commit/uninstall can route through it.
+const credentials = PersistenceServiceInstance && capabilityManager && harnessDeclaresCapabilityCredentials()
+  ? createCredentialService({ persistence: PersistenceServiceInstance, manager: capabilityManager })
+  : null;
+
 // Installed capability packages (D10): the persistence + import service
 // over the SAME manager. Null when storage is entirely unavailable —
 // every store-level capability-package entry point then refuses loudly
@@ -134,6 +145,7 @@ const capabilityPackages = PersistenceServiceInstance
     persistence: PersistenceServiceInstance,
     manager: capabilityManager,
     now: () => new Date().toISOString(),
+    credentials,
   })
   : null;
 
@@ -294,6 +306,53 @@ export async function capabilityPackageList() {
 export function capabilityPackagesSupported() {
   return !!capabilityPackages && harnessDeclaresCapabilityPackages();
 }
+
+// ---------- capability credentials (C3 §3.2; the C3-P1b UI calls these) ----------
+// Connection actions are between-task actions like enable/disable. The
+// service itself refuses loudly on an unsupported generation (null).
+function assertCredentialsSupported() {
+  if (!credentials) throw new Error('this harness does not support capability credentials');
+}
+
+export async function connectCredential(name, value, opts) {
+  assertCapabilitiesIdle();
+  assertCredentialsSupported();
+  const summary = await credentials.connect(name, value, opts);
+  syncCapabilityProjection();
+  return summary;
+}
+
+export async function disconnectCredential(name) {
+  assertCapabilitiesIdle();
+  assertCredentialsSupported();
+  const summary = await credentials.disconnect(name);
+  syncCapabilityProjection();
+  return summary;
+}
+
+export async function reconfirmCredential(name) {
+  assertCapabilitiesIdle();
+  assertCredentialsSupported();
+  const summary = await credentials.reconfirm(name);
+  syncCapabilityProjection();
+  return summary;
+}
+
+// Read-only projection ({ state, hasValue, last4 }); never throws for an
+// unknown name — the UI renders "unavailable" from the null state.
+export function credentialSummary(name) {
+  if (!credentials) return { state: null, hasValue: false, last4: null };
+  return credentials.summary(name);
+}
+
+// ---------- C3 §4.2: the runtime credential port ----------
+// Only built when the harness generation declares capabilityCredentials —
+// an older generation gets `credentials: undefined` in the execution
+// context and curl credential variables stay literal (the documented
+// degrade).
+const productCredentialPort = credentials
+  ? createProductCredentialPort({ manager: capabilityManager, service: credentials })
+  : undefined;
 
 // ---------- the import dialog + installed-list UI state (C1-P3) ----------
 // Both entry points — the settings panel and the /mnt/download list —
@@ -838,6 +897,9 @@ const productToolPort = createLocusToolPort({
   resolveRuntimeSession: whenRuntimeSession,
   mutationPolicy: taskMutationPolicy,
   authorization: productNetworkAuthorization,
+  // C3: the runtime credential port — same injection path as
+  // authorization; undefined on an unsupported generation.
+  credentials: productCredentialPort ? (() => productCredentialPort) : null,
 });
 
 // Conversation identity semantics — three DIFFERENT concepts, never merge:
@@ -1077,7 +1139,24 @@ function e2eObserverFailureWanted(kind) {
 }
 // M2b: approval semantics resolve through the HARNESS entry (the same
 // class the page's classic set published — one copy per page).
+// C3 (docs/C3-CREDENTIALS-MCP.md §6): the durable "Always allow" port —
+// load/add/remove over the persistence `approvalPersistentGrants` meta
+// key. add/remove read-modify-write; a storage failure THROWS and is
+// contained by the harness (the grant retracts to session scope). No port
+// on an unsupported generation: scope 'persistent' is then invalid_scope.
 export const approvals = createApprovalController({
+  persistentGrants: PersistenceServiceInstance ? {
+    load: () => PersistenceServiceInstance.loadApprovalGrants(),
+    add: async (policyKey) => {
+      const keys = await PersistenceServiceInstance.loadApprovalGrants();
+      if (!keys.includes(policyKey)) keys.push(policyKey);
+      await PersistenceServiceInstance.saveApprovalGrants(keys);
+    },
+    remove: async (policyKey) => {
+      const keys = await PersistenceServiceInstance.loadApprovalGrants();
+      await PersistenceServiceInstance.saveApprovalGrants(keys.filter((k) => k !== policyKey));
+    },
+  } : undefined,
   onChange: (pending) => {
     if (e2eObserverFailureWanted('onChange')) throw new Error('e2e injected onChange failure');
     store.pendingApproval = pending;
@@ -1118,6 +1197,29 @@ export function cancelApproval(requestId) {
   const pending = store.pendingApproval;
   if (!pending || (requestId && pending.id !== requestId)) return false;
   return approvals.cancel(pending.id, 'dismissed');
+}
+
+// ---------- "Always allow" list (C3 §6; the C3-P1b settings UI) ----------
+// Readable label for one durable grant. Network grants are keyed per
+// origin — the runtime's prefix is `network-write:<origin>` (the spec
+// spells the same key `network:write:<origin>`; both spellings render the
+// friendly label); anything else displays the raw policyKey.
+export function alwaysAllowLabel(policyKey) {
+  const m = /^network[:-]write:(.+)$/.exec(String(policyKey || ''));
+  return m ? 'Write requests to ' + m[1] : String(policyKey || '');
+}
+
+export function listAlwaysAllowed() {
+  if (!harnessDeclaresPersistentApprovalGrants()) return [];
+  return approvals.listPersistentGrants().map((policyKey) => ({
+    policyKey,
+    label: alwaysAllowLabel(policyKey),
+  }));
+}
+
+export async function revokeAlwaysAllowed(policyKey) {
+  if (!harnessDeclaresPersistentApprovalGrants()) return;
+  await approvals.revokePersistentGrant(policyKey);
 }
 
 // ---------- image feedback wiring (docs/IMAGE-INPUT.md) ----------
@@ -1930,6 +2032,25 @@ function harnessDeclaresCapabilityPackages() {
   } catch (e) { return false; }
 }
 
+// C3 companion gates: the whole credential feature (service + runtime
+// port + binding storage) and the durable "Always allow" grants each
+// only exist on a harness generation that declares them. On an older one
+// the degrade is the declared rule: credentials stay unresolved (curl
+// credential variables fail as unknown), "Always allow" is not offered.
+function harnessDeclaresCapabilityCredentials() {
+  try {
+    const caps = harnessDeclaration();
+    return !!(caps && caps.capabilities && caps.capabilities.capabilityCredentials);
+  } catch (e) { return false; }
+}
+
+function harnessDeclaresPersistentApprovalGrants() {
+  try {
+    const caps = harnessDeclaration();
+    return !!(caps && caps.capabilities && caps.capabilities.persistentApprovalGrants);
+  } catch (e) { return false; }
+}
+
 // The companion gate for the calibration snapshot persistence
 // (CONTEXT-MANAGEMENT.md §3.2): samples are only saved/restored on a
 // harness generation that declares the snapshot methods — an older one
@@ -2306,6 +2427,11 @@ export async function resetAllData() {
     // pending approvals close and every session grant is forgotten.
     approvals.cancelAll('reset');
     approvals.clearSessionGrants();
+    // C3: durable "Always allow" grants and every credential binding +
+    // remembered value clear with the rest of the data. persistence.reset()
+    // wipes the meta/secrets stores; these clear the in-memory halves.
+    if (harnessDeclaresPersistentApprovalGrants()) await approvals.clearPersistentGrants();
+    if (credentials) await credentials.clearAll();
     if (workspaceMount) vfs.unmount('/mnt/workspace');
     store.workspaceName = null;
     store.workspacePermission = 'none';
@@ -2381,6 +2507,24 @@ async function bootPersistence() {
         syncCapabilityProjection();
       } catch (e) {
         reportPersistenceIssue(e, 'Installed capability packages could not be loaded');
+      }
+    }
+    // C3: credential bindings restore AFTER the packages registered (the
+    // manager knows the credential set now); durable "Always allow"
+    // grants load BEFORE any task can start (submit waits for this boot).
+    if (credentials) {
+      try {
+        await credentials.restore();
+        syncCapabilityProjection();
+      } catch (e) {
+        reportPersistenceIssue(e, 'Credential bindings could not be restored');
+      }
+    }
+    if (harnessDeclaresPersistentApprovalGrants()) {
+      try {
+        await approvals.loadPersistentGrants();
+      } catch (e) {
+        reportPersistenceIssue(e, 'Persistent approvals could not be loaded');
       }
     }
     const rows = await PersistenceServiceInstance.loadConversations();

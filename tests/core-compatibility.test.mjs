@@ -73,6 +73,8 @@ const HARNESS_OK = () => Object.freeze({
     contextWindowBudget: true,
     capabilityPackages: true,
     tokenCalibrationSnapshot: true,
+    capabilityCredentials: true,
+    persistentApprovalGrants: true,
   },
 });
 const pass = () => checkCoreCompatibility({
@@ -307,6 +309,33 @@ const pass = () => checkCoreCompatibility({
   check('CC6b unknown EXTRA optional capabilities never reject',
     exotic.compatible === true,
     JSON.stringify(exotic.optional));
+  // C3: the two new optional capabilities degrade with explicit product
+  // rules — missing capabilityCredentials disables the whole credential
+  // feature (no port injected), missing persistentApprovalGrants removes
+  // "Always allow" (no durable port).
+  {
+    const c3sparse = checkCoreCompatibility({
+      runtime: RUNTIME_OK(),
+      harness: (() => {
+        const h = JSON.parse(JSON.stringify(HARNESS_OK()));
+        delete h.capabilities.capabilityCredentials;
+        delete h.capabilities.persistentApprovalGrants;
+        return h;
+      })(),
+      requirements: PRODUCT_CORE_REQUIREMENTS,
+    });
+    const credsRule = PRODUCT_CORE_REQUIREMENTS.harness.optionalCapabilities
+      .find((o) => o.capability === 'capabilityCredentials');
+    const grantsRule = PRODUCT_CORE_REQUIREMENTS.harness.optionalCapabilities
+      .find((o) => o.capability === 'persistentApprovalGrants');
+    check('CC6c missing C3 optional capabilities are listed with their degrade rules',
+      c3sparse.compatible === true
+        && c3sparse.optional.harness.missing.includes('capabilityCredentials')
+        && c3sparse.optional.harness.missing.includes('persistentApprovalGrants')
+        && typeof credsRule.rule === 'string' && /credential/i.test(credsRule.rule)
+        && typeof grantsRule.rule === 'string' && /allow/i.test(grantsRule.rule),
+      JSON.stringify(c3sparse.optional));
+  }
 }
 
 // ---------- CC7 ----------

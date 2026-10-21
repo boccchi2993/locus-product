@@ -434,6 +434,88 @@ async function run() {
     check('O7 prefix-lookalike Origin → 403', rO7.status === 403 && calls.length === 0, 'status=' + rO7.status);
   }
 
+  // ---------- C3: envelope "redirect": "manual" (only-add; the follow
+  // behavior above must stay untouched) ----------
+  {
+    // FM1: manual returns the upstream 302 VERBATIM (status, Location and
+    // body pass the ordinary response filter) and dispatches exactly ONE
+    // upstream request; X-Locus-Final-URL is the original target.
+    reset();
+    on((u) => u === 'https://origin-a.test/redir', () =>
+      new Response('moved', { status: 302, headers: { location: 'https://origin-b.test/2' } }));
+    on((u) => u === 'https://origin-b.test/2', () => {
+      throw new Error('manual mode must never dispatch a second hop');
+    });
+    const fm1 = new Request('https://pages.test/fetch', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ method: 'GET', url: 'https://origin-a.test/redir', redirect: 'manual' }),
+    });
+    const rFM1 = await onRequestPost({ request: fm1, env: {} });
+    check('FM1 manual 302 returned verbatim, no second hop', rFM1.status === 302
+      && (await rFM1.text()) === 'moved'
+      && rFM1.headers.get('location') === 'https://origin-b.test/2'
+      && rFM1.headers.get('x-locus-final-url') === 'https://origin-a.test/redir'
+      && calls.length === 1,
+      'status=' + rFM1.status + ' calls=' + calls.length + ' final=' + rFM1.headers.get('x-locus-final-url'));
+  }
+  {
+    // FM2: side-effecting method under manual — the 307 is passed through
+    // as-is; no method downgrade, no body replay anywhere.
+    reset();
+    on((u) => u === 'https://origin-a.test/post', () =>
+      new Response(null, { status: 307, headers: { location: 'https://origin-b.test/move' } }));
+    on(() => { throw new Error('manual POST must not dispatch a second hop'); });
+    const fm2 = new Request('https://pages.test/fetch', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ method: 'POST', url: 'https://origin-a.test/post',
+        bodyBase64: btoa('{}'), redirect: 'manual' }),
+    });
+    const rFM2 = await onRequestPost({ request: fm2, env: {} });
+    check('FM2 manual side-effecting 307 returned verbatim', rFM2.status === 307
+      && rFM2.headers.get('x-locus-final-url') === 'https://origin-a.test/post'
+      && calls.length === 1,
+      'status=' + rFM2.status + ' calls=' + calls.length);
+  }
+  {
+    // FM3: explicit "follow" and the ABSENT field keep the existing
+    // multi-hop behavior unchanged.
+    for (const mode of [undefined, 'follow']) {
+      reset();
+      on((u) => u === 'https://origin-a.test/redir', () =>
+        new Response(null, { status: 302, headers: { location: 'https://origin-b.test/2' } }));
+      on((u) => u === 'https://origin-b.test/2', () =>
+        new Response('followed', { status: 200, headers: { 'content-type': 'text/plain' } }));
+      const body = { method: 'GET', url: 'https://origin-a.test/redir' };
+      if (mode !== undefined) body.redirect = mode;
+      const fm3 = new Request('https://pages.test/fetch', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const rFM3 = await onRequestPost({ request: fm3, env: {} });
+      check('FM3 ' + (mode === undefined ? 'absent' : '"follow"') + ' follows as before',
+        rFM3.status === 200 && (await rFM3.text()) === 'followed'
+        && rFM3.headers.get('x-locus-final-url') === 'https://origin-b.test/2'
+        && calls.length === 2,
+        'status=' + rFM3.status + ' calls=' + calls.length);
+    }
+  }
+  {
+    // FM4: any other redirect value is a malformed envelope → 400 before
+    // any upstream call.
+    reset();
+    on(() => { throw new Error('invalid redirect value must not reach upstream'); });
+    const fm4 = new Request('https://pages.test/fetch', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ method: 'GET', url: 'https://origin-a.test/x', redirect: 'error' }),
+    });
+    const rFM4 = await onRequestPost({ request: fm4, env: {} });
+    const jFM4 = await rFM4.json();
+    check('FM4 invalid redirect value → 400 network_invalid_request',
+      rFM4.status === 400 && jFM4.error && jFM4.error.code === 'network_invalid_request'
+      && calls.length === 0,
+      'status=' + rFM4.status + ' code=' + (jFM4.error && jFM4.error.code));
+  }
+
   globalThis.fetch = realFetch;
   console.log('\n' + passed + ' passed, ' + failed + ' failed');
   process.exit(failed ? 1 : 0);

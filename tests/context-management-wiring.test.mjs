@@ -55,7 +55,10 @@ if (typeof globalThis.window === 'undefined') {
 // A harness declaration that satisfies every REQUIRED port/capability and
 // carries the pre-P-2 optional set — tests toggle the three new semantic
 // capabilities by adding/removing them (same construction family as
-// tests/core-compatibility.test.mjs HARNESS_OK).
+// tests/core-compatibility.test.mjs HARNESS_OK). C3: the two C3 optional
+// capabilities (capabilityCredentials / persistentApprovalGrants) are
+// declared here by default — this suite's store-level scenarios run on a
+// current-generation harness; they are orthogonal to the P-2 matrix.
 function harnessDeclarationVariant({ requestBudget = true, toolOutputPath = true, contextWindowBudget = true, capabilityPackages = true, tokenCalibrationSnapshot = true } = {}) {
   const capabilities = {
     nativeToolCalls: true,
@@ -64,6 +67,8 @@ function harnessDeclarationVariant({ requestBudget = true, toolOutputPath = true
     providerReplay: true,
     imageInputGate: true,
     capabilityComposition: true,
+    capabilityCredentials: true,
+    persistentApprovalGrants: true,
   };
   if (requestBudget) capabilities.requestBudget = true;
   if (toolOutputPath) capabilities.toolOutputPath = true;

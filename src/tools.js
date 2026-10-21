@@ -94,6 +94,10 @@ export async function executeTool(name, input, workspace, opts) {
           signal: opts && opts.signal,
           mutationPolicy: opts && opts.mutationPolicy,
           authorization: opts && opts.authorization,
+          // C3: the credential port rides the SAME injection path as
+          // authorization — the runtime resolves credential variables in
+          // curl header values through it (spec.credentials).
+          credentials: opts && opts.credentials,
           cwd: opts && opts.cwd,
         },
       });

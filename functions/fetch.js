@@ -8,9 +8,12 @@
 // Two request forms — one endpoint, no second proxy:
 // - GET /fetch?url=<encoded>   legacy GET-only form (kept for compatibility)
 // - POST /fetch                JSON envelope { method, url, headers,
-//                              bodyBase64 } used by NetworkRuntime for
-//                              header-bearing GET/HEAD and all
-//                              side-effecting methods
+//                              bodyBase64, redirect? } used by
+//                              NetworkRuntime for header-bearing GET/HEAD
+//                              and all side-effecting methods; the C3
+//                              `redirect` field accepts "follow" (default
+//                              behavior) or "manual" (return the first 3xx
+//                              verbatim — never follow it)
 //
 // Guardrails:
 // - methods: GET/HEAD/POST/PUT/PATCH/DELETE/OPTIONS only
@@ -295,8 +298,11 @@ function headersWithoutOriginBoundCredentials(headers) {
 // hops only (307/308 keep method+body; 301/302/303 downgrade to a
 // body-less GET — the side effect is never replayed against another
 // origin) and a cross-origin hop is refused. `controller` is owned by the
-// caller and governs fetch AND the body-read lifecycle.
-async function executeUpstream({ method, target, headers, body, maxRedirects, sideEffecting, controller }) {
+// caller and governs fetch AND the body-read lifecycle. C3: `manual`
+// dispatches exactly ONE hop and returns the upstream 3xx verbatim
+// (credentialed requests never follow anything) — the finalUrl is then
+// the original target.
+async function executeUpstream({ method, target, headers, body, maxRedirects, sideEffecting, controller, redirectMode }) {
   let current = target.href;
   let currentMethod = method;
   let currentBody = body;
@@ -320,6 +326,10 @@ async function executeUpstream({ method, target, headers, body, maxRedirects, si
     }
 
     if (upstream.status >= 300 && upstream.status < 400) {
+      // C3: "redirect": "manual" — the 3xx IS the authoritative response.
+      // Location (present or not) is never acted on: pass through as-is
+      // and let the client refuse its own redirect.
+      if (redirectMode === 'manual') break;
       const location = upstream.headers.get('location');
       if (!location) break; // redirect without Location: pass through as-is
       if (hop === maxRedirects) {
@@ -464,8 +474,10 @@ async function buildUpstreamResponse(upstream, finalUrl, maxBytes, controller, t
 }
 
 // Shared pipeline for both request forms. One AbortController governs the
-// whole lifecycle: fetch start → headers → body complete.
-async function handleRelayRequest({ method, target, headers, body, env }) {
+// whole lifecycle: fetch start → headers → body complete. `redirectMode`
+// (C3 envelope field, POST form only): 'follow' (default) keeps the
+// validated multi-hop behavior, 'manual' returns the first 3xx verbatim.
+async function handleRelayRequest({ method, target, headers, body, env, redirectMode }) {
   const timeoutMs = getTimeoutMs(env);
   const maxBytes = getMaxResponseBytes(env);
   const maxRedirects = getMaxRedirects(env);
@@ -477,6 +489,7 @@ async function handleRelayRequest({ method, target, headers, body, env }) {
   try {
     const executed = await executeUpstream({
       method, target, headers, body, maxRedirects, sideEffecting, controller,
+      redirectMode: redirectMode === 'manual' ? 'manual' : 'follow',
     });
     if (executed.error) return executed.error;
     return await buildUpstreamResponse(executed.upstream, executed.finalUrl, maxBytes, controller, timeoutMs, method);
@@ -603,6 +616,18 @@ export async function onRequestPost(context) {
     return relayError(405, 'Unsupported HTTP method: ' + (method || '(empty)'), 'network_unsupported_method');
   }
 
+  // C3: optional redirect instruction. Absent / "follow" keep the existing
+  // multi-hop behavior; "manual" never follows (the 3xx is authoritative —
+  // a credentialed request must not leak its header to another origin).
+  // Anything else is a malformed envelope.
+  let redirectMode = 'follow';
+  if (envelope.redirect !== undefined && envelope.redirect !== null) {
+    if (envelope.redirect === 'manual') redirectMode = 'manual';
+    else if (envelope.redirect !== 'follow') {
+      return relayError(400, 'Invalid redirect mode: only "follow" (default) or "manual" are supported', 'network_invalid_request');
+    }
+  }
+
   const { target, error: targetError } = parseTarget(envelope.url);
   if (targetError) return targetError;
 
@@ -621,7 +646,7 @@ export async function onRequestPost(context) {
     }
   }
 
-  return await handleRelayRequest({ method, target, headers, body, env });
+  return await handleRelayRequest({ method, target, headers, body, env, redirectMode });
 }
 
 // OPTIONS /fetch (CORS preflight)

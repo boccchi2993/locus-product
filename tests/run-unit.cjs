@@ -21,6 +21,15 @@ const SUITES = [
   // verification, mismatch accept/skip, replacement rollback, uninstall,
   // the model-unreachable storage boundary (CI14), schema 4.
   'capability-install.test.mjs',
+  // C3: the credential service (bindings, remembered values, restore /
+  // afterReplace / uninstall cleanup) and the runtime credential port.
+  'credentials.test.mjs',
+  // C3: the FULL product credential chain — tool port → tools.js → real
+  // runtime session → curl → the credential port (relay stub).
+  'credential-wiring.test.mjs',
+  // C3: persistent approvals ("Always allow") — persistence round trip,
+  // controller restart, revoke, fail-closed, store-level list/revoke/reset.
+  'approval-grants.test.mjs',
   'skill-instances.test.cjs',
   'presentation.test.cjs',
   'store-defaults.test.cjs',
