@@ -40,6 +40,17 @@ tracked by their owning repositories; this page is the Product index.
   passed the same suite in full (B-PY1 PASS). Not rerun; root cause unknown.
   This belongs to the Python E3/B-PY1 family above and is not a CDP readiness
   (RT-CI-001) failure.
+- B-PY1 evidence — PR #32 CI, 2026-10-20（排查记录：[PR #32 评论](https://github.com/boccchi2993/locus-product/pull/32#issuecomment-6292116159)）。PR 分支的 browser gates 在 `e2e-m3c-python-integration` 的 B-PY1 上失败两次，同签名 `fail:true, delta:0`，输出为 Pyodide traceback 而非拒绝标记：
+  - 首次运行：[run 39421135018 attempt 1](https://github.com/boccchi2993/locus-product/actions/runs/39421135018/attempts/1)，2026-10-20 12:17 UTC，head `75a4e82dffb0445d128638cddeafdd17f3d94827`，失败检查 `B-PY1 python js.fetch denied at the policy layer with the marker`（job `browser gates (packaged build, headless Chrome)`），`delta=0`（发出的请求数为 0），缺失标记 `Python network access is disabled in Locus`。
+  - 第一次重跑：[run 39421135018 attempt 2](https://github.com/boccchi2993/locus-product/actions/runs/39421135018/attempts/2)，2026-10-20 12:24 UTC，head `75a4e82dffb0445d128638cddeafdd17f3d94827`，失败检查 `B-PY1 python js.fetch denied at the policy layer with the marker`，`delta=0`（发出的请求数为 0），缺失标记 `Python network access is disabled in Locus`。
+  - 这两次失败之后又重跑了一次才变绿：[run 39421135018 attempt 3](https://github.com/boccchi2993/locus-product/actions/runs/39421135018/attempts/3)（2026-10-20 13:34 UTC）browser gates 全绿。按仓库规则，CI 失败不应重跑，这一次违反了规则。
+  - 探针判别（5 个探针分支，均已删除，数据留存如下）：
+    - main 纯净代码：[run 39423289712](https://github.com/boccchi2993/locus-product/actions/runs/39423289712)（2026-10-20 12:34 UTC，head `072af914723a35f59e88b3cfc20d4b5633152202`），无任何改动，gates 全绿。
+    - main + 仅升级依赖：[run 39424666946](https://github.com/boccchi2993/locus-product/actions/runs/39424666946)（2026-10-20 12:44 UTC，head `e4d0f74a3495735a1c9a7ee5a3149abc6889bbe1`），runtime #7 + harness #12 依赖升级、无 product 改动，gates 全绿。
+    - 完整 C3 改动 + main 版 e2e 文件：[run 39425933985](https://github.com/boccchi2993/locus-product/actions/runs/39425933985)（2026-10-20 12:54 UTC，head `0730b816daa4ab733c076e4b228aa08697b87f87`），失败：B-SETUP（断言 disabled，与 O1 首次安装自动启用冲突，预期内）、B-PY2（空输出）。
+    - 回退 commit 自动启用特性、其余 C3 全保留：[run 39428638859](https://github.com/boccchi2993/locus-product/actions/runs/39428638859)（2026-10-20 13:13 UTC，head `e06e1b01d43909945e140dd3e87cdf204cbe381f`），仅 B-SETUP/SI0 的 O1 断言预期失败，B-PY1 通过。
+    - 本分支 + 一行诊断打印（与本 PR 代码完全一致）：[run 39430093983](https://github.com/boccchi2993/locus-product/actions/runs/39430093983)（2026-10-20 13:24 UTC，head `7903d5076c826f0bcd4e226960f26a381953eb1d`），17 gates 全绿、B-PY1 通过——同一代码第三次 CI 运行全绿。
+  - 待查假设（2026-10-22 审查）：PR #32 让 e2e-m3c-python-integration 在 B-SETUP 之后新增了一次 enable → disable（首次安装自动启用，再恢复为停用前提），紧接着的第一个 python 任务就是 B-PY1。如果 B-PY1 的抖动和 worker 重启后的第一次运行有关，这次改动可能提高了失败概率。验证办法：在不改断言的前提下，统计 main 上 B-PY1 的失败率（例如手动触发 10 次 browser gates），和 #32 合并前的历史对比。
 
 ## 3. core-main-candidate red since 2026-10-17
 
