@@ -41,6 +41,54 @@ tracked by their owning repositories; this page is the Product index.
   This belongs to the Python E3/B-PY1 family above and is not a CDP readiness
   (RT-CI-001) failure.
 
+
+### B-PY1 diagnostic evidence appended 2026-10-22 (no resolution)
+
+Dates below are UTC (not the investigation host's clock). Downloaded full job
+logs preserve only the following 300-character verdict prefix: the test itself
+calls `JSON.stringify(verdict).slice(0, 300)` before logging. Neither downloading
+full logs nor `--log-failed` can recover bytes never emitted. The exception type
+and final traceback line are **unavailable**, not inferred to be SystemError.
+
+- [39000494789, attempt 1](https://github.com/boccchi2993/locus-product/actions/runs/39000494789/attempts/1), head `ff182d2f8e03952d8e65cd25e1e64ed8564da813`, failure 2026-10-17 03:55:49 UTC, delta=0, exception type unavailable, final line unavailable (source truncation).
+- [39421135018, attempt 1](https://github.com/boccchi2993/locus-product/actions/runs/39421135018/attempts/1), head `75a4e82dffb0445d128638cddeafdd17f3d94827`, failure 2026-10-20 12:19:56 UTC, delta=0, exception type unavailable, final line unavailable (source truncation).
+- [39421135018, attempt 2](https://github.com/boccchi2993/locus-product/actions/runs/39421135018/attempts/2), head `75a4e82dffb0445d128638cddeafdd17f3d94827`, failure 2026-10-20 12:25:46 UTC, delta=0, exception type unavailable, final line unavailable (source truncation).
+- [39637621125, attempt 1](https://github.com/boccchi2993/locus-product/actions/runs/39637621125/attempts/1), head `911f038f740aaf52ccd2bfb7c9924ebd6e90aede`, failure 2026-10-21 16:48:10 UTC, delta=0, exception type unavailable, final line unavailable (source truncation).
+
+All four emitted prefixes are byte-identical after the log timestamp/label is
+removed; this does NOT establish that their full tracebacks are identical.
+B-PY1b passed in all four, establishing zero probe requests, not which rejection
+path produced the error. PR #32's browser gates were rerun again after two
+failures and became green only on [attempt 3](https://github.com/boccchi2993/locus-product/actions/runs/39421135018/attempts/3)
+(started 2026-10-20 13:34:22 UTC, unchanged head `75a4e82`). This violated the
+“CI 失败不重跑” rule; the green attempt does not supersede either failure.
+
+待查假设：PR #32 在 B-SETUP 之后新增了一次“自动启用 → 立即停用”（tests/e2e-m3c-python-integration.cjs 第 322–328 行左右），会让 Python worker 多重启一次，而紧接着的第一个 Python 任务就是 B-PY1。如果 traceback 和 worker 重启后的第一次运行有关，这次改动可能提高了失败概率。
+
+Independent check of that hypothesis: the install/disable sequence is present,
+but the statement that B-PY1 is the first Python task is not supported. The
+suite first executes B-BOOT1's corrupted bootstrap, then B-PY0's successful
+recovery Python task (`print('M3C-B-PY-OK', 2 + 2)`), then B-PY1. All four failed
+job logs explicitly report B-PY0 PASS. A worker restart between B-PY0 and B-PY1
+has not been measured. Failure predates PR #32; any frequency effect of the
+new sequence remains unmeasured. Root cause: **cannot determine**.
+
+Prior diagnostic PR #33 is separate evidence: [run 39425819532](https://github.com/boccchi2993/locus-product/actions/runs/39425819532),
+head `2d14ee3b740581a82fdd3f28731929c401204c50`, 2026-10-20, emitted an untruncated
+B-PY1 verdict with `fail=true`, `delta=0`, `marker=true`. Its exception was
+`pyodide.ffi.JsException: Error: Python network access is disabled in Locus; use the shell curl command for HTTP/HTTPS`.
+B-PY1 passed in that run; the run failed in e2e-ui CDP readiness. This passing
+traceback must NOT be substituted for any of the four missing failure tails.
+
+Local A/B/C experiment status (2026-10-22): BLOCKED before the first browser run.
+No executable Chrome/Chromium is installed or available on PATH in this host;
+only Playwright library code and shell completion files were found. Per the
+requested stop condition, no installation workaround, browser repetitions, or
+CI experiment loop was attempted in this round. A (`911f038`): 0/10 executed,
+pass rate N/A, failure traceback types N/A. B (`072af91`): 0/10 executed, pass
+rate N/A, types N/A. C: not performed (A/B comparison unavailable); no local
+warm-up change made. No inference about relative failure probability is possible.
+
 ## 3. core-main-candidate red since 2026-10-17
 
 - [ ] **CANDIDATE-RED-2026-10-17** — first failure: scheduled

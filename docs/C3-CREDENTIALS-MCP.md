@@ -37,7 +37,7 @@ D1 补充释义（加在“curl 不携带 ambient 凭据”之后）：
 
 ## 2. 背景（现状）
 
-- shell 的 `curl` 只做参数解析和输出格式化，所有网络行为在 runtime `NetworkRuntime.request()`：GET/HEAD 直连失败时可退回 relay；有副作用的请求跨域时走 edge relay `/fetch`（POST 信封），只发一次，必须经过 `authorization` 端口审批（`policyKey = network:write:<origin>`）。
+- shell 的 `curl` 只做参数解析和输出格式化，所有网络行为在 runtime `NetworkRuntime.request()`：GET/HEAD 直连失败时可退回 relay；有副作用的请求跨域时走 edge relay `/fetch`（POST 信封），只发一次，必须经过 `authorization` 端口审批（`policyKey = network-write:<origin>`）。
 - relay `/fetch` 转发信封里的 `Authorization`；跟随跳转，跳出原 origin 时去掉鉴权头。
 - shell 没有任何环境变量展开机制，`$X` 原样作为字面量传递。
 - Python 没有网络，唯一的出网口是 `curl`。
@@ -166,7 +166,7 @@ curl -X POST https://api.deepseek.com/v1/tools/search \
 - product UI：
   - 审批卡片在 `[Deny] [Allow once] [Allow for session]` 之后增加 `[Always allow]`。
   - 设置面板新增“始终允许的操作”列表，每项显示可读的标签（例如 `POST https://api.deepseek.com`）和 Remove 按钮。
-- 粒度说明（写进文档）：网络类的 `policyKey` 按 origin 区分（`network:write:<origin>`）。对某个 origin 选“始终允许”，会覆盖这个 origin 下所有有副作用的请求。第二阶段 MCP 的 `policyKey` 按“服务器 + 工具”区分。
+- 粒度说明（写进文档）：网络类的 `policyKey` 按 origin 区分（`network-write:<origin>`）。对某个 origin 选“始终允许”，会覆盖这个 origin 下所有有副作用的请求。第二阶段 MCP 的 `policyKey` 按“服务器 + 工具”区分。
 
 ## 7. 第二阶段：`mcp` 命令（轮廓）
 
