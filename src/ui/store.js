@@ -345,6 +345,14 @@ export function credentialSummary(name) {
   return credentials.summary(name);
 }
 
+// The durable binding record for ONE credential (§3.2 metadata, never a
+// value) — the needs-reconfirmation dialog renders its OLD-binding lines
+// from here. Null without a record or on an unsupported generation.
+export async function credentialBindingRecord(name) {
+  if (!credentials) return null;
+  return credentials.bindingRecord(name);
+}
+
 // ---------- C3 §4.2: the runtime credential port ----------
 // Only built when the harness generation declares capabilityCredentials —
 // an older generation gets `credentials: undefined` in the execution
@@ -401,10 +409,21 @@ export async function confirmCapabilityImport() {
   const summary = current && current.summary;
   if (!summary) return;
   try {
-    await commitCapabilityPackage(summary.token, {
+    const commit = await commitCapabilityPackage(summary.token, {
       acceptMismatch: summary.needsMismatchAcceptance === true,
     });
-    store.capabilityImport = null;
+    // C3 O1: a first install auto-enables; an enable FAILURE keeps the
+    // package installed but disabled and the commit carries the reason —
+    // the dialog stays up and reports it instead of pretending success.
+    if (commit && commit.enabled === false) {
+      store.capabilityImport = {
+        source: current.source,
+        label: current.label,
+        commit: { id: commit.id, state: commit.state, enableError: commit.enableError || 'capability enable failed' },
+      };
+    } else {
+      store.capabilityImport = null;
+    }
     await refreshCapabilityPackages();
   } catch (e) {
     store.capabilityImport = { ...current, error: e.message || String(e) };
@@ -757,6 +776,12 @@ export const store = reactive({
   // 'mismatch' notices offer 继续/本次跳过; dismissed ones are dropped
   // without touching storage.
   capabilityPackageNotices: [],
+  // C3 §6: whether THIS harness generation supports durable "Always
+  // allow" grants (the ApprovalCard offers the button only then).
+  persistentApprovalsSupported: harnessDeclaresPersistentApprovalGrants(),
+  // C3 §6: reactive projection of the durable grants for the settings
+  // list — written ONLY by refreshAlwaysAllowed().
+  alwaysAllowed: [],
   // The one in-flight import shown by the confirmation dialog (both entry
   // points — the settings panel and the /mnt/download list — share it):
   // null | { source: 'file' | 'path', label, summary } | { source, label, diagnostics }
@@ -1169,9 +1194,13 @@ export const approvals = createApprovalController({
 
 // Resolve the CURRENT pending approval from UI input. Stale ids (old card,
 // late click) are no-ops inside the controller — they can never resolve a
-// newer request. Returns true when a decision was applied.
+// newer request. Returns true when a decision was applied. A persistent
+// decision lands in the controller's in-memory grant set synchronously, so
+// the settings-list projection refreshes right here.
 export function resolveApproval(requestId, decision) {
-  return approvals.resolve(requestId, decision);
+  const applied = approvals.resolve(requestId, decision);
+  if (applied) refreshAlwaysAllowed();
+  return applied;
 }
 
 // Escape-path resolution, kind-aware (docs/APPROVALS.md + docs/IMAGE-INPUT.md):
@@ -1217,9 +1246,17 @@ export function listAlwaysAllowed() {
   }));
 }
 
+// Re-project the durable grants into the reactive store. Called after a
+// grant may have changed (an approval resolved, a revoke, boot restore)
+// and when the settings panel opens.
+export function refreshAlwaysAllowed() {
+  store.alwaysAllowed = listAlwaysAllowed();
+}
+
 export async function revokeAlwaysAllowed(policyKey) {
   if (!harnessDeclaresPersistentApprovalGrants()) return;
   await approvals.revokePersistentGrant(policyKey);
+  refreshAlwaysAllowed();
 }
 
 // ---------- image feedback wiring (docs/IMAGE-INPUT.md) ----------
@@ -2431,6 +2468,7 @@ export async function resetAllData() {
     // remembered value clear with the rest of the data. persistence.reset()
     // wipes the meta/secrets stores; these clear the in-memory halves.
     if (harnessDeclaresPersistentApprovalGrants()) await approvals.clearPersistentGrants();
+    refreshAlwaysAllowed();
     if (credentials) await credentials.clearAll();
     if (workspaceMount) vfs.unmount('/mnt/workspace');
     store.workspaceName = null;
@@ -2527,6 +2565,7 @@ async function bootPersistence() {
         reportPersistenceIssue(e, 'Persistent approvals could not be loaded');
       }
     }
+    refreshAlwaysAllowed();
     const rows = await PersistenceServiceInstance.loadConversations();
     if (rows.length) {
       rows.forEach((c) => { if (c.runState === 'running') { c.runState = 'interrupted'; c.status = 'interrupted'; } });

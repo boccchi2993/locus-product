@@ -80,8 +80,19 @@ const KIND_BUTTONS = {
     { label: 'Confirm', style: 'primary', decision: { outcome: 'confirm', scope: 'once' } },
   ],
 };
+// C3 §6: the durable "Always allow" choice rides LAST (after the session
+// scope) and only exists on a harness generation that declares
+// persistentApprovalGrants — on an older one the button is not offered at
+// all (scope 'persistent' would be invalid there, never downgraded).
+const ALWAYS_ALLOW_BUTTON = { label: 'Always allow', style: 'secondary', decision: { outcome: 'allow', scope: 'persistent' } };
 const FALLBACK_BUTTONS = [{ label: 'Dismiss', style: 'secondary', cancel: true }];
-const buttons = computed(() => KIND_BUTTONS[pending.value.kind] || FALLBACK_BUTTONS);
+const buttons = computed(() => {
+  const base = KIND_BUTTONS[pending.value.kind] || FALLBACK_BUTTONS;
+  if (pending.value.kind === 'permission' && store.persistentApprovalsSupported) {
+    return base.concat([ALWAYS_ALLOW_BUTTON]);
+  }
+  return base;
+});
 const cardText = computed(() => KIND_TEXT[pending.value.kind] || { title: 'Approval required', lead: 'Locus wants your input:' });
 // Small probe disclosure on the unsure path — no "Recommended", no
 // preselection: every choice is equal until the user picks one.

@@ -69,9 +69,9 @@
       rect.height <= Math.min(window.innerHeight * 0.6, 520) + 2,
       'height=' + rect.height.toFixed(1));
     const btns = Array.from(document.querySelectorAll('.approval-card .approval-btn'));
-    check(P + 'three permission buttons rendered', btns.length === 3, btns.map((b) => b.textContent.trim()).join(','));
+    check(P + 'four permission buttons rendered (C3: Always allow on a supporting core)', btns.length === 4, btns.map((b) => b.textContent.trim()).join(','));
     check(P + 'actions pointer-accessible WITHOUT scrolling (pinned, body scrolls)',
-      btns.length === 3 && btns.every(pointerHit),
+      btns.length === 4 && btns.every(pointerHit),
       btns.map((b) => b.textContent.trim() + '=' + pointerHit(b)).join(' '));
     const body = $('.approval-card .approval-body');
     check(P + 'approval body is the scrollable region (content overflows it)',
