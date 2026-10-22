@@ -505,6 +505,9 @@ async function main() {
           verdict.fail && verdict.marker, JSON.stringify(verdict).slice(0, 300));
         check('B-PY1b js.fetch produced ZERO requests to the probe (counter oracle)',
           verdict.delta === 0, 'delta=' + verdict.delta);
+        if (!(verdict.fail && verdict.marker)) {
+          console.log('DIAG B-PY1 FULL ' + JSON.stringify(verdict));
+        }
       }
       {
         const { verdict } = await pyDeny('B-PY2 pyfetch deny', 'm3c-py2', [
