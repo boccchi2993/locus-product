@@ -445,7 +445,9 @@ export class PersistenceService {
   }
 
   async saveSettings(settings) {
-    var keys = ['apiBase', 'model', 'proxy', 'dialect', 'maxTokens', 'contextWindow'];
+    // D12: rememberApiKey ('1'/'0') persists the model key's remember
+    // choice itself — '0' is an explicit opt-out, absent means default on.
+    var keys = ['apiBase', 'model', 'proxy', 'dialect', 'maxTokens', 'contextWindow', 'rememberApiKey'];
     for (var i = 0; i < keys.length; i++) {
       var key = keys[i];
       await this.put('settings', { key: key, value: persistenceSafeString(settings[key] || '') });

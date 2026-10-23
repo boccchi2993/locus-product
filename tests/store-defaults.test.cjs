@@ -54,6 +54,31 @@ async function loadStore(sessionData) {
   return import('../src/ui/store.js?scenario=' + scenarioCounter);
 }
 
+// D12's reload scenarios need the persistence singleton to KEEP its data
+// across a fresh store-module import — that IS the simulated browser
+// reload (new store boot over the same durable store).
+async function loadStoreKeep(sessionData) {
+  if (!persistenceInstancePromise) {
+    persistenceInstancePromise = import('../src/persistence.js')
+      .then((mod) => mod.PersistenceServiceInstance);
+  }
+  const persistence = await persistenceInstancePromise;
+  globalThis.sessionStorage = fakeSessionStorage(sessionData);
+  scenarioCounter++;
+  return import('../src/ui/store.js?scenario=' + scenarioCounter);
+}
+
+// A fresh store module boots ASYNCHRONOUSLY (persistenceBootPromise); the
+// remembered-key hydration happens at the end of that boot.
+async function waitFor(pred, label) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < 5000) {
+    if (pred()) return;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  throw new Error('timed out waiting for ' + label);
+}
+
 // A recording transport fake standing in for the network hop. Returns a
 // minimal successful Anthropic-shaped response; captures every request.
 function recordingTransport(bodies) {
@@ -156,6 +181,53 @@ function recordingTransport(bodies) {
     check('D5 uploads wired', m.store.attachmentsWired === true);
     check('D5 artifacts start empty', Array.isArray(m.store.artifacts)
       && m.store.artifacts.length === 0);
+  }
+
+  // ---------- D12. remember defaults to checked (DECISIONS D12) ----------
+  {
+    // Fresh state: the checkbox starts CHECKED.
+    const m = await loadStore(null);
+    check('D12 fresh remember defaults to checked', m.store.settings.remember === true,
+      m.store.settings.remember);
+    // A saved key survives the reload (fresh store boot over the SAME
+    // persistence), still checked.
+    m.store.settings.apiKey = 'D12-KEY-SAVED';
+    await m.persistSettingsIfNeeded();
+    const m2 = await loadStoreKeep(null);
+    await waitFor(() => m2.store.settings.apiKey === 'D12-KEY-SAVED',
+      'the remembered key to reload');
+    check('D12 a saved key survives the reload, still checked',
+      m2.store.settings.apiKey === 'D12-KEY-SAVED' && m2.store.settings.remember === true,
+      JSON.stringify({ apiKey: m2.store.settings.apiKey, remember: m2.store.settings.remember }));
+    // An explicit opt-out (uncheck + save) persists rememberApiKey '0':
+    // the reload restores NO key and an UNCHECKED checkbox.
+    m2.store.settings.apiKey = 'D12-KEY-SECOND';
+    m2.store.settings.remember = false;
+    await m2.persistSettingsIfNeeded();
+    const persistedPref = await (await persistenceInstancePromise).get('settings', 'rememberApiKey');
+    check('D12 the opt-out persists as rememberApiKey 0',
+      persistedPref && persistedPref.value === '0', JSON.stringify(persistedPref));
+    const m3 = await loadStoreKeep(null);
+    await waitFor(() => m3.store.settings.remember === false, 'the boot to apply the opt-out');
+    check('D12 opt-out reload: no key, checkbox unchecked',
+      m3.store.settings.apiKey === '' && m3.store.settings.remember === false,
+      JSON.stringify({ apiKey: m3.store.settings.apiKey, remember: m3.store.settings.remember }));
+    // forgetApiKeys is an EXPLICIT opt-out: unchecked, and a reload stays
+    // unchecked.
+    m3.store.settings.apiKey = 'D12-KEY-THIRD';
+    m3.store.settings.remember = true;
+    await m3.persistSettingsIfNeeded();
+    await m3.forgetApiKeys();
+    check('D12 forgetApiKeys unchecks the checkbox',
+      m3.store.settings.remember === false && m3.store.settings.apiKey === '',
+      JSON.stringify({ remember: m3.store.settings.remember, apiKey: m3.store.settings.apiKey }));
+    const m4 = await loadStoreKeep(null);
+    await waitFor(() => m4.store.settings.remember === false, 'the forget opt-out to reload');
+    check('D12 after forgetApiKeys a reload stays unchecked', true);
+    // resetAllData restores the DEFAULTS: checked (settings were cleared).
+    await m4.resetAllData();
+    check('D12 resetAllData restores checked', m4.store.settings.remember === true,
+      m4.store.settings.remember);
   }
 
   console.log('---');
