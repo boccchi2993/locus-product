@@ -129,8 +129,11 @@ export function createCredentialService({ persistence, manager, harness, now } =
   }
 
   // ---------- C3 §3.2 — connect ----------
+  // D12: remember defaults to true — an absent opts.remember persists the
+  // value on this device; only an explicit false opts out.
   async function connect(name, value, opts) {
     const o = opts || {};
+    const remember = o.remember === undefined ? true : !!o.remember;
     const trimmed = typeof value === 'string' ? value.trim() : '';
     if (!trimmed.length) {
       throw new Error('credential value must be a non-empty string');
@@ -142,7 +145,7 @@ export function createCredentialService({ persistence, manager, harness, now } =
     if (!found) {
       throw new Error('unknown credential: ' + name);
     }
-    const record = bindingRecordFor(name, found.capabilityId, found.credential, o.remember);
+    const record = bindingRecordFor(name, found.capabilityId, found.credential, remember);
     const bindings = await loadBindings();
     const next = bindings.filter((b) => b.name !== name);
     next.push(record);
@@ -150,7 +153,7 @@ export function createCredentialService({ persistence, manager, harness, now } =
     // remember:false removes any stale remembered row; remember:true
     // writes (or overwrites) it. Either way the value now lives in
     // memory and in the redaction set.
-    if (o.remember) {
+    if (remember) {
       await writeSecret(name, trimmed, found.capabilityId);
     } else {
       await deleteSecret(name);

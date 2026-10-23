@@ -5,7 +5,8 @@
 //
 //   E-C1 a .locus package with a credentials declaration installs through
 //        the REAL import service, lands enabled, card shows Not connected
-//   E-C2 Connect (no Remember): dialog → Connected ····<last 4>
+//   E-C2 Connect, Remember explicitly UNCHECKED (D12: it defaults to
+//        checked): dialog → Connected ····<last 4>
 //   E-C3 curl POST with $NAME in a REAL task: approval card carries
 //        "Uses credential: NAME", Always allow resolves persistent scope,
 //        the upstream sees `Bearer <key>`, and the reflected key comes
@@ -14,7 +15,8 @@
 //   E-C5 reload: credential back to Not connected (was not remembered),
 //        the durable grant SURVIVED (Always allowed lists it), and a curl
 //        refuses as not connected BEFORE any approval card
-//   E-C6 Connect with Remember + reload: still Connected ····<last 4>
+//   E-C6 Connect with Remember (D12: checked by default) + reload: still
+//        Connected ····<last 4>
 //   E-C6b version replacement with a changed pathPrefix → Needs
 //        reconfirmation (old + new binding lines); Confirm → connected
 //   E-C7 Remove in "Always allowed" → the next curl asks again
@@ -26,6 +28,11 @@
 //        DOM never contain the full test key
 //   E-C11 phone width: the approval card's FOUR buttons all visible
 //        inside the viewport (wrap, never overflow)
+//   E-C12 D12: the UI import dialog moves to the connect-credentials step
+//        (remember checked by default, shared-computer note); key +
+//        Connect → Connected ····<last 4>, reload → STILL Connected
+//   E-C13 D12: a fresh import's Skip for now keeps the credential Not
+//        connected and the typed key never surfaces (leak sweep as E-C10)
 //
 // Upstream interception (the e2e-network.cjs mechanism, applied to the
 // credential's host): the runtime's cross-origin POSTs travel the relay
@@ -373,9 +380,19 @@ await waitForRuntimeCondition(cdp, testidExpr('credential-' + CRED_NAME) + ' !==
     check('E-C2 the dialog restates the send rule',
       (await testidText('credential-dialog-' + CRED_NAME)).includes('Only sent to ' + ORIGIN + '/v1/tools/'),
       await testidText('credential-dialog-' + CRED_NAME));
-    check('E-C2 Remember defaults to unchecked',
-      await evaluate(cdp, '!document.querySelector(\'[data-testid="credential-remember-' + CRED_NAME + '"]\').checked'));
+    check('E-C2 Remember defaults to checked (D12)',
+      await evaluate(cdp, 'document.querySelector(\'[data-testid="credential-remember-' + CRED_NAME + '"]\').checked'));
+    check('E-C2 the dialog carries the shared-computer note',
+      ((await testidText('credential-dialog-' + CRED_NAME)) || '')
+        .includes('Saved in this browser on this device. Uncheck on a shared computer.'),
+      await testidText('credential-dialog-' + CRED_NAME));
     await screenshot(cdp, 'c3-connect-dialog.png', 'credential-dialog-' + CRED_NAME);
+    // E-C5 depends on the NOT-remembered premise, so the default is
+    // explicitly undone here (D12 keeps the assertions below unchanged).
+    check('E-C2 Remember unchecked explicitly',
+      (await evaluate(cdp,
+        '(function () { var el = document.querySelector(\'[data-testid="credential-remember-' + CRED_NAME + '"]\');'
+        + ' el.click(); return el.checked; })()')) === false);
     check('E-C2 the key can be typed', (await setInputValue('credential-input-' + CRED_NAME, TEST_KEY)) === 'set');
     check('E-C2 Connect confirms', (await clickTestid('credential-confirm-' + CRED_NAME)) === 'clicked');
     await waitForRuntimeCondition(cdp,
@@ -469,10 +486,8 @@ await waitForRuntimeCondition(cdp, testidExpr('credential-' + CRED_NAME) + ' !==
     check('E-C6 Connect opens', (await clickTestid('credential-connect-' + CRED_NAME)) === 'clicked');
     await waitForRuntimeCondition(cdp, testidExpr('credential-dialog-' + CRED_NAME) + ' !== null',
       { process: chrome, phase: 'cred-dialog-2', timeoutMs: 5000 });
-    check('E-C6 Remember can be checked',
-      (await evaluate(cdp,
-        '(function () { var el = document.querySelector(\'[data-testid="credential-remember-' + CRED_NAME + '"]\');'
-        + ' el.click(); return el.checked; })()')) === true);
+    check('E-C6 Remember defaults to checked (D12)',
+      await evaluate(cdp, 'document.querySelector(\'[data-testid="credential-remember-' + CRED_NAME + '"]\').checked'));
     check('E-C6 the key can be typed', (await setInputValue('credential-input-' + CRED_NAME, TEST_KEY)) === 'set');
     check('E-C6 Connect confirms', (await clickTestid('credential-confirm-' + CRED_NAME)) === 'clicked');
     await waitForRuntimeCondition(cdp,
@@ -593,8 +608,9 @@ await waitForRuntimeCondition(cdp, testidExpr('credential-' + CRED_NAME) + ' !==
       idb9 && idb9.bindings === 0, JSON.stringify(idb9));
     await closeSettings();
 
-    // ---------- E-C10: leak sweep over every durable + rendered surface ----------
-    const sweep = await evaluate(cdp,
+    // ---------- E-C10: leak sweep over every durable + rendered surface
+    // (the SAME sweep closes E-C13's Skip-for-now step) ----------
+    const leakSweep = () => evaluate(cdp,
       '(async function () {'
       + ' var KEY = ' + JSON.stringify(TEST_KEY) + ';'
       + ' var out = { stores: {}, storeCount: 0, vfsFiles: 0, vfsBytes: 0, toolOutputFiles: 0, domBytes: 0, leaked: false, where: "" };'
@@ -628,8 +644,9 @@ await waitForRuntimeCondition(cdp, testidExpr('credential-' + CRED_NAME) + ' !==
       + ' await walk("/home/locus/history", 3);'
       + ' var dom = document.body.textContent || "";'
       + ' out.domBytes = dom.length;'
-      + ' if (dom.indexOf(KEY) !== -1) { out.leaked = true; out.where = "dom"; }'
-      + ' return out; })()', 60000);
+     + ' if (dom.indexOf(KEY) !== -1) { out.leaked = true; out.where = "dom"; }'
+     + ' return out; })()', 60000);
+    const sweep = await leakSweep();
     check('E-C10 every IndexedDB store was swept and is key-free',
       sweep && !sweep.leaked && sweep.storeCount === 12, JSON.stringify(sweep && sweep.stores));
     check('E-C10 the history VFS was swept (real files read), key-free',
@@ -663,6 +680,115 @@ await waitForRuntimeCondition(cdp, testidExpr('credential-' + CRED_NAME) + ' !==
       await evaluate(cdp, 'document.documentElement.scrollWidth + " vs " + window.innerWidth'));
     check('E-C11 Deny resolves', (await clickBtn('Deny')) === true);
     await cdp.send('Emulation.clearDeviceMetricsOverride');
+
+    // ---------- E-C12: D12 — the UI import dialog moves to the
+    // connect-credentials step. The capability was uninstalled in E-C9,
+    // so this is a clean first install through the REAL import store
+    // path (begin from bytes + the dialog's own Import button). ----------
+    await openSettings(); // the import dialog renders inside the panel
+    const import12 = await evaluate(cdp,
+      '(async function () { var bin = atob(' + JSON.stringify(PKG_B64.v1) + ');'
+      + ' var bytes = new Uint8Array(bin.length);'
+      + ' for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);'
+      + ' await window.__locus.actions.beginCapabilityImportFromBytes(bytes, "d12-import.locus");'
+      + ' return !!window.__locus.store.capabilityImport; })()');
+    check('E-C12 the import dialog opened', import12 === true);
+    await waitForRuntimeCondition(cdp, testidExpr('capability-import-confirm') + ' !== null',
+      { process: chrome, phase: 'cred-import-confirm', timeoutMs: 5000 });
+    check('E-C12 Import confirms', (await clickTestid('capability-import-confirm')) === 'clicked');
+    await waitForRuntimeCondition(cdp, testidExpr('import-credential-row-' + CRED_NAME) + ' !== null',
+      { process: chrome, phase: 'cred-import-connect', timeoutMs: 10000 });
+    check('E-C12 the connect-credentials step appeared with label and $NAME',
+      ((await testidText('import-credential-row-' + CRED_NAME)) || '').includes('E2E test credential')
+      && ((await testidText('import-credential-row-' + CRED_NAME)) || '').includes('$' + CRED_NAME),
+      await testidText('import-credential-row-' + CRED_NAME));
+    check('E-C12 the step restates the send rule',
+      ((await testidText('import-credential-row-' + CRED_NAME)) || '')
+        .includes('Only sent to ' + ORIGIN + '/v1/tools/'),
+      await testidText('import-credential-row-' + CRED_NAME));
+    check('E-C12 Remember defaults to checked in the import step',
+      await evaluate(cdp, 'document.querySelector(\'[data-testid="import-credential-remember-' + CRED_NAME + '"]\').checked'));
+    check('E-C12 the step carries the shared-computer note',
+      ((await testidText('import-credential-row-' + CRED_NAME)) || '')
+        .includes('Saved in this browser on this device. Uncheck on a shared computer.'),
+      await testidText('import-credential-row-' + CRED_NAME));
+    await screenshot(cdp, 'c3-import-connect-step.png', 'capability-import-dialog');
+    check('E-C12 the key can be typed', (await setInputValue('import-credential-input-' + CRED_NAME, TEST_KEY)) === 'set');
+    check('E-C12 Connect confirms', (await clickTestid('capability-import-connect')) === 'clicked');
+    await waitForRuntimeCondition(cdp,
+      '(' + testidExpr('credential-state-' + CRED_NAME) + ' || "").indexOf("Connected ····' + KEY_LAST4 + '") === 0',
+      { process: chrome, phase: 'cred-import-connected', timeoutMs: 10000 });
+    check('E-C12 the card reads Connected with ONLY the last 4 characters',
+      (await testidText('credential-state-' + CRED_NAME)) === 'Connected ····' + KEY_LAST4,
+      await testidText('credential-state-' + CRED_NAME));
+    check('E-C12 the dialog closed after Connect',
+      (await testidText('capability-import-dialog')) === null);
+    check('E-C12 the full key appears nowhere in the page DOM',
+      !(await evaluate(cdp, 'document.body.textContent.includes(' + JSON.stringify(TEST_KEY) + ')')));
+    await reloadAndBoot(cdp, chrome, appUrl);
+    await openSettings();
+    await waitForRuntimeCondition(cdp, testidExpr('credential-' + CRED_NAME) + ' !== null',
+      { process: chrome, phase: 'cred-import-card', timeoutMs: 10000 });
+    check('E-C12 after reload the credential is STILL Connected (saved by default)',
+      (await testidText('credential-state-' + CRED_NAME)) === 'Connected ····' + KEY_LAST4,
+      await testidText('credential-state-' + CRED_NAME));
+
+    // ---------- E-C13: D12 — Skip for now. Disconnect + uninstall give a
+    // clean slate; the second import's step gets the key TYPED, then Skip
+    // for now keeps the credential Not connected and the sweep (as E-C10)
+    // proves the typed value never surfaced anywhere. ----------
+    check('E-C13 Disconnect arms the confirmation',
+      (await clickTestid('credential-disconnect-' + CRED_NAME)) === 'clicked');
+    check('E-C13 Confirm disconnect clicked',
+      (await clickTestid('credential-disconnect-confirm-' + CRED_NAME)) === 'clicked');
+    await waitForRuntimeCondition(cdp,
+      '(' + testidExpr('credential-state-' + CRED_NAME) + ' || "") === "Not connected"',
+      { process: chrome, phase: 'cred-import-disconnected', timeoutMs: 8000 });
+    check('E-C13 uninstall is armed',
+      (await clickTestid('capability-package-uninstall-' + CAP_ID)) === 'clicked');
+    check('E-C13 Confirm uninstall clicked',
+      (await clickTestid('capability-package-uninstall-confirm-' + CAP_ID)) === 'clicked');
+    await waitForRuntimeCondition(cdp,
+      '!window.__locus.capabilityComposition.list().some(function (c) { return c.id === ' + JSON.stringify(CAP_ID) + '; })',
+      { process: chrome, phase: 'cred-import-uninstalled', timeoutMs: 10000 });
+    // The durable record delete trails the manager unregister (async
+    // storage mutation) — poll it with the AWAITING evaluate helper
+    // (waitForRuntimeCondition does not await promises); otherwise the
+    // re-import below would be judged 'same'.
+    for (let i = 0; i < 200; i++) {
+      const ids = await evaluate(cdp,
+        'window.__locus.persistence().loadCapabilityPackages().then(function (r) {'
+        + ' return r.map(function (x) { return x.id; }); })');
+      if (Array.isArray(ids) && !ids.includes(CAP_ID)) break;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    const import13 = await evaluate(cdp,
+      '(async function () { var bin = atob(' + JSON.stringify(PKG_B64.v1) + ');'
+      + ' var bytes = new Uint8Array(bin.length);'
+      + ' for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);'
+      + ' await window.__locus.actions.beginCapabilityImportFromBytes(bytes, "d13-import.locus");'
+      + ' return !!window.__locus.store.capabilityImport; })()');
+    check('E-C13 the import dialog opened', import13 === true);
+    await waitForRuntimeCondition(cdp, testidExpr('capability-import-confirm') + ' !== null',
+      { process: chrome, phase: 'cred-import-confirm-2', timeoutMs: 5000 });
+    check('E-C13 Import confirms', (await clickTestid('capability-import-confirm')) === 'clicked');
+    await waitForRuntimeCondition(cdp, testidExpr('import-credential-row-' + CRED_NAME) + ' !== null',
+      { process: chrome, phase: 'cred-import-connect-2', timeoutMs: 10000 });
+    check('E-C13 the key can be typed', (await setInputValue('import-credential-input-' + CRED_NAME, TEST_KEY)) === 'set');
+    check('E-C13 Skip for now closes the step', (await clickTestid('capability-import-skip')) === 'clicked');
+    await waitForRuntimeCondition(cdp, testidExpr('capability-import-dialog') + ' === null',
+      { process: chrome, phase: 'cred-import-skip-closed', timeoutMs: 5000 });
+    check('E-C13 the dialog closed', (await testidText('capability-import-dialog')) === null);
+    await waitForRuntimeCondition(cdp,
+      '(' + testidExpr('credential-state-' + CRED_NAME) + ' || "") === "Not connected"',
+      { process: chrome, phase: 'cred-import-skip-state', timeoutMs: 8000 });
+    check('E-C13 the credential stays Not connected',
+      (await testidText('credential-state-' + CRED_NAME)) === 'Not connected',
+      await testidText('credential-state-' + CRED_NAME));
+    const sweep13 = await leakSweep();
+    check('E-C13 the leak sweep (as E-C10) found no trace of the typed key',
+      sweep13 && !sweep13.leaked && sweep13.storeCount === 12 && sweep13.vfsFiles > 0 && sweep13.domBytes > 0,
+      JSON.stringify({ where: sweep13 && sweep13.where, stores: sweep13 && sweep13.storeCount }));
   } catch (e) {
     console.error(e && e.stack || e);
     failed++;

@@ -21,6 +21,8 @@
 //        value() throws for a missing value (never leaking it)
 //   CR12 volatile secrets survive a secrets-store reload (_loadSecrets)
 //   CR13 harness.credentialBindingChanged injection is honored
+//   CR14 D12: connect without opts.remember PERSISTS (remember defaults
+//        to true); only an explicit remember:false opts out
 //
 // Run: node tests/credentials.test.mjs
 
@@ -522,6 +524,32 @@ async function redactsValue(persistence) {
     check('CR13 the injected predicate is consulted and forces needs-reconfirm',
       calls >= 1 && m2.listCapabilities()[0].credentials[0].state === 'needs-reconfirm',
       JSON.stringify({ calls, state: m2.listCapabilities()[0].credentials[0].state }));
+  }
+
+  // ---------- CR14. D12: remember defaults to true ----------
+  {
+    section('CR14 D12 connect remembers unless explicitly told not to');
+    const { persistence, service } = rig({ now: FIXED_NOW });
+    await service.connect(TEST_NAME, TEST_VALUE);
+    check('CR14 connect without opts writes the remembered row',
+      (await secretRowOf(persistence, TEST_NAME)) !== null,
+      JSON.stringify(await secretRowOf(persistence, TEST_NAME)));
+    check('CR14 the binding record carries remember:true',
+      (await bindingsOf(persistence)).length === 1
+      && (await bindingsOf(persistence))[0].remember === true,
+      JSON.stringify(await bindingsOf(persistence)));
+    check('CR14 the credential is connected',
+      service.summary(TEST_NAME).state === 'connected');
+    await service.connect(TEST_NAME, TEST_VALUE, {});
+    check('CR14 connect with EMPTY opts still remembers',
+      (await secretRowOf(persistence, TEST_NAME)) !== null);
+    await service.connect(TEST_NAME, TEST_VALUE, { remember: false });
+    check('CR14 an explicit remember:false still opts out (no row)',
+      (await secretRowOf(persistence, TEST_NAME)) === null);
+    check('CR14 the opt-out binding carries remember:false',
+      (await bindingsOf(persistence)).length === 1
+      && (await bindingsOf(persistence))[0].remember === false,
+      JSON.stringify(await bindingsOf(persistence)));
   }
 
   console.log('---');

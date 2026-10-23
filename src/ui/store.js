@@ -369,6 +369,10 @@ const productCredentialPort = credentials
 //   | { source: 'file' | 'path', label, summary }    — awaiting confirm
 //   | { source, label, diagnostics }                 — refused / failed
 //   | { source, label, summary, error }              — confirm failed
+//   | { source, label, commit: { id, state, enableError? }, connectStep }
+//                                                    — committed; D12's
+//        connect-credentials step opens when connectStep is true (the key
+//        values live ONLY in the panel's local refs, never here)
 export async function beginCapabilityImportFromBytes(bytes, label) {
   try {
     const result = await inspectCapabilityPackage(bytes);
@@ -404,6 +408,15 @@ export async function beginCapabilityImportFromPath(vfsPath) {
   }
 }
 
+// D12: the credentials of JUST-committed capability that are still in the
+// needs-connection state — the import dialog moves to the
+// connect-credentials step when this list is non-empty. needs-reconfirm
+// credentials never appear here (they keep their Confirm on the card).
+function pendingConnectionCredentials(capabilityId) {
+  const cap = store.capabilities.find((c) => c.id === capabilityId);
+  return ((cap && cap.credentials) || []).filter((d) => d.state === 'needs-connection');
+}
+
 export async function confirmCapabilityImport() {
   const current = store.capabilityImport;
   const summary = current && current.summary;
@@ -412,15 +425,30 @@ export async function confirmCapabilityImport() {
     const commit = await commitCapabilityPackage(summary.token, {
       acceptMismatch: summary.needsMismatchAcceptance === true,
     });
-    // C3 O1: a first install auto-enables; an enable FAILURE keeps the
-    // package installed but disabled and the commit carries the reason —
-    // the dialog stays up and reports it instead of pretending success.
-    if (commit && commit.enabled === false) {
-      store.capabilityImport = {
-        source: current.source,
-        label: current.label,
-        commit: { id: commit.id, state: commit.state, enableError: commit.enableError || 'capability enable failed' },
-      };
+    // D12: a successful commit (first install OR version replacement) keeps
+    // the dialog open on the connect-credentials step when the capability
+    // declares credentials that are still needs-connection. A failed
+    // auto-enable (C3 O1) reports its error as before. Without EITHER, the
+    // dialog closes exactly as it did before D12.
+    if (commit) {
+      const pending = pendingConnectionCredentials(commit.id).length > 0;
+      const enableFailed = commit.enabled === false;
+      if (!pending && !enableFailed) {
+        store.capabilityImport = null;
+      } else {
+        store.capabilityImport = {
+          source: current.source,
+          label: current.label,
+          commit: {
+            id: commit.id,
+            state: commit.state,
+            ...(enableFailed
+              ? { enableError: commit.enableError || 'capability enable failed' }
+              : {}),
+          },
+          connectStep: pending,
+        };
+      }
     } else {
       store.capabilityImport = null;
     }
@@ -656,7 +684,10 @@ const DEFAULTS = {
   dialect: 'auto',
   maxTokens: 8192,
   contextWindow: null,
-  remember: false,
+  // D12: remembering on this device is the default; the checkbox starts
+  // checked and only an explicit user choice turns it off (persisted as
+  // the `rememberApiKey` setting, '0').
+  remember: true,
 };
 
 // Settings store everything as strings; maxTokens must be a positive
@@ -1438,6 +1469,10 @@ export async function persistSettingsIfNeeded() {
       appliedApiKey = saved;
     }
   }
+  // D12: the user's remember choice is itself persisted, so a reload can
+  // restore the UNCHECKED state (no remembered key must not read as "the
+  // user opted out" — only rememberApiKey === '0' means that).
+  store.settings.rememberApiKey = store.settings.remember ? '1' : '0';
   await PersistenceServiceInstance.saveSettings(store.settings);
   await PersistenceServiceInstance.setRememberedApiKey(store.settings.apiKey, !!store.settings.remember, config);
   sessionRemove(REMEMBER_SESSION_KEY);
@@ -2447,7 +2482,11 @@ export async function forgetApiKeys() {
   return withStorageMutation(async () => {
     if (PersistenceServiceInstance) await PersistenceServiceInstance.forgetApiKeys();
     store.settings.apiKey = '';
+    // D12: forgetting is an EXPLICIT opt-out — remembered as such so the
+    // next boot does not restore the default checked state.
     store.settings.remember = false;
+    store.settings.rememberApiKey = '0';
+    if (PersistenceServiceInstance) await PersistenceServiceInstance.saveSettings(store.settings);
     productModel.apiKey = '';
     appliedApiKey = '';
   });
@@ -2503,7 +2542,7 @@ async function bootPersistence() {
   await PersistenceServiceInstance.ready;
   try {
     const settings = await PersistenceServiceInstance.loadSettings();
-    for (const key of ['apiBase', 'model', 'proxy', 'dialect', 'maxTokens', 'contextWindow']) {
+    for (const key of ['apiBase', 'model', 'proxy', 'dialect', 'maxTokens', 'contextWindow', 'rememberApiKey']) {
       if (settings[key]) store.settings[key] = settings[key];
     }
     store.settings.maxTokens = parseMaxTokens(store.settings.maxTokens);
@@ -2511,8 +2550,11 @@ async function bootPersistence() {
     applySettings();
     // Settings identify the destination first.  Only then may a remembered
     // credential for that exact provider/adapter/dialect/path be hydrated.
+    // D12: remembering defaults to CHECKED; only a persisted explicit
+    // opt-out (rememberApiKey '0') boots unchecked. An actually remembered
+    // key still implies checked.
     store.settings.apiKey = '';
-    store.settings.remember = false;
+    store.settings.remember = store.settings.rememberApiKey === '0' ? false : true;
     try {
       const saved = await PersistenceServiceInstance.loadRememberedApiKey(providerConfig());
       if (saved) {

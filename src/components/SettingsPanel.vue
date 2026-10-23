@@ -47,6 +47,7 @@
         <input v-model="store.settings.remember" type="checkbox">
         Remember API key on this device (local browser profile)
       </label>
+      <div class="hint">Saved in this browser on this device. Uncheck on a shared computer.</div>
 
       <section class="storage-controls">
         <div class="section-label">Image input</div>
@@ -138,13 +139,55 @@
             <!-- C3 O1: the commit succeeded but the first-install
                  auto-enable failed — the package stays installed and
                  disabled, and the reason is shown instead of a silent
-                 "done". -->
-            <div class="capability-import-title">Package imported, but it could not be enabled</div>
-            <div class="hint"><span class="mono">{{ importCommit.id }}</span> is installed and disabled.</div>
-            <div class="hint storage-notice" data-testid="capability-import-enable-error">{{ importCommit.enableError }}</div>
-            <div class="capability-row capability-import-actions">
-              <button class="rail-btn" type="button" data-testid="capability-import-cancel" @click="cancelCapabilityImport()">Close</button>
-            </div>
+                 "done". D12: the SAME branch hosts the connect-credentials
+                 step; an enableError is shown above it when present. -->
+            <template v-if="importConnectActive">
+              <div v-if="importCommit.enableError" class="hint storage-notice" data-testid="capability-import-enable-error">{{ importCommit.enableError }}</div>
+              <div class="capability-import-title">Connect credentials</div>
+              <div class="hint">This package declares credentials that are not connected yet. You can also connect them later on the capability card.</div>
+              <div v-for="row in importConnectRows" :key="row.name" class="cred-item"
+                :data-testid="'import-credential-row-' + row.name">
+                <div class="capability-row cred-row">
+                  <span class="cred-label">{{ row.label }}</span>
+                  <span class="mono">${{ row.name }}</span>
+                  <span v-if="row.done" class="capability-state" data-state="connected"
+                    :data-testid="'import-credential-state-' + row.name">
+                    {{ row.last4 ? 'Connected ····' + row.last4 : 'Connected' }}</span>
+                </div>
+                <div class="hint">{{ credentialSendLine(row.decl) }}</div>
+                <div class="field">
+                  <label :for="'import-credential-input-' + row.name">Key</label>
+                  <input
+                    :id="'import-credential-input-' + row.name"
+                    v-model="row.value"
+                    type="password"
+                    :data-testid="'import-credential-input-' + row.name"
+                    spellcheck="false" autocomplete="off">
+                </div>
+                <label class="check-row">
+                  <input v-model="row.remember" type="checkbox" :data-testid="'import-credential-remember-' + row.name">
+                  Remember on this device
+                </label>
+                <div class="hint">Saved in this browser on this device. Uncheck on a shared computer.</div>
+                <div v-if="row.error" class="hint storage-notice" :data-testid="'import-credential-error-' + row.name">
+                  {{ row.error }}
+                </div>
+              </div>
+              <div class="capability-row capability-import-actions">
+                <button class="rail-btn" type="button" data-testid="capability-import-skip"
+                  :disabled="importConnectBusy" @click="skipImportConnect">Skip for now</button>
+                <button class="rail-btn" type="button" :disabled="importConnectBusy"
+                  data-testid="capability-import-connect" @click="confirmImportConnect">Connect</button>
+              </div>
+            </template>
+            <template v-else>
+              <div class="capability-import-title">Package imported, but it could not be enabled</div>
+              <div class="hint"><span class="mono">{{ importCommit.id }}</span> is installed and disabled.</div>
+              <div class="hint storage-notice" data-testid="capability-import-enable-error">{{ importCommit.enableError }}</div>
+              <div class="capability-row capability-import-actions">
+                <button class="rail-btn" type="button" data-testid="capability-import-cancel" @click="cancelCapabilityImport()">Close</button>
+              </div>
+            </template>
           </template>
         </div>
 
@@ -168,6 +211,7 @@
             <input v-model="credDialogRemember" type="checkbox" :data-testid="'credential-remember-' + credDialog.name">
             Remember on this device
           </label>
+          <div class="hint">Saved in this browser on this device. Uncheck on a shared computer.</div>
           <div v-if="credDialog.error" class="hint storage-notice" :data-testid="'credential-dialog-error-' + credDialog.name">
             {{ credDialog.error }}
           </div>
@@ -567,9 +611,10 @@ function credentialOldLine(name) {
 
 // The ONE Connect dialog. The key lives in a single ref, cleared on every
 // close — it is never copied into the store, storage or an error message.
+// D12: remember defaults to CHECKED (opt-out only).
 const credDialog = ref(null); // { name, error, busy } | null
 const credDialogKey = ref('');
-const credDialogRemember = ref(false);
+const credDialogRemember = ref(true);
 
 const dialogCredential = computed(() => {
   if (!credDialog.value) return null;
@@ -583,14 +628,14 @@ const dialogCredential = computed(() => {
 
 function openCredentialDialog(cred) {
   credDialogKey.value = '';
-  credDialogRemember.value = false;
+  credDialogRemember.value = true;
   credDialog.value = { name: cred.name, error: null, busy: false };
 }
 
 function closeCredentialDialog() {
   credDialog.value = null;
   credDialogKey.value = ''; // the value never survives the dialog
-  credDialogRemember.value = false;
+  credDialogRemember.value = true;
 }
 
 async function confirmCredentialConnect() {
@@ -689,6 +734,69 @@ const importCommit = computed(() => {
   return c && c.commit ? c.commit : null;
 });
 
+// ---------- D12: the import dialog's connect-credentials step ----------
+// Entered after a successful commit when the package declares
+// needs-connection credentials. The typed key values live ONLY in these
+// local refs — never in the store, storage or an error message — and are
+// cleared when the step closes (Connect finished, Skip for now, or the
+// dialog going away).
+const importConnectActive = computed(() => {
+  const c = store.capabilityImport;
+  return !!(c && c.commit && c.connectStep);
+});
+const importConnectRows = ref([]); // { name, label, decl, value, remember, error, done, last4 }
+const importConnectBusy = ref(false);
+
+function openImportConnectStep() {
+  const c = store.capabilityImport;
+  const id = c && c.commit && c.commit.id;
+  const cap = store.capabilities.find((x) => x.id === id);
+  importConnectRows.value = ((cap && cap.credentials) || [])
+    .filter((d) => d.state === 'needs-connection')
+    .map((d) => ({ name: d.name, label: d.label, decl: d, value: '', remember: true, error: null, done: false, last4: null }));
+}
+
+function closeImportConnectStep() {
+  importConnectRows.value = []; // the values never survive the step
+  importConnectBusy.value = false;
+}
+
+watch(() => store.capabilityImport, (c) => {
+  if (!c || !c.connectStep) closeImportConnectStep();
+});
+
+async function confirmImportConnect() {
+  if (importConnectBusy.value) return;
+  importConnectBusy.value = true;
+  try {
+    for (const row of importConnectRows.value) {
+      if (row.done || !row.value.trim()) continue; // filled rows only
+      row.error = null;
+      try {
+        const s = await connectCredential(row.name, row.value, { remember: row.remember });
+        row.done = true;
+        row.last4 = s.last4;
+        row.value = ''; // only the last 4 characters are ever shown
+      } catch (e) {
+        // The service never puts the value in an error message; the row
+        // stays editable while the rows that succeeded stay connected.
+        row.error = e.message || String(e);
+      }
+    }
+    // Every filled row either connected or reported its own error — close
+    // only when nothing is left to retry.
+    if (importConnectRows.value.every((row) => row.done || !row.value.trim())) {
+      cancelCapabilityImport();
+    }
+  } finally {
+    importConnectBusy.value = false;
+  }
+}
+
+function skipImportConnect() {
+  cancelCapabilityImport(); // the watch clears the rows (and the values)
+}
+
 // Local in-flight flag for the confirm button (double-click guard while
 // the commit is running; commit errors stay inside the dialog).
 const importing = ref(false);
@@ -719,6 +827,9 @@ async function confirmImport() {
   importing.value = true;
   try {
     await confirmImportAction();
+    // D12: when the store entered the connect-credentials step, fill the
+    // local rows from the just-committed capability's declarations.
+    if (importConnectActive.value) openImportConnectStep();
   } finally {
     importing.value = false;
   }
