@@ -5,6 +5,7 @@
 
 本仓库是 Locus 三仓结构中的 product：面向用户的应用与能力组合，以及把 runtime 和 harness 集成在一起并证明它们能协同工作的适配层。
 另两个仓库：[locus-runtime](https://github.com/boccchi2993/locus-runtime)、[locus-harness](https://github.com/boccchi2993/locus-harness)。
+官方参考能力包在 [locus-example-capabilities](https://github.com/boccchi2993/locus-example-capabilities)（见 locus-product docs/DECISIONS.md D11）。
 
 ## 架构决定
 
