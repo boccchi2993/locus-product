@@ -38,7 +38,7 @@
 
 **决定**：MCP 客户端位于 runtime，凭据只保存在内存中。凭据的持久化由 product 负责，复用现有的“记住 API key”存储。
 
-**理由**：客户端贴近 runtime 已有的有界网络/传输层；持久化复用 product 已有的 opt-in 凭据存储（SECURITY-MODEL §10），不新建第二套持久化机制。
+**理由**：客户端贴近 runtime 已有的有界网络/传输层；持久化复用 product 已有的 opt-in 凭据存储（SECURITY-MODEL §10），不新建第二套持久化机制。（存储方式由 opt-in 改为默认保存，见 D12。）
 
 **影响范围**：runtime（MCP 客户端与内存凭据）、product（凭据持久化）、harness（MCP 的组合与审批编排不变）。
 
@@ -138,3 +138,23 @@
 **影响范围**：harness 的 CapabilityManager（增量注册、wheel 负载、skill 实例升级规则）；product 的存储、导入、界面；runtime 删除源码文本合成路径。
 
 **被取代的旧表述**：CAPABILITY-PACKAGE §9（导入只在页面会话内有效）、§10（卸载不是 v1 概念）、§12 中“persistent installed-package catalog”；EXTENSION-MODEL §4 中“legacy `files: {sourceText}` 合成路径”的保留说明；CAPABILITY-BOUNDARIES §11.6 中“page-session only”与“incompatible markers fail loudly and the reset path is Remove + Re-add”。D6 保留的 skill 安装标记机制不变，只改变标记与当前版本不一致时的处理。
+
+## D11
+
+**决定**：官方参考能力（示例能力包）的源码不放在 product，统一放在独立仓库 [boccchi2993/locus-example-capabilities](https://github.com/boccchi2993/locus-example-capabilities)。每个能力一个目录 `capabilities/<id>/`；按能力打 tag `<id>@<version>`，每个 tag 对应一个 Release，附件为确定性构建的 `.locus`。该仓库通过锁定 locus-product 的提交来引用打包代码（`src/capability-package.js`、`src/locus-archive.js`、`src/capability-packages.js` 的 inspect），不复制。product 只保证“能安装任何合法的能力包”，不依赖、也不测试任何具体的能力包；具体能力在真实服务上是否好用，由所有者部署后实测。
+
+**理由**：能力的发布节奏和 product 不同；官方能力放在独立仓库，为第三方能力仓库提供样板；避免 product 与具体能力耦合。用一个仓库放多个能力，降低多仓库的维护和协作开销；某个能力需要独立时，可以用 `git subtree split` 带着历史拆出去。
+
+**影响范围**：新仓库 locus-example-capabilities；product（不再收录能力源码；上述打包模块成为被外部锁定引用的接口，修改它们的导出时须在 PR 中注明）；三个仓库的 AGENTS.md 增加第四个仓库的地址。
+
+**被取代的旧表述**：docs/C3-CREDENTIALS-MCP.md §8、§9 中“C3-P2 在 product 中实现参考能力包”的表述。
+
+## D12
+
+**决定**：用户为已安装的能力或 MCP 服务器连接的凭据，默认保存在本设备（opt-out）。范围包括：手动输入的 API key（C3 凭据绑定）、MCP bearer token、MCP OAuth 的 access token / refresh token 以及客户端注册信息。连接界面保留“不在本设备保存”的选项，并写明“保存在本设备浏览器中”。断开连接、卸载能力、重置全部数据时，删除对应的凭据；OAuth 凭据在服务器提供撤销接口时同时撤销。模型 API key 的“在本设备记住”同样默认勾选。凭据仍然一律不进入模型可达的范围（D2 不变）。
+
+**理由**：导入或添加能力本身就表明用户想长期使用它，凭据是能力能工作的必要部分；默认不保存只会让用户每次刷新都重新连接。持久化不改变“模型 vs 宿主”这条安全边界（D1），新增的风险只是凭据以明文存放在本设备浏览器中，与已记住的模型 key 相同。
+
+**影响范围**：product（凭据服务与模型 key 的默认值、连接界面文案、导入流程）；第二阶段 MCP 客户端（OAuth token 的保存、刷新与撤销）。
+
+**被取代的旧表述**：D3 及 docs/SECURITY-MODEL.md §10 中凭据存储为“opt-in”、“API keys are not persisted by default”的表述，被本条取代。

@@ -179,6 +179,8 @@ curl -X POST https://api.deepseek.com/v1/tools/search \
 
 ## 8. 参考能力包 `deepseek-web`
 
+> 已被 [DECISIONS.md D11](DECISIONS.md#d11) 取代：参考能力包在 locus-example-capabilities 仓库中实现；product 不收录其源码，也不为它写浏览器端到端测试。
+
 - `capability.json`：一个 skill，一个凭据声明（§3.1），无 plugin，无 MCP。
 - skill 要点：
   - 两个接口的 curl 写法：Search `POST /v1/tools/search`，Fetch `POST /v1/tools/fetch`。
@@ -200,6 +202,8 @@ curl -X POST https://api.deepseek.com/v1/tools/search \
 | C3-H1 | harness | `capability.json` 的 `credentials` 校验；manager 快照中的凭据状态；`approval.js` 的 `persistent` scope 与持久授权端口 | 无 |
 | C3-P1 | product | 文档：D4 改写、D1 释义、APPROVALS、CAPABILITY-INSTALL §4；首次安装自动启用；凭据绑定存储（复用已记住凭据存储）、Connect / Disconnect UI、`needs-reconfirm`；持久授权存储与“始终允许的操作”列表；`functions/fetch.js` 支持 `redirect: "manual"`；把 `credentials` 端口接进 curl；升级 runtime / harness 锁定版本 | C3-R1、C3-H1 |
 | C3-P2 | product | `deepseek-web` 参考能力包、浏览器 gate、Release 资产 | C3-P1 |
+
+> 已被 [DECISIONS.md D11](DECISIONS.md#d11) 取代：参考能力包在 locus-example-capabilities 仓库中实现；product 不收录其源码，也不为它写浏览器端到端测试。
 
 C3-R1 和 C3-H1 可以并行。runtime 的 mkdir 残留修复已单独发出，与本文无关。
 
