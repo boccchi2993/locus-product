@@ -67,7 +67,11 @@ Image support is a compatibility decision, not an authority grant. Provider/mode
 
 ## 10. Secrets
 
-API keys are not persisted by default. Opt-in storage is destination-aware and separate from conversation/provider history.
+API keys are not persisted by default.
+
+> Superseded by [DECISIONS.md D12](DECISIONS.md#d12) (2026-10-23): credentials the user connects — capability credentials, MCP tokens, and the model API key — are saved on this device by default (opt-out), still never reachable by the model.
+
+Opt-in storage is destination-aware and separate from conversation/provider history.
 
 ## 11. Explicit non-claims
 
