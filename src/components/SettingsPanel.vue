@@ -134,6 +134,47 @@
               </button>
             </div>
           </template>
+          <template v-else-if="importCommit">
+            <!-- C3 O1: the commit succeeded but the first-install
+                 auto-enable failed — the package stays installed and
+                 disabled, and the reason is shown instead of a silent
+                 "done". -->
+            <div class="capability-import-title">Package imported, but it could not be enabled</div>
+            <div class="hint"><span class="mono">{{ importCommit.id }}</span> is installed and disabled.</div>
+            <div class="hint storage-notice" data-testid="capability-import-enable-error">{{ importCommit.enableError }}</div>
+            <div class="capability-row capability-import-actions">
+              <button class="rail-btn" type="button" data-testid="capability-import-cancel" @click="cancelCapabilityImport()">Close</button>
+            </div>
+          </template>
+        </div>
+
+        <!-- C3 §3.2: the Connect dialog. One at a time. The send rule is
+             restated above the input (plain text); the value lives in one
+             ref that is cleared when the dialog closes — it never reaches
+             the store, storage or any error message. -->
+        <div v-if="credDialog" class="capability-import-dialog" :data-testid="'credential-dialog-' + credDialog.name">
+          <div class="capability-import-title">Connect credential</div>
+          <div class="hint">{{ credentialSendLine(dialogCredential) }}</div>
+          <div class="field">
+            <label :for="'credential-key-input-' + credDialog.name">Key</label>
+            <input
+              :id="'credential-key-input-' + credDialog.name"
+              v-model="credDialogKey"
+              type="password"
+              :data-testid="'credential-input-' + credDialog.name"
+              spellcheck="false" autocomplete="off">
+          </div>
+          <label class="check-row">
+            <input v-model="credDialogRemember" type="checkbox" :data-testid="'credential-remember-' + credDialog.name">
+            Remember on this device
+          </label>
+          <div v-if="credDialog.error" class="hint storage-notice" :data-testid="'credential-dialog-error-' + credDialog.name">
+            {{ credDialog.error }}
+          </div>
+          <div class="capability-row capability-import-actions">
+            <button class="rail-btn" type="button" :data-testid="'credential-cancel-' + credDialog.name" @click="closeCredentialDialog">Cancel</button>
+            <button class="rail-btn" type="button" :disabled="credDialog.busy" :data-testid="'credential-confirm-' + credDialog.name" @click="confirmCredentialConnect">Connect</button>
+          </div>
         </div>
 
         <!-- Unsupported core: everything below is hidden -->
@@ -239,6 +280,49 @@
                 :data-testid="'capability-connect-' + c.id" @click="connectMcp(c, m)">Connect</button>
             </div>
           </template>
+          <!-- C3 §3.2: this capability's credentials, in EVERY state
+               (added, removed, enable-failed). Values are never rendered:
+               a connected row shows only the last 4 characters that
+               credentials.summary reports; every string here goes through
+               text interpolation. -->
+          <div v-for="cred in (credentialViews[c.id] || [])" :key="cred.name" class="cred-item"
+            :data-testid="'credential-' + cred.name">
+            <div class="capability-row cred-row">
+              <span class="cred-label">{{ cred.label }}</span>
+              <span class="mono">${{ cred.name }}</span>
+              <span class="capability-state" :data-state="cred.decl.state"
+                :data-testid="'credential-state-' + cred.name">{{ cred.stateLabel }}</span>
+              <button v-if="cred.decl.state === 'needs-connection'" class="rail-btn" type="button"
+                :disabled="store.busy || store.cancelling"
+                :data-testid="'credential-connect-' + cred.name" @click="openCredentialDialog(cred)">Connect</button>
+              <template v-if="cred.decl.state === 'connected'">
+                <button v-if="credDisconnectArm !== cred.name" class="rail-btn danger" type="button"
+                  :disabled="store.busy || store.cancelling"
+                  :data-testid="'credential-disconnect-' + cred.name"
+                  @click="credDisconnectArm = cred.name">Disconnect</button>
+                <button v-else class="rail-btn danger" type="button" :disabled="store.busy || store.cancelling"
+                  :data-testid="'credential-disconnect-confirm-' + cred.name"
+                  @click="disconnectCredentialNow(cred.name)">Confirm disconnect</button>
+              </template>
+              <template v-if="cred.decl.state === 'needs-reconfirm'">
+                <button class="rail-btn" type="button" :disabled="store.busy || store.cancelling"
+                  :data-testid="'credential-reconfirm-' + cred.name"
+                  @click="reconfirmCredentialNow(cred.name)">Confirm</button>
+                <button v-if="credDisconnectArm !== cred.name" class="rail-btn danger" type="button"
+                  :disabled="store.busy || store.cancelling"
+                  :data-testid="'credential-disconnect-' + cred.name"
+                  @click="credDisconnectArm = cred.name">Disconnect</button>
+                <button v-else class="rail-btn danger" type="button" :disabled="store.busy || store.cancelling"
+                  :data-testid="'credential-disconnect-confirm-' + cred.name"
+                  @click="disconnectCredentialNow(cred.name)">Confirm disconnect</button>
+              </template>
+            </div>
+            <div class="hint" :data-testid="'credential-sendline-' + cred.name">{{ credentialSendLine(cred.decl) }}</div>
+            <div v-if="cred.decl.state === 'needs-reconfirm'" class="hint"
+              :data-testid="'credential-old-binding-' + cred.name">
+              Confirmed earlier as: {{ credentialOldLine(cred.name) }}
+            </div>
+          </div>
           <!-- The installed package this capability came from (D10): shown
                here INSTEAD of a separate installed-list entry. Everything it
                renders is untrusted package metadata via text interpolation. -->
@@ -257,10 +341,34 @@
               Uninstall deletes this package from Locus. The package is removed; its guidance files under
               /home/locus/.skills/{{ loadedPackagesById[c.id].id }}/ are kept.
             </div>
+            <!-- C3 §3.2: uninstalling removes the capability's bindings and
+                 keys — stated only when the capability declares any. -->
+            <div v-if="uninstallArmId === c.id && (c.credentials || []).length" class="hint"
+              data-testid="capability-uninstall-credentials-warning">
+              Connected credentials of this capability will be removed.
+            </div>
             <div class="hint">Author (self-declared): {{ loadedPackagesById[c.id].author }}</div>
             <div v-if="loadedPackagesById[c.id].purpose" class="hint">Purpose: {{ loadedPackagesById[c.id].purpose }}</div>
           </div>
         </div>
+      </section>
+
+      <section class="storage-controls" data-testid="always-allowed-section">
+        <div class="section-label">Always allowed</div>
+        <div v-if="!store.persistentApprovalsSupported" class="hint" data-testid="always-allowed-unsupported">
+          This Locus core does not support always-allowed approvals.
+        </div>
+        <template v-else>
+          <div v-if="!store.alwaysAllowed.length" class="hint" data-testid="always-allowed-empty">
+            Nothing is always allowed.
+          </div>
+          <div v-for="(g, i) in store.alwaysAllowed" :key="g.policyKey" class="capability-row cred-row"
+            :data-testid="'always-allowed-item-' + i">
+            <span class="hint">{{ g.label }}</span>
+            <button class="rail-btn danger" type="button" :data-testid="'always-allowed-remove-' + i"
+              @click="removeAlwaysAllowed(g.policyKey)">Remove</button>
+          </div>
+        </template>
       </section>
 
       <section class="storage-controls">
@@ -308,8 +416,11 @@ import {
   confirmCapabilityImport as confirmImportAction, cancelCapabilityImport,
   acceptCapabilityPackageMismatch, dismissCapabilityPackageNotice,
   uninstallCapabilityPackage,
+  connectCredential, disconnectCredential, reconfirmCredential,
+  credentialSummary, credentialBindingRecord,
+  refreshAlwaysAllowed, revokeAlwaysAllowed,
 } from '../ui/store.js';
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 
 const storageSummary = computed(() => {
   const s = store.storageStatus;
@@ -399,7 +510,142 @@ function connectMcp(c, m) {
   }
 }
 
-onMounted(() => { refreshImageCapability(); refreshCapabilityPackages(); });
+// ---------- capability credentials (C3 §3.2; C3-P1b UI) ----------
+// View models for one capability's credentials. The manager snapshot is
+// re-synced after every state-changing action, so this computed re-runs on
+// each connect/disconnect/reconfirm/restore; the summary's last-4 comes
+// from the credential service, never from a stored value.
+const credentialViews = computed(() => {
+  const map = {};
+  for (const c of store.capabilities) {
+    map[c.id] = (c.credentials || []).map((decl) => {
+      const s = credentialSummary(decl.name);
+      let stateLabel;
+      if (decl.state === 'connected') {
+        stateLabel = s.last4 ? 'Connected ····' + s.last4 : 'Connected';
+      } else if (decl.state === 'needs-reconfirm') {
+        stateLabel = 'Needs reconfirmation';
+      } else {
+        stateLabel = 'Not connected';
+      }
+      return { name: decl.name, label: decl.label, decl, stateLabel };
+    });
+  }
+  return map;
+});
+
+// The send rule, stated the same way in the row and the Connect dialog.
+// Scheme null means the header value IS the key — no "Bearer …" shown.
+function credentialSendLine(decl) {
+  if (!decl) return '';
+  return 'Only sent to ' + decl.origin + decl.pathPrefix + ' as ' + decl.header
+    + (decl.scheme ? ': ' + decl.scheme + ' …' : '');
+}
+
+// Old-binding line for a needs-reconfirmation row, read from the durable
+// binding record (metadata only).
+const credentialOldBindings = ref({});
+watch(() => store.capabilities, (caps) => {
+  for (const c of caps) {
+    for (const decl of (c.credentials || [])) {
+      if (decl.state === 'needs-reconfirm' && !credentialOldBindings.value[decl.name]) {
+        credentialBindingRecord(decl.name).then((record) => {
+          credentialOldBindings.value = Object.assign({}, credentialOldBindings.value, {
+            [decl.name]: record,
+          });
+        }).catch(() => {});
+      }
+    }
+  }
+}, { immediate: true });
+
+function credentialOldLine(name) {
+  const record = credentialOldBindings.value[name];
+  if (!record) return 'unavailable';
+  return credentialSendLine(record);
+}
+
+// The ONE Connect dialog. The key lives in a single ref, cleared on every
+// close — it is never copied into the store, storage or an error message.
+const credDialog = ref(null); // { name, error, busy } | null
+const credDialogKey = ref('');
+const credDialogRemember = ref(false);
+
+const dialogCredential = computed(() => {
+  if (!credDialog.value) return null;
+  const name = credDialog.value.name;
+  for (const c of store.capabilities) {
+    const decl = (c.credentials || []).find((x) => x.name === name);
+    if (decl) return decl;
+  }
+  return null;
+});
+
+function openCredentialDialog(cred) {
+  credDialogKey.value = '';
+  credDialogRemember.value = false;
+  credDialog.value = { name: cred.name, error: null, busy: false };
+}
+
+function closeCredentialDialog() {
+  credDialog.value = null;
+  credDialogKey.value = ''; // the value never survives the dialog
+  credDialogRemember.value = false;
+}
+
+async function confirmCredentialConnect() {
+  const dialog = credDialog.value;
+  if (!dialog || dialog.busy) return;
+  dialog.busy = true;
+  dialog.error = null;
+  try {
+    await connectCredential(dialog.name, credDialogKey.value, { remember: credDialogRemember.value });
+    closeCredentialDialog();
+    refreshCapabilities();
+  } catch (e) {
+    dialog.error = e.message || String(e);
+    dialog.busy = false;
+  }
+}
+
+// Two-step destructive confirmation, shared by the connected and
+// needs-reconfirmation rows (fixed UI copy).
+const credDisconnectArm = ref(null);
+
+async function disconnectCredentialNow(name) {
+  try {
+    await disconnectCredential(name);
+    refreshCapabilities();
+  } catch (e) {
+    store.storageNotice = e.message || String(e);
+  } finally {
+    credDisconnectArm.value = null;
+  }
+}
+
+async function reconfirmCredentialNow(name) {
+  try {
+    await reconfirmCredential(name);
+    refreshCapabilities();
+  } catch (e) {
+    store.storageNotice = e.message || String(e);
+  }
+}
+
+// ---------- "Always allowed" (C3 §6) ----------
+async function removeAlwaysAllowed(policyKey) {
+  try {
+    await revokeAlwaysAllowed(policyKey);
+  } catch (e) {
+    store.storageNotice = e.message || String(e);
+  }
+}
+
+onMounted(() => {
+  refreshImageCapability();
+  refreshCapabilityPackages();
+  refreshAlwaysAllowed();
+});
 
 async function recheckCapability() {
   try {
@@ -434,6 +680,13 @@ const uninstallArmId = ref(null);
 const importSummary = computed(() => {
   const c = store.capabilityImport;
   return c && c.summary ? c.summary : null;
+});
+
+// C3 O1: a commit that succeeded but could not auto-enable stays in the
+// dialog as a result report ({ id, state, enableError }).
+const importCommit = computed(() => {
+  const c = store.capabilityImport;
+  return c && c.commit ? c.commit : null;
 });
 
 // Local in-flight flag for the confirm button (double-click guard while

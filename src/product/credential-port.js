@@ -5,9 +5,12 @@
 //  tool-execution context (injected beside `authorization`):
 //
 //    bindings()  → [{ name, origin, pathPrefix, header, scheme, state }]
-//                  metadata only, ONLY for ENABLED capabilities; the
-//                  header keeps the declaration's spelling (the runtime
-//                  compares lowercased); scheme is 'Bearer' or null.
+//                  metadata only, ONLY for capabilities whose enable
+//                  RESOLVED (state 'ready' — an enable-failed capability
+//                  is enabled:true with state 'error' and exposes
+//                  nothing); the header keeps the declaration's spelling
+//                  (the runtime compares lowercased); scheme is 'Bearer'
+//                  or null.
 //    value(name) → the in-memory key value; a missing value throws
 //                  (the runtime maps it to network_credential_unavailable).
 //
@@ -27,7 +30,10 @@ export function createProductCredentialPort({ manager, service } = {}) {
     async bindings() {
       const out = [];
       for (const cap of manager.listCapabilities()) {
-        if (!cap.enabled) continue; // disabled capabilities expose nothing
+        // A capability whose enable FAILED is enabled:true with state
+        // 'error' — it contributes nothing to task environments, so its
+        // credentials must not resolve here either.
+        if (!cap.enabled || cap.state !== 'ready') continue;
         for (const c of (cap.credentials || [])) {
           out.push({
             name: c.name,

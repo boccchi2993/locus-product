@@ -18,6 +18,9 @@
 //   CW4  not connected → network_credential_not_connected
 //   CW5  literal key on a bound target is refused
 //        (network_credential_literal_refused)
+//   CW6  an enable-FAILED capability (enabled:true, state 'error') exposes
+//        nothing: its credential is absent from bindings() and a $NAME
+//        reference degrades to network_credential_unknown
 //
 // The relay is stubbed at globalThis.fetch (the runtime POSTs the JSON
 // envelope to the relative /fetch path); the upstream response is a 200.
@@ -65,10 +68,43 @@ const CURL_CMD = 'curl -X POST https://api.example.test/v1/tools/search '
   + '-H "Authorization: Bearer $' + TEST_NAME + '" '
   + "-d '{}'";
 
+// An enable-FAILED capability: its skill cannot materialize (instances:
+// null → "skill instance storage is unavailable"), so enable() records it
+// enabled:true with state 'error'. CW6: such a capability must expose no
+// credentials to the runtime.
+const ERR_NAME = 'ERR_KEY';
+const ERR_VALUE = 'sk-wiring-errvalue99aa';
+const ERR_CAP = {
+  id: 'err-cap',
+  version: '1.0.0',
+  displayName: 'Err Cap',
+  description: 'TEST ONLY enable-failure fixture.',
+  plugins: [],
+  skills: ['err-skill'],
+  mcps: [],
+  credentials: [{
+    name: ERR_NAME,
+    label: 'Err key',
+    description: 'TEST ONLY.',
+    origin: 'https://api.err.test',
+    pathPrefix: '/v1/tools/',
+    header: 'Authorization',
+    scheme: 'Bearer',
+  }],
+};
+
 async function wiredChain() {
   const persistence = new persistenceMod.PersistenceService();
   const manager = new harnessApi.CapabilityManager({
-    catalogs: { capabilities: [CRED_CAP], plugins: [], skills: [], mcps: [] },
+    catalogs: {
+      capabilities: [CRED_CAP, ERR_CAP],
+      plugins: [],
+      // The referenced skill must EXIST in the catalog (constructor-time
+      // reference validation); the enable failure comes from the missing
+      // instance storage, not from the descriptor.
+      skills: [{ id: 'err-skill', version: '1', displayName: 'Err Skill', description: 'TEST ONLY.' }],
+      mcps: [],
+    },
     sources: new harnessApi.SkillSourceStore(),
     instances: null,
   });
@@ -204,6 +240,34 @@ function installRelayStub() {
       JSON.stringify(res5.output.slice(0, 240)));
     check('CW5 the literal value never reached the network',
       envelopes.length === 0 && !res5.output.includes(TEST_VALUE),
+      'envelopes=' + envelopes.length);
+
+    // ---------- CW6: enable-failed capability exposes nothing ----------
+    section('CW6 enable-failed capability (state error) → credential unknown');
+    const errState = await chain.manager.enable('err-cap');
+    check('CW6 setup: the capability enable failed with an error entry',
+      errState === 'error'
+      && chain.manager.listCapabilities().find((c) => c.id === 'err-cap').enabled === true,
+      JSON.stringify(errState));
+    await chain.service.connect(ERR_NAME, ERR_VALUE, { remember: false });
+    const bindings6 = await chain.port.bindings();
+    check('CW6 the failed capability\'s credential is absent from bindings()',
+      !bindings6.some((b) => b.name === ERR_NAME)
+      && bindings6.some((b) => b.name === TEST_NAME),
+      JSON.stringify(bindings6));
+    envelopes.length = 0;
+    const res6 = await chain.toolPort.execute({
+      name: 'bash',
+      input: 'curl -X POST https://api.err.test/v1/tools/search '
+        + '-H "Authorization: Bearer $' + ERR_NAME + '" '
+        + "-d '{}'",
+      context: { filesystem: chain.vfs },
+    });
+    check('CW6 a $NAME reference degrades to unknown (never resolves)',
+      res6.success === false && res6.output.includes('unknown credential: ' + ERR_NAME),
+      JSON.stringify(res6.output.slice(0, 240)));
+    check('CW6 the value never appeared anywhere and nothing was sent',
+      envelopes.length === 0 && !res6.output.includes(ERR_VALUE),
       'envelopes=' + envelopes.length);
   } finally {
     globalThis.fetch = realFetch;

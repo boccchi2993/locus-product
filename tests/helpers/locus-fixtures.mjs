@@ -17,6 +17,9 @@ import { createMemoryWorkspace } from '../../src/product/runtime-api.js';
 //   wheel: Uint8Array|Buffer, wheelFilename,
 //   pythonImports = [],
 // }
+// credentials: [] | [{ name, label, description, origin, pathPrefix,
+//   header, scheme? }] — the C3 §3.1 declarations, copied verbatim into
+//   capability.json (the harness validates them at import).
 export async function buildFixturePackage({
   id,
   version = '1.0.0',
@@ -24,6 +27,7 @@ export async function buildFixturePackage({
   description,
   plugin = null,
   skills = [],
+  credentials = [],
   author = 'e2e-suite',
   purpose = 'TEST ONLY fixture capability package',
 } = {}) {
@@ -47,6 +51,7 @@ export async function buildFixturePackage({
       plugins: pluginIds,
       skills: skillIds,
       mcps: [],
+      ...(credentials.length ? { credentials } : {}),
     },
   };
   await ws.write('capability.json', JSON.stringify(capabilities, null, 2) + '\n');

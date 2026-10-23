@@ -769,6 +769,14 @@ input, select, textarea { font-family: inherit; font-size: inherit; color: inher
 .capability-state[data-state="needs-connection"] { color: var(--warn); border-color: currentColor; }
 .capability-state[data-state="error"] { color: var(--error); border-color: currentColor; }
 
+/* capability credentials (C3 §3.2 settings UI): rows may wrap on narrow
+   panels — buttons must never push the card wider than the modal. */
+.cred-item { padding: 6px 0 2px; }
+.cred-row { flex-wrap: wrap; row-gap: 4px; }
+.cred-label { font-weight: 550; font-size: 13px; }
+.capability-state[data-state="connected"] { color: var(--ok); border-color: currentColor; }
+.capability-state[data-state="needs-reconfirm"] { color: var(--warn); border-color: currentColor; }
+
 /* capability packages (D10 install UI) */
 .capability-import-dialog {
   margin-top: 8px; padding: 10px 12px;

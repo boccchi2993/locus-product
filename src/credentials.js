@@ -324,6 +324,24 @@ export function createCredentialService({ persistence, manager, harness, now } =
     };
   }
 
+  // Read-only view of the durable binding record (§3.2 shape) for the
+  // needs-reconfirmation dialog: the OLD binding lines come from here,
+  // the new ones from the live declaration. Metadata only — never a
+  // value. Null when no record exists.
+  async function bindingRecord(name) {
+    const record = (await loadBindings()).find((b) => b.name === name);
+    if (!record) return null;
+    return {
+      name: record.name,
+      origin: record.origin,
+      pathPrefix: record.pathPrefix,
+      header: record.header,
+      scheme: record.scheme === undefined ? null : record.scheme,
+      confirmedAt: record.confirmedAt,
+      remember: !!record.remember,
+    };
+  }
+
   // Raw value accessor for the credential port (never a UI surface).
   function valueOf(name) {
     const v = values.get(name);
@@ -333,6 +351,6 @@ export function createCredentialService({ persistence, manager, harness, now } =
   return {
     connect, reconfirm, disconnect, restore,
     afterReplace, removeForCapability, clearAll,
-    summary, valueOf,
+    summary, valueOf, bindingRecord,
   };
 }

@@ -29,8 +29,8 @@ const VIEWPORTS = [
 
 // Real-key probe at the last (desktop) viewport: the previous script left
 // the page idle, so leave a long-content approval pending, then verify
-// native Tab walks Deny → Allow once → Allow for this session → OUT of the
-// card (no focus trap), and a real Escape denies.
+// native Tab walks Deny → Allow once → Allow for this session → Always
+// allow (C3 §6) → OUT of the card (no focus trap), and a real Escape denies.
 async function tabProbe(cdp) {
   const out = [];
   const check = (name, cond, detail) =>
@@ -69,11 +69,15 @@ async function tabProbe(cdp) {
     check('T4 native Tab #4 lands on Allow for this session', /Allow for this session/.test(fourth), fourth);
     await pressKey('Tab', 'Tab', 9);
     const fifth = await activeInfo();
-    check('T5 native Tab #5 leaves the card (no focus trap)',
-      !/approval-btn/.test(fifth) && !/approval-card/.test(fifth), fifth);
+    check('T5 native Tab #5 lands on Always allow (C3 durable grant)',
+      /Always allow/.test(fifth), fifth);
+    await pressKey('Tab', 'Tab', 9);
+    const sixth = await activeInfo();
+    check('T6 native Tab #6 leaves the card (no focus trap)',
+      !/approval-btn/.test(sixth) && !/approval-card/.test(sixth), sixth);
     await pressKey('Escape', 'Escape', 27);
     const closed = await evalValue('!document.querySelector(".approval-card")');
-    check('T6 real Escape still denies the approval', closed === true, String(closed));
+    check('T7 real Escape still denies the approval', closed === true, String(closed));
   } catch (error) {
     out.push('FAIL tab probe threw | ' + (error && error.stack || error));
   }

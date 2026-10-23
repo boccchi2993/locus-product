@@ -29,6 +29,10 @@ const SUITES = [
   // and B's python product-integration gate.
   'e2e-m3c-storage-built.cjs',
   'e2e-m3c-python-integration.cjs',
+  // C3 credentials UI + end-to-end (C3-P1b): Connect / Disconnect /
+  // needs-reconfirmation, durable "Always allow" and the leak sweep, over
+  // the REAL built app with the upstream intercepted at the relay.
+  'e2e-credentials.cjs',
 ];
 
 // Resolve requested suite names against the registry. Returns the run list

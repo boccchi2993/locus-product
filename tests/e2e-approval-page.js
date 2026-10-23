@@ -36,8 +36,8 @@
     check('A01 ApprovalCard appears for a pending request', await waitFor(() => !!$('.approval-card')));
     check('A02 card shows fixed title and lead', /Approval required/.test(cardText()) && /Locus wants permission to:/.test(cardText()));
     check('A03 action summary displayed', cardText().includes('Delete stale drafts in /mnt/workspace'));
-    check('A04 fixed permission button set',
-      JSON.stringify(cardButtons()) === JSON.stringify(['Deny', 'Allow once', 'Allow for this session']),
+    check('A04 fixed permission button set (C3: Always allow on a supporting core)',
+      JSON.stringify(cardButtons()) === JSON.stringify(['Deny', 'Allow once', 'Allow for this session', 'Always allow']),
       JSON.stringify(cardButtons()));
     check('A05 summary rendered as TEXT (no injected HTML)', !$('.approval-card .approval-summary')?.firstElementChild);
     check('A06 focus starts on the card container (never on an Allow button)',
