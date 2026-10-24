@@ -158,3 +158,22 @@
 **影响范围**：product（凭据服务与模型 key 的默认值、连接界面文案、导入流程）；第二阶段 MCP 客户端（OAuth token 的保存、刷新与撤销）。
 
 **被取代的旧表述**：D3 及 docs/SECURITY-MODEL.md §10 中凭据存储为“opt-in”、“API keys are not persisted by default”的表述，被本条取代。
+
+## D13
+
+**决定**：能力包中的 Python plugin 可以携带 Pyodide 官方编译的原生 wheel，前提是平台标签与 runtime 的 Pyodide ABI 一致（当前为 `cp312` / `pyodide_2024_0_wasm32`）。规则如下：
+
+1. 一个能力可以包含零个、一个或多个 plugin；每个 plugin 恰好一个 wheel，不自动安装依赖。能力必须自带完整的依赖闭包（runtime 预装的包除外），plugins 列表按依赖顺序排列；同一个 Python 发行包在不同能力中使用相同的 plugin id 和相同的 wheel 时，视为同一组件，只安装一次。
+2. 不得携带 runtime 已预装的包（当前为 pandas 依赖闭包、micropip、packaging）。
+3. 导入检查时校验平台标签：必须是纯 Python（`*-none-any`）或与当前 runtime ABI 一致，否则拒绝，并写明需要的 ABI。
+4. 官方参考能力中的原生 wheel，构建时 sha256 必须与固定版本 Pyodide 官方 `pyodide-lock.json` 的记录一致；纯 Python wheel 必须与 PyPI 公布的摘要一致。
+5. 示例仓库中，同一个 Python 发行包统一使用 plugin id `py-<规范化包名>`（例如 `py-lxml`），以便多个能力共享同一个组件。
+6. 原生代码与纯 Python 运行在同一个 worker 中，权限不变：网络拦截、CSP、凭据隔离一律照旧。
+
+**理由**：2026-10-23 本机实验：lxml 5.2.1、Pillow 10.2.0（Pyodide 官方 wheel，无共享库依赖）及 python-docx、python-pptx、XlsxWriter、typing_extensions 共 6 个 wheel，通过现有 plugin 安装路径全部安装成功；生成的 docx、pptx、jpeg 均能正常打开；冷启动增加约 1.3 秒，体积约 10 MB；网络拦截（js.fetch、pyfetch）依然有效、探针 0 请求。这样 runtime 预装包保持精简，只有用到这些能力的用户才承担额外体积。
+
+**影响范围**：runtime（导出 Pyodide 版本、ABI 和预装包清单）；product（导入检查增加平台标签与预装包遮盖检查）；locus-example-capabilities（wheel 来源核验、依赖顺序检查）。Pyodide 升级后，带原生 wheel 的能力需要重新构建。
+
+**批准**：2026-10-24 所有者批准。
+
+**被取代的旧表述**：无（D10 中“plugin 以校验过的 wheel 字节进入 Python”不变，本条只补充 wheel 的平台范围与来源规则）。
