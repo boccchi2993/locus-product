@@ -47,6 +47,7 @@ const RUNTIME_OK = () => Object.freeze({
   executionKinds: ['shell', 'python'],
   bootstrap: { shaPinned: true },
   policyMechanisms: ['mutationPolicy', 'authorization'],
+  pythonAbiExport: true,
   commands: ['cat', 'echo', 'grep'],
   limits: { shellPipeMaxBytes: 1048576 },
 });
@@ -335,6 +336,27 @@ const pass = () => checkCoreCompatibility({
         && typeof credsRule.rule === 'string' && /credential/i.test(credsRule.rule)
         && typeof grantsRule.rule === 'string' && /allow/i.test(grantsRule.rule),
       JSON.stringify(c3sparse.optional));
+  }
+  // D13: pythonAbiExport is an OPTIONAL runtime capability — a runtime
+  // that declares without it degrades the capability-package import
+  // checks to pure-Python wheels only (explicit rule, never silent).
+  {
+    const d13sparse = checkCoreCompatibility({
+      runtime: (() => {
+        const r = JSON.parse(JSON.stringify(RUNTIME_OK()));
+        delete r.pythonAbiExport; return r;
+      })(),
+      harness: HARNESS_OK(),
+      requirements: PRODUCT_CORE_REQUIREMENTS,
+    });
+    const abiRule = PRODUCT_CORE_REQUIREMENTS.runtime.optionalCapabilities
+      .find((o) => o.capability === 'pythonAbiExport');
+    check('CC6d a missing pythonAbiExport is listed with its pure-Python degrade rule',
+      d13sparse.compatible === true
+        && d13sparse.optional.runtime.missing.includes('pythonAbiExport')
+        && !!abiRule && typeof abiRule.rule === 'string'
+        && abiRule.rule.includes('this runtime does not declare its Python ABI'),
+      JSON.stringify(d13sparse.optional));
   }
 }
 

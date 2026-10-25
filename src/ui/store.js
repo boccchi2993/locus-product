@@ -146,6 +146,15 @@ const capabilityPackages = PersistenceServiceInstance
     manager: capabilityManager,
     now: () => new Date().toISOString(),
     credentials,
+    // D13 §3: the retained runtime host's declaration gates native-wheel
+    // acceptance. Read lazily at analyze time — the host resolves lazily
+    // (or via the hooks seam); ensureRuntimeSession() resolves a hooks
+    // declaration synchronously so a foreign runtime without the
+    // pythonAbiExport capability degrades even before its first task.
+    runtimeDeclaration: () => {
+      ensureRuntimeSession();
+      return runtimeCapabilitiesDeclaration();
+    },
   })
   : null;
 

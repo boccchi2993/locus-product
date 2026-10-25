@@ -21,7 +21,8 @@
 //
 //  Diagnostics are data, never throws: { code, path, message } with
 //  codes capability_closed_list / capability_build /
-//  capability_unexpected_files / capability_identity plus the
+//  capability_unexpected_files / capability_identity /
+//  capability_wheel_platform / capability_wheel_shadows_runtime plus the
 //  container's locus_* codes.
 // ============================================================
 
@@ -30,7 +31,9 @@ import {
   repinManifest, appendChangelogEntry, writeLocusArchive, expectedPackagePaths, LOCUS_LIMITS,
 } from './locus-archive.js';
 import { buildProject } from './capability-package.js';
-import { createMemoryWorkspace } from './product/runtime-api.js';
+import {
+  createMemoryWorkspace, PYTHON_RUNTIME_PACKAGES, wheelPlatformCompatible, normalizeDistName,
+} from './product/runtime-api.js';
 
 // At most this many inspect results wait for their user confirmation;
 // the oldest is dropped first (the UI asks the user to inspect again).
@@ -47,7 +50,7 @@ function randomToken() {
   return 'tok-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
 }
 
-export function createCapabilityPackages({ persistence, manager, now, credentials }) {
+export function createCapabilityPackages({ persistence, manager, now, credentials, runtimeDeclaration }) {
   if (!persistence) throw new Error('createCapabilityPackages requires a persistence port');
   if (!manager) throw new Error('createCapabilityPackages requires a CapabilityManager');
   const clock = typeof now === 'function' ? now : () => new Date().toISOString();
@@ -57,6 +60,23 @@ export function createCapabilityPackages({ persistence, manager, now, credential
   // packages with credentials still install, their credentials simply
   // stay unresolved.
   const credentialService = credentials || null;
+  // D13 §3: the runtime's pythonAbiExport capability gates native-wheel
+  // acceptance. The thunk is read lazily at analyze time (the retained
+  // runtime host resolves lazily, after boot). Degradation is defined
+  // against an EXISTING declaration that lacks the capability (the M2c
+  // optional-capability semantics): a foreign runtime generation that
+  // declares without pythonAbiExport refuses native wheels. A NOT-YET
+  // resolvable declaration is not a degradation — the wheels can only
+  // ever execute under the statically pinned runtime core, whose ABI
+  // exports (PYTHON_ABI / wheelPlatformCompatible above) ship with the
+  // same package that builds the Python worker.
+  const readRuntimeDeclaration = typeof runtimeDeclaration === 'function' ? runtimeDeclaration : null;
+
+  function pythonAbiDeclared() {
+    const decl = readRuntimeDeclaration ? readRuntimeDeclaration() : null;
+    if (!decl) return true;
+    return decl.pythonAbiExport === true;
+  }
 
   // token -> { id, version, kind, files, manifest, body, mismatched,
   //            pkgInput, components, needsMismatchAcceptance, existing }
@@ -116,6 +136,44 @@ export function createCapabilityPackages({ persistence, manager, now, credential
         'manifest identity ' + JSON.stringify(manifest.id + '@' + manifest.version)
         + ' does not match capability.json ' + JSON.stringify(lock.capability.id + '@' + lock.capability.version))] };
     }
+
+    // D13 §2/§3 wheel import checks (after buildProject, before the
+    // register input is assembled). Package v1: exactly one python-wheel
+    // per plugin. Any diagnostic rejects the whole package.
+    const abiDeclared = pythonAbiDeclared();
+    const wheelDiagnostics = [];
+    for (const p of lock.plugins) {
+      const a = p.artifacts[0];
+      const filename = a.path.split('/').pop();
+      // §3 platform tags: pure Python (filename ending -none-any.whl) is
+      // always accepted; a native wheel additionally requires the runtime
+      // to declare (and match) its Python ABI — without the declaration
+      // the check degrades fail-closed to pure-Python-only.
+      if (!/-none-any\.whl$/.test(filename)) {
+        if (!abiDeclared) {
+          wheelDiagnostics.push(diagnostic('capability_wheel_platform', a.path,
+            'this runtime does not declare its Python ABI; only pure Python wheels'
+            + ' (abi none, platform any) are accepted'));
+        } else {
+          const plat = wheelPlatformCompatible(filename);
+          if (!plat.ok) {
+            wheelDiagnostics.push(diagnostic('capability_wheel_platform', a.path, plat.reason));
+          }
+        }
+      }
+      // §2 a package must not carry a wheel for a distribution the runtime
+      // already preloads. Wheel filenames escape the dist name (PEP 427),
+      // so it never contains '-': the first dash-separated segment IS the
+      // dist name, normalized the same way as PYTHON_RUNTIME_PACKAGES.
+      const dash = filename.indexOf('-');
+      const dist = dash > 0 ? normalizeDistName(filename.slice(0, dash)) : null;
+      if (dist && PYTHON_RUNTIME_PACKAGES.includes(dist)) {
+        wheelDiagnostics.push(diagnostic('capability_wheel_shadows_runtime', a.path,
+          'the wheel installs ' + dist + ', but the runtime already provides it'
+          + ' (a capability package must not carry a runtime-preloaded distribution)'));
+      }
+    }
+    if (wheelDiagnostics.length) return { ok: false, diagnostics: wheelDiagnostics };
 
     // The manager's registerPackage input (§6): wheel bytes under the
     // plugin id, default skill text under the skill id.
@@ -431,6 +489,15 @@ export function createCapabilityPackages({ persistence, manager, now, credential
     }
     if (!a.ok) {
       const codes = a.diagnostics.map((d) => d.code);
+      // D13 §2/§3 at boot: a wheel-platform or shadowing rejection keeps
+      // the package installed and unregistered (never deleted); the
+      // notice carries the per-artifact reasons.
+      if (codes.some((c) => c === 'capability_wheel_platform'
+        || c === 'capability_wheel_shadows_runtime')) {
+        return { status: 'corrupt', message: 'package content failed verification: '
+          + a.diagnostics.map((d) => d.code + (d.path ? ' at ' + d.path : '')
+            + (d.message ? ' (' + d.message + ')' : '')).join('; ') };
+      }
       const fatal = codes.some((c) => c === 'capability_closed_list' || c === 'capability_build'
         || c === 'capability_unexpected_files' || c === 'capability_identity');
       if (fatal) return { status: 'corrupt', message: 'package content failed verification: ' + codes.join(', ') };

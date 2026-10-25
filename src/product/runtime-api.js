@@ -8,11 +8,16 @@
 //  code goes through this file — no `locus-runtime/…` specifier may
 //  appear anywhere else in product code.
 //
-//  Export surface (locus-runtime @ 2435a57, verified against the
+//  Export surface (locus-runtime @ aca6c2f, verified against the
 //  installed package's real entries — disjoint surfaces, so `export *`
 //  is collision-free):
 //    locus-runtime            createRuntime, createWorkspace,
-//                             createMemoryWorkspace, shellCommandNames
+//                             createMemoryWorkspace, shellCommandNames,
+//                             PYODIDE_VERSION, PYTHON_ABI,
+//                             PYTHON_RUNTIME_PACKAGES,
+//                             wheelPlatformCompatible, normalizeDistName
+//                             (the Python ABI identity exports flow to the
+//                             D13 capability-package import checks — D13 §3)
 //    locus-runtime/workspace  LocalDirectoryWorkspace, OPFSWorkspace,
 //                             WorkspaceAdapter, ensureWorkspacePermission,
 //                             normalizeWorkspacePath, vfsError
