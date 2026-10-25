@@ -122,6 +122,8 @@ over the real fixture project `tests/fixtures/capability-package/minimal`.
   capability (unreferenced components and missing local MCP metadata
   for referenced requirements are rejected).
 
+> 平台范围与来源规则见 [DECISIONS.md D13](DECISIONS.md#d13)：允许与 runtime ABI 一致的 Pyodide 官方原生 wheel；一个能力可以有多个 plugin，每个 plugin 恰好一个 wheel。
+
 ### 2b.3 Path rules
 
 Author-supplied paths must be POSIX-style relatives under the project:
