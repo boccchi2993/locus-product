@@ -60,6 +60,7 @@ import { LocusMutationPolicy } from '../mutation-policy.js';
 import { AttachmentStore, imageContentPart, textContentPart } from '../attachments.js';
 import { PersistenceServiceInstance, LOCUS_HOME_SKELETON } from '../persistence.js';
 import { createCapabilityPackages } from '../capability-packages.js';
+import { createImportReports } from '../capability-import-reports.js';
 import { createCredentialService } from '../credentials.js';
 import { createProductCredentialPort } from '../product/credential-port.js';
 import { SkillInstanceStorage, SkillInstanceWorkspace, productTaskVfsMounts } from '../extensions.js';
@@ -371,6 +372,51 @@ const productCredentialPort = credentials
   ? createProductCredentialPort({ manager: capabilityManager, service: credentials })
   : undefined;
 
+// ---------- C4 §2.4: the capability import reports ----------
+// One JSON report per import attempt under /home/locus/capability-imports/
+// (the model reads them over bash and reacts to the diagnostics). The
+// provider is resolved lazily — memory before boot, OPFS after — and a
+// failed report write lands in the persistence-issue report; reporting
+// never breaks the import it describes.
+const importReports = createImportReports({
+  resolveHome: () => {
+    const r = vfs.resolveMount('/home/locus');
+    return r ? r.provider : null;
+  },
+  now: () => new Date(),
+  noteError: (e, operation) => reportPersistenceIssue(e, operation),
+});
+
+// record() already swallows write failures; the wrapper is belt-and-braces
+// so nothing on this path can ever reject into the import flow.
+async function recordImportReport(report) {
+  try {
+    await importReports.record(report);
+  } catch (e) {
+    reportPersistenceIssue(e, 'capability import report could not be written');
+  }
+}
+
+// The §2.4 inspect-stage body: a checked result (ok, id/version/kind) or a
+// refusal/throw (ok false + diagnostics). Structural facts only — the
+// summary's commit token and every credential value stay out by
+// construction.
+function inspectReportBody(source, label, result, errorMessage) {
+  const ok = !errorMessage && !!result && result.ok === true;
+  return {
+    source,
+    label,
+    stage: 'inspect',
+    ok,
+    ...(ok ? { id: result.id, version: result.version, kind: result.kind } : {}),
+    diagnostics: errorMessage
+      ? [{ code: 'capability_import_failed', path: '', message: errorMessage }]
+      : (ok ? [] : (result && result.diagnostics) || []),
+    result: null,
+    userAction: null,
+  };
+}
+
 // ---------- the import dialog + installed-list UI state (C1-P3) ----------
 // Both entry points — the settings panel and the /mnt/download list —
 // share ONE in-flight import: store.capabilityImport is
@@ -383,6 +429,7 @@ const productCredentialPort = credentials
 //        connect-credentials step opens when connectStep is true (the key
 //        values live ONLY in the panel's local refs, never here)
 export async function beginCapabilityImportFromBytes(bytes, label) {
+  let report;
   try {
     const result = await inspectCapabilityPackage(bytes);
     if (result.ok) {
@@ -390,17 +437,21 @@ export async function beginCapabilityImportFromBytes(bytes, label) {
     } else {
       store.capabilityImport = { source: 'file', label, diagnostics: result.diagnostics };
     }
+    report = inspectReportBody('file', label, result, null);
   } catch (e) {
     store.capabilityImport = {
       source: 'file',
       label,
       diagnostics: [{ code: 'capability_import_failed', path: '', message: e.message }],
     };
+    report = inspectReportBody('file', label, null, e.message);
   }
+  await recordImportReport(report);
 }
 
 export async function beginCapabilityImportFromPath(vfsPath) {
   const p = String(vfsPath || '');
+  let report;
   try {
     const result = await inspectCapabilityPackageFromPath(p);
     if (result.ok) {
@@ -408,13 +459,16 @@ export async function beginCapabilityImportFromPath(vfsPath) {
     } else {
       store.capabilityImport = { source: 'path', label: p, diagnostics: result.diagnostics };
     }
+    report = inspectReportBody('path', p, result, null);
   } catch (e) {
     store.capabilityImport = {
       source: 'path',
       label: p,
       diagnostics: [{ code: 'capability_import_failed', path: '', message: e.message }],
     };
+    report = inspectReportBody('path', p, null, e.message);
   }
+  await recordImportReport(report);
 }
 
 // D12: the credentials of JUST-committed capability that are still in the
@@ -461,13 +515,70 @@ export async function confirmCapabilityImport() {
     } else {
       store.capabilityImport = null;
     }
+    // C4 §2.4: the commit report goes out as soon as the dialog state is
+    // settled — it exists by the time the dialog closes (state / enabled /
+    // enableError; `unchanged` same-version commits carry a bare state).
+    await recordImportReport({
+      source: current.source,
+      label: current.label,
+      stage: 'commit',
+      ok: true,
+      id: summary.id,
+      version: summary.version,
+      kind: summary.kind,
+      diagnostics: [],
+      result: commit
+        ? {
+          state: commit.state,
+          enabled: commit.enabled === undefined ? null : commit.enabled,
+          enableError: commit.enableError || null,
+        }
+        : null,
+      userAction: 'confirmed',
+    });
     await refreshCapabilityPackages();
   } catch (e) {
-    store.capabilityImport = { ...current, error: e.message || String(e) };
+    const message = e.message || String(e);
+    store.capabilityImport = { ...current, error: message };
+    // C4 §2.4: the commit threw (including the running-task guard) — the
+    // user DID confirm, so the report keeps userAction 'confirmed' with
+    // ok false and the failure diagnostic.
+    await recordImportReport({
+      source: current.source,
+      label: current.label,
+      stage: 'commit',
+      ok: false,
+      id: summary.id,
+      version: summary.version,
+      kind: summary.kind,
+      diagnostics: [{ code: 'capability_commit_failed', path: '', message }],
+      result: null,
+      userAction: 'confirmed',
+    });
   }
 }
 
 export function cancelCapabilityImport() {
+  const current = store.capabilityImport;
+  // C4 §2.4: cancelling the CONFIRM dialog — a passed inspection awaiting
+  // the user's decision — reports userAction 'cancelled' so the model
+  // knows nothing was imported. The refusal dialog and the commit-step
+  // dialogs already reported their stage outcome; closing them is not an
+  // import decision and writes nothing.
+  if (current && current.summary) {
+    void recordImportReport({
+      source: current.source,
+      label: current.label,
+      stage: 'inspect',
+      ok: true,
+      id: current.summary.id,
+      version: current.summary.version,
+      kind: current.summary.kind,
+      diagnostics: [],
+      result: null,
+      userAction: 'cancelled',
+    });
+  }
   store.capabilityImport = null;
 }
 

@@ -33,6 +33,12 @@ const SUITES = [
   // needs-reconfirmation, durable "Always allow" and the leak sweep, over
   // the REAL built app with the upstream intercepted at the relay.
   'e2e-credentials.cjs',
+  // C4 §2.4 capability-import reports (self-contained, own build +
+  // preview + Chrome): the REAL settings-panel import dialog writes one
+  // report per attempt (broken package refusal, commit success, cancelled
+  // confirm), the credential connect step writes none and no report ever
+  // carries the test key, and a REAL task's bash cat reads a report back.
+  'e2e-import-reports.cjs',
 ];
 
 // Resolve requested suite names against the registry. Returns the run list

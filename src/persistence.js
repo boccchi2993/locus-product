@@ -29,6 +29,9 @@ export const LOCUS_HOME_SKELETON = [
   '.skills',
   '.config/locus/mcp',
   '.cache/locus',
+  // C4 §2.4: one JSON import report per import attempt, readable by the
+  // model over bash (the newest 20 are kept).
+  'capability-imports',
 ];
 
 export const PERSISTENCE_STORES = [
