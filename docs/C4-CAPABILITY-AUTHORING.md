@@ -13,6 +13,8 @@
 | --- | --- |
 | A1 | 确定性的工作（校验、打 wheel、打 `.locus`、查看摘要）由一个纯 Python 的 SDK 完成，作为 plugin 随能力分发；不让模型手算哈希、手拼 zip。 |
 | A2 | SDK 与 product / 示例仓库现有的 JS 实现必须**逐字节一致**，由示例仓库 CI 的交叉校验保证。 |
+
+> 2026-10-28：为满足 A2，.locus 写入端改为一律 store（见 CAPABILITY-INSTALL.md）。
 | A3 | product 每次导入（成功或失败）都把结果写到 `/home/locus/capability-imports/`，模型可以读，形成“打包 → 导入 → 读报告 → 修复”的闭环。 |
 | A4 | C5 验收能力为 `reference-text-analysis`（一个 plugin + 一个 skill）。 |
 | A5 | v1 范围：skill、模型自己写的纯 Python plugin、可选的凭据声明。不支持模型自行下载第三方 wheel，不支持 MCP。 |

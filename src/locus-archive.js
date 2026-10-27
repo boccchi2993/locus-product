@@ -11,8 +11,9 @@
 //      validateProject, buildProject) and the harness public surface
 //      (sha256Hex through src/product/harness-api.js). No storage,
 //      no UI, no store.js, no network, no npm dependencies.
-//    - compression/decompression use the platform streams
-//      CompressionStream/DecompressionStream('deflate-raw').
+//    - reading decompresses 'deflate-raw' entries through the
+//      platform DecompressionStream; writing never compresses
+//      (store-only, see Determinism below).
 //
 //  Error discipline (mirrors capability-package.js):
 //    - archive/author faults -> structured diagnostics
@@ -21,8 +22,17 @@
 //      written files, non-string body, non-Map file sets, bad lock).
 //
 //  Determinism: fixed DOS timestamps, LOCUS.md first then path
-//  order, canonical single-line manifest JSON — identical inputs
-//  pack to byte-identical archives.
+//  order, canonical single-line manifest JSON, and store-only
+//  entries — identical inputs pack to byte-identical archives on
+//  every engine (Node, browsers, Python). The writer never deflates
+//  (2026-10-28 owner decision): Node >= 24 and Chromium ship zlib-ng
+//  while CPython ships classic zlib, and the two produce different
+//  'deflate-raw' bytes for the same input (not alignable by
+//  parameters — 180 level/memLevel/strategy combinations tested), so
+//  compressed bytes would depend on which engine wrote the archive.
+//  Stored bytes depend only on the inputs. Reading still accepts
+//  methods 0 and 8, so archives written before this change remain
+//  readable.
 //
 //  ZIP safety rules (readLocusArchive):
 //    - the CENTRAL DIRECTORY is the only entry source; local headers
@@ -190,19 +200,6 @@ async function inflateRawBounded(bytes, { fileCap, totalCap, totalSoFar }) {
   }
   const data = abort || streamError ? null : concatBytes(chunks);
   return { data, count, abort, streamError };
-}
-
-async function deflateRaw(bytes) {
-  const reader = byteStream(bytes)
-    .pipeThrough(new CompressionStream('deflate-raw'))
-    .getReader();
-  const chunks = [];
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-  }
-  return concatBytes(chunks);
 }
 
 // ---------- readLocusArchive ----------
@@ -784,12 +781,12 @@ export async function writeLocusArchive(files, locusMdText) {
   for (const entry of ordered) {
     const nameBytes = TEXT_ENCODER.encode(entry.name);
     const crc = crc32(entry.data);
-    let method = 8;
-    let payload = await deflateRaw(entry.data);
-    if (payload.byteLength >= entry.data.byteLength) {
-      method = 0; // deflate did not shrink — store
-      payload = entry.data;
-    }
+    // Store-only (2026-10-28 owner decision — see the header
+    // comment): every entry is method 0 carrying the raw bytes, so
+    // archive bytes depend only on the inputs, never on the writing
+    // engine's deflate implementation.
+    const method = 0;
+    const payload = entry.data;
     const utf8Flag = /[^\x00-\x7F]/.test(entry.name) ? 0x0800 : 0;
     const local = new Uint8Array(30 + nameBytes.length);
     const dv = new DataView(local.buffer);

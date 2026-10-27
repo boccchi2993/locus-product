@@ -4,8 +4,10 @@
 // closed-manifest verification, repinning, changelog append,
 // LOCUS.md parse/render, the full readLocusArchive diagnostic matrix
 // (hand-built hostile zips — bytes assembled in this file, no zip
-// tooling), bounded zip-bomb abort, truncation safety, and a
-// Python-zipfile-generated archive cross-check.
+// tooling), bounded zip-bomb abort, truncation safety, a
+// Python-zipfile-generated archive cross-check, and store-only
+// writing (LA13: 2026-10-28 owner decision — method 0 everywhere,
+// byte-identical re-writes, old deflate-written archives still read).
 // Run: node tests/locus-archive.test.mjs
 
 import fs from 'node:fs';
@@ -535,6 +537,131 @@ function locusMdWith(jsonText, body = 'Hello\n') {
       && new TextDecoder().decode(r12.files.get('capability.json')).includes('"schemaVersion": 1')
       && new TextDecoder().decode(r12.files.get('skills/demo/SKILL.md')).startsWith('# Demo skill')
       && r12.locusMd.includes('locus-manifest'));
+  }
+
+  // ===================== LA13 store-only writing =====================
+  // 2026-10-28 owner decision: writeLocusArchive never deflates.
+  // Node >= 24 and Chromium ship zlib-ng while CPython ships classic
+  // zlib, and their 'deflate-raw' outputs differ byte-for-byte, so
+  // only store (method 0) keeps archives engine-independent. The
+  // read side is unchanged and still accepts methods 0 and 8
+  // (LA10/LA12 already cover reading deflate entries).
+  startSection('LA13 store-only writing (2026-10-28 owner decision)');
+  {
+    // Central-directory walker — read helpers (buildTestZip above
+    // only writes bytes).
+    const ru16 = (b, o) => b[o] | (b[o + 1] << 8);
+    const ru32 = (b, o) => (b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24)) >>> 0;
+    function centralEntries(bytes) {
+      let eocd = -1;
+      for (let back = 0; back <= Math.min(65535, bytes.length - 22); back++) {
+        const pos = bytes.length - 22 - back;
+        if (ru32(bytes, pos) === 0x06054b50 && ru16(bytes, pos + 20) === back) { eocd = pos; break; }
+      }
+      if (eocd < 0) return null;
+      const total = ru16(bytes, eocd + 10);
+      let off = ru32(bytes, eocd + 16);
+      const out = [];
+      for (let i = 0; i < total; i++) {
+        if (ru32(bytes, off) !== 0x02014b50) return null;
+        const nameLen = ru16(bytes, off + 28);
+        out.push({
+          name: new TextDecoder().decode(bytes.subarray(off + 46, off + 46 + nameLen)),
+          method: ru16(bytes, off + 10),
+          compSize: ru32(bytes, off + 20),
+          uncompSize: ru32(bytes, off + 24),
+          localOffset: ru32(bytes, off + 42),
+        });
+        off += 46 + nameLen + ru16(bytes, off + 30) + ru16(bytes, off + 32);
+      }
+      return out;
+    }
+    // Raw stored payload, located from the local header.
+    function storedPayload(bytes, e) {
+      const nameLen = ru16(bytes, e.localOffset + 26);
+      const extraLen = ru16(bytes, e.localOffset + 28);
+      return bytes.subarray(e.localOffset + 30 + nameLen + extraLen,
+        e.localOffset + 30 + nameLen + extraLen + e.compSize);
+    }
+
+    const files13 = cloneFileMap(read1.files);
+    const locusMd13 = read1.locusMd;
+
+    // LA13a: every entry of a freshly written archive is method 0
+    // with the raw input bytes as the payload.
+    const fresh13 = await LA.writeLocusArchive(files13, locusMd13);
+    const entries13 = centralEntries(fresh13);
+    check('LA13 central directory parses with all entries',
+      Array.isArray(entries13) && entries13.length === files13.size + 1,
+      entries13 ? String(entries13.length) : 'null');
+    check('LA13 LOCUS.md first, then path order (unchanged layout)',
+      !!entries13 && entries13[0].name === 'LOCUS.md'
+      && JSON.stringify(entries13.slice(1).map((e) => e.name))
+        === JSON.stringify([...files13.keys()].sort()));
+    const deflateLeft = (entries13 || []).filter((e) => e.method !== 0 || e.compSize !== e.uncompSize);
+    check('LA13 every entry is method 0 with compSize == uncompSize',
+      deflateLeft.length === 0, JSON.stringify(deflateLeft.map((e) => [e.name, e.method])));
+    let payloadsRaw = true;
+    for (const e of entries13 || []) {
+      const raw = e.name === 'LOCUS.md'
+        ? new TextEncoder().encode(locusMd13)
+        : files13.get(e.name);
+      if (!bytesEqual(storedPayload(fresh13, e), raw)) payloadsRaw = false;
+    }
+    check('LA13 stored payloads are the raw input bytes, untouched', payloadsRaw);
+
+    // LA13b: the same input written twice is byte-identical.
+    const again13 = await LA.writeLocusArchive(files13, locusMd13);
+    check('LA13 writeLocusArchive twice on the same input is byte-identical',
+      bytesEqual(fresh13, again13));
+
+    // LA13c: an old-style archive written entirely with deflate
+    // (pre-2026-10-28 writer layout, payloads compressed with classic
+    // zlib — the CPython-shaped bytes) still reads.
+    const order13 = [{ name: 'LOCUS.md', data: new TextEncoder().encode(locusMd13) }];
+    for (const p of [...files13.keys()].sort()) order13.push({ name: p, data: files13.get(p) });
+    const oldZip13 = buildTestZip(order13.map((e) => {
+      const payload = zlib.deflateRawSync(e.data);
+      return { name: e.name, data: e.data, payload, method: 8, crc: crc32Node(e.data) };
+    }));
+    const oldEntries13 = centralEntries(oldZip13);
+    check('LA13 old-style fixture really contains method 8 entries',
+      (oldEntries13 || []).length === order13.length
+      && (oldEntries13 || []).every((e) => e.method === 8),
+      JSON.stringify((oldEntries13 || []).map((e) => e.method)));
+    const readOld13 = await LA.readLocusArchive(oldZip13);
+    check('LA13 old deflate-written archive reads successfully',
+      readOld13.ok === true && readOld13.files.size === files13.size,
+      JSON.stringify(codesOf(readOld13)));
+    let old13Contents = readOld13.ok && readOld13.locusMd === locusMd13;
+    for (const [p, data] of files13) {
+      if (!readOld13.ok || !bytesEqual(readOld13.files.get(p), data)) old13Contents = false;
+    }
+    check('LA13 old deflate-written archive yields identical contents', old13Contents);
+
+    // LA13d: the same files packed the old way (deflate) and the new
+    // way (store) read back identically — same files, same parsed
+    // manifest, same manifestDigest.
+    const readNew13 = await LA.readLocusArchive(fresh13);
+    const oldParsed13 = readOld13.ok ? LA.parseLocusMd(readOld13.locusMd) : null;
+    const newParsed13 = readNew13.ok ? LA.parseLocusMd(readNew13.locusMd) : null;
+    const dOld13 = oldParsed13 && oldParsed13.ok ? await LA.manifestDigest(oldParsed13.manifest) : null;
+    const dNew13 = newParsed13 && newParsed13.ok ? await LA.manifestDigest(newParsed13.manifest) : null;
+    let same13 = !!(readOld13.ok && readNew13.ok && oldParsed13 && newParsed13
+      && oldParsed13.ok && newParsed13.ok);
+    if (same13) {
+      same13 = JSON.stringify([...readOld13.files.keys()].sort())
+        === JSON.stringify([...readNew13.files.keys()].sort());
+      for (const [p, data] of readNew13.files) {
+        if (!bytesEqual(readOld13.files.get(p), data)) same13 = false;
+      }
+      same13 = same13
+        && JSON.stringify(oldParsed13.manifest) === JSON.stringify(newParsed13.manifest)
+        && dOld13 === dNew13
+        && /^[0-9a-f]{64}$/.test(dNew13);
+    }
+    check('LA13 old/new packs read back with identical files, manifest and digest',
+      same13, JSON.stringify({ old: codesOf(readOld13), new: codesOf(readNew13) }));
   }
 
   // ---- summary ----
