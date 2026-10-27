@@ -92,8 +92,10 @@ const rejectedCode = (fn) => { try { fn(); return null; } catch (e) { return e.c
     && typeof PersistenceService === 'function' && PersistenceServiceInstance instanceof PersistenceService
     && typeof AttachmentStore === 'function' && typeof SkillInstanceWorkspace === 'function'
     && typeof LocusCapabilityPackage.validateProject === 'function');
+  // C4 §2.4 appended 'capability-imports' (one report per import attempt,
+  // newest 20 kept) to the Product-owned skeleton.
   check('S4 persistence keeps the Product-owned home skeleton value',
-    JSON.stringify(LOCUS_HOME_SKELETON) === JSON.stringify(['.skills', '.config/locus/mcp', '.cache/locus']));
+    JSON.stringify(LOCUS_HOME_SKELETON) === JSON.stringify(['.skills', '.config/locus/mcp', '.cache/locus', 'capability-imports']));
   check('S5 persistenceClone survives Maps and typed arrays (structured-clone semantics)',
     (() => { const m = persistenceClone(new Map([['k', new Uint8Array([1, 2])]]));
       return m instanceof Map && m.get('k') instanceof Uint8Array && m.get('k')[1] === 2; })());

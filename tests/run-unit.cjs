@@ -21,6 +21,11 @@ const SUITES = [
   // verification, mismatch accept/skip, replacement rollback, uninstall,
   // the model-unreachable storage boundary (CI14), schema 4.
   'capability-install.test.mjs',
+  // C4 §2.4: the import reports — pure service (format, filename/slug
+  // rules, collision suffixes, newest-20 retention, write failures noted
+  // and swallowed) plus the store-level inspect/commit/cancel/refusal
+  // reports with the credential-key + commit-token redaction sweep.
+  'capability-import-reports.test.mjs',
   // C3: the credential service (bindings, remembered values, restore /
   // afterReplace / uninstall cleanup) and the runtime credential port.
   'credentials.test.mjs',
