@@ -96,6 +96,10 @@ export const PRODUCT_CORE_REQUIREMENTS = Object.freeze({
         capability: 'executionKinds.python',
         rule: 'the product tools call execution kind "shell" only; the direct python kind is unused by the product chain',
       }),
+      Object.freeze({
+        capability: 'pythonAbiExport',
+        rule: 'capability-package import checks degrade to pure-Python wheels only: a wheel whose filename does not end in -none-any.whl is refused with a diagnostic stating that this runtime does not declare its Python ABI',
+      }),
     ]),
   }),
   harness: Object.freeze({

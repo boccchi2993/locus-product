@@ -40,6 +40,18 @@
 //   CI24 confirmCapabilityImport: installs + clears the dialog + refreshes
 //        the list; a refused commit keeps the dialog with the error
 //   CI25 cancelCapabilityImport: drops the dialog, writes nothing
+//   CI26 C3 O1: auto-enabled install reloads enabled after a restart
+//   CI27 C3 O1: enable failure keeps the package installed and disabled
+//   CI28 C3: version replacement keeps the enabled/disabled state (D10)
+//   CI29 C3: commit replace + uninstall route through the credentials
+//   CI30 D13 §3: a native wheel matching the runtime ABI imports cleanly
+//   CI31 D13 §3: platform-mismatched wheels refused with the required ABI
+//   CI32 D13 §2: a wheel shadowing a runtime-preloaded package refused
+//   CI33 D13 §3: a runtime without the pythonAbiExport declaration
+//        degrades to pure-Python-only; an unresolved declaration is not
+//        a degradation
+//   CI34 D13: a boot-time wheel rejection skips loading and keeps the
+//        record + bytes (corrupt notice carries the per-artifact reasons)
 //
 // Service-level cases drive createCapabilityPackages directly (real
 // CapabilityManager + memory PersistenceService, per
@@ -86,6 +98,8 @@ const OTHER_CAP_ID = 'other-capability';
 const PLUGIN_ID = 'ci-plugin';
 const MARKER = 'LOCUS-MD-MARKER-7f3a';
 const WHEEL_NAME = 'ci_plugin-1.0.0-py3-none-any.whl';
+// D13 §3: a native wheel whose tags match the pinned runtime ABI exactly.
+const NATIVE_WHEEL_OK = 'x-1.0-cp312-cp312-pyodide_2024_0_wasm32.whl';
 
 // C3 fixture credential declarations (v1 and a binding-changed v2).
 const CRED_DECL_V1 = [{
@@ -111,7 +125,8 @@ function skillBody(id, version) {
 }
 
 async function projectWorkspace({ id = CAP_ID, version = '1.0.0', pluginId = PLUGIN_ID,
-  skillIds = ['skill-a', 'skill-b'], skillBodies = null, wheelSeed = 1, credentials = null } = {}) {
+  skillIds = ['skill-a', 'skill-b'], skillBodies = null, wheelSeed = 1, credentials = null,
+  wheelName = WHEEL_NAME } = {}) {
   const ws = runtimeApi.createMemoryWorkspace({
     maxBytes: LA.LOCUS_LIMITS.maxTotalBytes,
     maxFileBytes: LA.LOCUS_LIMITS.maxFileBytes,
@@ -138,9 +153,9 @@ async function projectWorkspace({ id = CAP_ID, version = '1.0.0', pluginId = PLU
       runtime: 'python', authority: 'none',
       provides: { pythonImports: ['ci_plugin'] },
     },
-    artifacts: [{ path: 'artifacts/' + WHEEL_NAME, format: 'python-wheel' }],
+    artifacts: [{ path: 'artifacts/' + wheelName, format: 'python-wheel' }],
   }, null, 2) + '\n');
-  await ws.write('plugins/' + pluginId + '/artifacts/' + WHEEL_NAME, wheelBytes(wheelSeed));
+  await ws.write('plugins/' + pluginId + '/artifacts/' + wheelName, wheelBytes(wheelSeed));
   for (const s of skillIds) {
     await ws.write('skills/' + s + '/skill.json', JSON.stringify({
       schemaVersion: 1,
@@ -225,7 +240,12 @@ function serviceRig(opts = {}) {
   const credentials = opts.credentials === false
     ? null
     : credSvcMod.createCredentialService({ persistence, manager });
-  const service = svcMod.createCapabilityPackages({ persistence, manager, now: SERVICE_NOW, credentials });
+  const service = svcMod.createCapabilityPackages({
+    persistence, manager, now: SERVICE_NOW, credentials,
+    // D13 §3: the runtime declaration thunk under test (default: none —
+    // an unresolvable declaration is not a degradation, see CI33).
+    runtimeDeclaration: opts.runtimeDeclaration,
+  });
   return { persistence, manager, home, storage, service, credentials };
 }
 
@@ -1106,6 +1126,133 @@ function harnessDeclarationVariant({ capabilityPackages = true } = {}) {
       !bindingsRow || !bindingsRow.bindings.length, JSON.stringify(bindingsRow));
     const s1digestGone = await rejectionOf(rig.persistence.readCapabilityPackageBytes(CAP_ID, s1.digest));
     check('CI29 v1 bytes cleaned', !!s1digestGone && s1digestGone.name === 'NotFoundError');
+  }
+
+  // ---------- CI30. D13 §3: native wheel matching the runtime ABI ----------
+  {
+    section('CI30 D13: a native wheel matching the runtime ABI imports cleanly');
+    const shared = new persistenceMod.PersistenceService();
+    {
+      const rig = serviceRig({
+        persistence: shared,
+        runtimeDeclaration: () => ({ contractVersion: 1, pythonAbiExport: true }),
+      });
+      const { summary, commit } = await installViaService(
+        rig, await packProject({ wheelName: NATIVE_WHEEL_OK }));
+      check('CI30 native wheel (cp312/pyodide_2024_0_wasm32) inspects and commits',
+        summary.ok === true && commit.state === 'ready',
+        JSON.stringify(summary.ok ? commit : summary.diagnostics));
+    }
+    {
+      // "Restart" under the same declaring runtime: loads clean, no notice.
+      const rig = serviceRig({
+        persistence: shared,
+        runtimeDeclaration: () => ({ contractVersion: 1, pythonAbiExport: true }),
+      });
+      const results = await rig.service.loadInstalled();
+      check('CI30 the native-wheel package reloads with no notice',
+        results.length === 1 && results[0].status === 'loaded', JSON.stringify(results));
+    }
+  }
+
+  // ---------- CI31. D13 §3: platform-mismatched wheels refused ----------
+  {
+    section('CI31 D13: platform-mismatched wheels are refused with the required ABI');
+    const rig = serviceRig({ runtimeDeclaration: () => ({ contractVersion: 1, pythonAbiExport: true }) });
+    for (const name of ['x-1.0-cp311-cp311-pyodide_2024_0_wasm32.whl',
+      'x-1.0-cp312-cp312-pyodide_2023_0.whl',
+      'x-1.0-cp312-cp312-linux_x86_64.whl']) {
+      const summary = await rig.service.inspect((await packProject({ wheelName: name })).bytes);
+      const d = summary.ok ? null : summary.diagnostics.find((x) => x.code === 'capability_wheel_platform');
+      check('CI31 ' + name + ' refused as capability_wheel_platform with the required ABI',
+        summary.ok === false && !!d && d.path.endsWith('/' + name)
+        && d.message.includes('cp312') && d.message.includes('pyodide_2024_0_wasm32'),
+        JSON.stringify(summary.ok ? summary.kind : summary.diagnostics));
+    }
+    check('CI31 nothing was installed',
+      (await rig.persistence.loadCapabilityPackages()).length === 0);
+  }
+
+  // ---------- CI32. D13 §2: shadowing a runtime-preloaded package ----------
+  {
+    section('CI32 D13: a wheel shadowing a runtime-preloaded package is refused');
+    const rig = serviceRig({ runtimeDeclaration: () => ({ contractVersion: 1, pythonAbiExport: true }) });
+    const summary = await rig.service.inspect(
+      (await packProject({ wheelName: 'six-1.16.0-py2.py3-none-any.whl' })).bytes);
+    const d = summary.ok ? null : summary.diagnostics.find((x) => x.code === 'capability_wheel_shadows_runtime');
+    check('CI32 six wheel refused as capability_wheel_shadows_runtime',
+      summary.ok === false && !!d && d.path.endsWith('/six-1.16.0-py2.py3-none-any.whl')
+      && d.message.includes('six') && d.message.includes('the runtime already provides it'),
+      JSON.stringify(summary.ok ? summary.kind : summary.diagnostics));
+    const m = await rig.service.inspect(
+      (await packProject({ wheelName: 'micropip-0.1-py3-none-any.whl' })).bytes);
+    check('CI32 a micropip wheel is refused the same way',
+      m.ok === false && m.diagnostics.some((x) => x.code === 'capability_wheel_shadows_runtime'),
+      JSON.stringify(m.ok ? m.kind : m.diagnostics));
+    check('CI32 nothing was installed',
+      (await rig.persistence.loadCapabilityPackages()).length === 0);
+  }
+
+  // ---------- CI33. D13 §3: degradation without the ABI declaration ----------
+  {
+    section('CI33 D13: a runtime that does not declare its Python ABI degrades');
+    // A declaration that EXISTS but lacks pythonAbiExport.
+    const rig = serviceRig({ runtimeDeclaration: () => ({ contractVersion: 1 }) });
+    const pure = await rig.service.inspect((await packProject()).bytes);
+    check('CI33 a pure-Python wheel still imports without the ABI declaration',
+      pure.ok === true, JSON.stringify(pure.ok ? pure.kind : pure.diagnostics));
+    const native = await rig.service.inspect(
+      (await packProject({ wheelName: NATIVE_WHEEL_OK })).bytes);
+    const d = native.ok ? null : native.diagnostics.find((x) => x.code === 'capability_wheel_platform');
+    check('CI33 a native wheel is refused with the degradation diagnostic',
+      native.ok === false && !!d
+      && d.message.includes('this runtime does not declare its Python ABI'),
+      JSON.stringify(native.ok ? native.kind : native.diagnostics));
+    // A NOT-YET resolvable declaration is NOT a degradation: the wheels can
+    // only execute under the statically pinned runtime, which always
+    // declares the ABI (boot-time loadInstalled runs before the host is
+    // created).
+    const rig2 = serviceRig({ runtimeDeclaration: () => null });
+    const native2 = await rig2.service.inspect(
+      (await packProject({ wheelName: NATIVE_WHEEL_OK })).bytes);
+    check('CI33 an unresolved runtime declaration is not a degradation',
+      native2.ok === true, JSON.stringify(native2.ok ? native2.kind : native2.diagnostics));
+  }
+
+  // ---------- CI34. D13: boot-time wheel rejection keeps the record ----------
+  {
+    section('CI34 D13: a boot-time wheel rejection skips loading, keeps the record');
+    const shared = new persistenceMod.PersistenceService();
+    {
+      const rig = serviceRig({
+        persistence: shared,
+        runtimeDeclaration: () => ({ contractVersion: 1, pythonAbiExport: true }),
+      });
+      await installViaService(rig, await packProject({ wheelName: NATIVE_WHEEL_OK }));
+      check('CI34 installed and enabled under the declaring runtime',
+        rig.manager.isPackage(CAP_ID) === true);
+    }
+    {
+      // "Restart" over the SAME persistence against a runtime that no
+      // longer declares pythonAbiExport: fresh manager + service.
+      const rig = serviceRig({
+        persistence: shared,
+        runtimeDeclaration: () => ({ contractVersion: 1 }),
+      });
+      const results = await rig.service.loadInstalled();
+      check('CI34 loadInstalled reports the wheel rejection with the reason',
+        results.length === 1 && results[0].status === 'corrupt'
+        && results[0].message.includes('capability_wheel_platform')
+        && results[0].message.includes('this runtime does not declare its Python ABI'),
+        JSON.stringify(results));
+      check('CI34 the package is not registered on the fresh manager',
+        rig.manager.isPackage(CAP_ID) === false);
+    }
+    const record = await recordOf(shared, CAP_ID);
+    const bytes = record ? await shared.readCapabilityPackageBytes(CAP_ID, record.digest) : null;
+    check('CI34 the record and its bytes are kept (never deleted)',
+      !!record && !!bytes && bytes.byteLength > 0 && record.enabled === true,
+      JSON.stringify({ record: record && record.digest, bytes: bytes && bytes.byteLength }));
   }
 
   console.log('---');
