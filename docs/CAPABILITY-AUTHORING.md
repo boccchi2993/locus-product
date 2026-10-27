@@ -233,6 +233,7 @@ The task/user changes the SkillInstance.
 That is the first point at which “making a Capability” can be called end-to-end complete.
 
 ## 7. Phase D — Capability Authoring Capability
+> 已由 [C4-CAPABILITY-AUTHORING.md](C4-CAPABILITY-AUTHORING.md) 细化（所有者 2026-10-27 批准）：SDK 为纯 Python plugin、与 JS 构建器逐字节一致；导入结果写入 /home/locus/capability-imports/；本节的安全边界与取消资格条件保持有效。
 
 Only after the Reference Capability passes should Locus receive an authoring Capability of its own.
 
@@ -270,6 +271,7 @@ The Skill contains design knowledge. The Plugin contains deterministic schema/bu
 Do not put architecture prose into code when a Skill is the right layer, and do not ask the model to hand-roll hashes/schema validation when deterministic code is the right layer.
 
 ## 8. Self-hosting security boundary
+> 已由 [C4-CAPABILITY-AUTHORING.md](C4-CAPABILITY-AUTHORING.md) 细化（所有者 2026-10-27 批准）：SDK 为纯 Python plugin、与 JS 构建器逐字节一致；导入结果写入 /home/locus/capability-imports/；本节的安全边界与取消资格条件保持有效。
 
 Locus being able to **write** a Capability project does not mean Locus can silently **install** it.
 
@@ -291,6 +293,7 @@ The install/import click is a trust transition.
 A prompt injection, generated Skill, or model-authored Plugin cannot auto-promote its own code into trusted extension state.
 
 ## 9. Self-hosting acceptance test
+> 已由 [C4-CAPABILITY-AUTHORING.md](C4-CAPABILITY-AUTHORING.md) 细化（所有者 2026-10-27 批准）：SDK 为纯 Python plugin、与 JS 构建器逐字节一致；导入结果写入 /home/locus/capability-imports/；本节的安全边界与取消资格条件保持有效。
 
 The final bootstrap test is:
 

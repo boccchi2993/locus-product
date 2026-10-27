@@ -38,6 +38,7 @@ The repository keeps documentation beside code so architecture changes, tests, a
 | [CONTEXT-MANAGEMENT.md](CONTEXT-MANAGEMENT.md) | Context management design: append-only history, request budget, truncated-output retrieval |
 | [CAPABILITY-INSTALL.md](CAPABILITY-INSTALL.md) | Capability install design: .locus packages, user-confirmed import, and persistence |
 | [C3-CREDENTIALS-MCP.md](C3-CREDENTIALS-MCP.md) | Credentials, external APIs and MCP: credential bindings, curl credential variables, sleep, persistent approvals |
+| [C4-CAPABILITY-AUTHORING.md](C4-CAPABILITY-AUTHORING.md) | Capability authoring capability: Python SDK, import reports, self-hosting acceptance (C5) |
 | [PERSISTENCE.md](PERSISTENCE.md) | IndexedDB/OPFS and recovery semantics |
 | [IMAGE-INPUT.md](IMAGE-INPUT.md) | Image/perception boundary |
 
