@@ -207,19 +207,37 @@ async function main() {
 
     // One page-side reader over the durable reports dir (name-sorted list
     // of { name, text }); the NODE side parses and picks the newest by at.
+    // A report written moments ago can be listed but not yet readable —
+    // right after createWritable().close() the OPFS entry's visibility
+    // lags (locally as a size-0 read, on Linux as a NotFoundError). The
+    // reader therefore retries until it sees a CONSISTENT snapshot:
+    // every listed name reads back non-empty, or the dir stays empty
+    // across several attempts.
     await evaluate(cdp,
       'window.__irReports = async function () {'
-      + ' const names = (await window.__locus.vfs.list(' + JSON.stringify(REPORTS_DIR) + '))'
+      + ' const dir = ' + JSON.stringify(REPORTS_DIR) + ';'
+      + ' for (var attempt = 0; attempt < 20; attempt++) {'
+      + '   try {'
+      + '     const names = (await window.__locus.vfs.list(dir))'
+      + '       .filter(function (e) { return e.kind === "file"; }).map(function (e) { return e.name; }).sort();'
+      + '     const out = [];'
+      + '     let consistent = true;'
+      + '     for (var i = 0; i < names.length; i++) {'
+      + '       let text = "";'
+      + '       try { text = await window.__locus.vfs.read(dir + "/" + names[i]); }'
+      + '       catch (e) { consistent = false; break; }'
+      + '       if (!text || text.length === 0) { consistent = false; break; }'
+      + '       out.push({ name: names[i], text: text });'
+      + '     }'
+      + '     if (consistent && out.length) return out;'
+      + '     if (consistent && !out.length && attempt >= 3) return out;'
+      + '   } catch (e) { /* list raced a fresh entry — retry */ }'
+      + '   await new Promise(function (r) { setTimeout(r, 60); });'
+      + ' }'
+      + ' const names = (await window.__locus.vfs.list(dir))'
       + '   .filter(function (e) { return e.kind === "file"; }).map(function (e) { return e.name; }).sort();'
       + ' const out = [];'
-      + ' for (var i = 0; i < names.length; i++) {'
-      + '   var text = await window.__locus.vfs.read(' + JSON.stringify(REPORTS_DIR) + ' + "/" + names[i]);'
-      + '   for (var t = 0; t < 20 && text.length === 0; t++) {'
-      + '     await new Promise(function (r) { setTimeout(r, 50); });'
-      + '     text = await window.__locus.vfs.read(' + JSON.stringify(REPORTS_DIR) + ' + "/" + names[i]);'
-      + '   }'
-      + '   out.push({ name: names[i], text: text });'
-      + ' }'
+      + ' for (var i = 0; i < names.length; i++) out.push({ name: names[i], text: await window.__locus.vfs.read(dir + "/" + names[i]) });'
       + ' return out; }; "reader installed"');
     const readReports = () => evaluate(cdp, 'window.__irReports()');
     const newestReport = async () => {
