@@ -145,7 +145,10 @@
       check('A4 hover opens level 2 (Add capability + capability list)',
         await waitFor(() => !!$('[data-testid="composer-capabilities-menu"]')
           && !!$('[data-testid="plus-add-capability"]')
-          && !!$('[data-testid="composer-capability-list"]'), 4000));
+          && !!$('[data-testid="composer-capability-list"]'), 4000),
+        'hoverNone=' + window.matchMedia('(hover: none)').matches
+        + ' maxTouchPoints=' + navigator.maxTouchPoints
+        + ' innerWidth=' + window.innerWidth);
       check('A4b aria-expanded flips to true',
         $('[data-testid="plus-capabilities"]').getAttribute('aria-expanded') === 'true');
       check('A4c empty capability list shows its muted line',
@@ -307,7 +310,9 @@
       await openMenuFresh();
       check('F1 menu opens in stepped mode: NO cascade panels',
         document.querySelectorAll('.plus-sub').length === 0,
-        document.querySelectorAll('.plus-sub').length + ' sub panels');
+        'subPanels=' + document.querySelectorAll('.plus-sub').length
+        + ' hoverNone=' + window.matchMedia('(hover: none)').matches
+        + ' maxTouchPoints=' + navigator.maxTouchPoints);
       check('F2 level 1 shows the three entries, no Back yet',
         !$('.plus-menu').textContent.includes('No capabilities yet')
         && !$('[data-testid="plus-menu-back"]')

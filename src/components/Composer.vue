@@ -553,8 +553,12 @@ onBeforeUnmount(() => {
 
 function isSteppedViewport() {
   const narrow = typeof window.matchMedia === 'function' && window.matchMedia(STEPPED_WIDTH).matches;
-  const touch = (typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0)
-    || (typeof window.matchMedia === 'function' && window.matchMedia('(hover: none)').matches);
+  // Touch-first devices only. A bare maxTouchPoints>0 would also catch
+  // touch-capable laptops driven by a mouse, and pointerless headless
+  // browsers match (hover: none) — hence the conjunction: a REAL touch
+  // device has contact points AND no hover-capable primary pointer.
+  const touch = typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0
+    && typeof window.matchMedia === 'function' && window.matchMedia('(hover: none)').matches;
   return !!(narrow || touch);
 }
 
