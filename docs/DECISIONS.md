@@ -177,3 +177,27 @@
 **批准**：2026-10-24 所有者批准。
 
 **被取代的旧表述**：无（D10 中“plugin 以校验过的 wheel 字节进入 Python”不变，本条只补充 wheel 的平台范围与来源规则）。
+
+## D14
+
+**决定**：模型在写能力时可以下载并打包第三方 wheel。
+
+1. 下载用 bash 中的 `curl -o`（GET 不需要审批）。不设来源白名单：用户从哪里下载、下载的是什么，平台都不做假设。
+2. 导入流程不展示 wheel 来源，product 与 harness 不为此增加字段或检查；导入端的现有规则（D13 第 2、3 条：不得遮盖 runtime 预装包、平台标签必须是纯 Python 或当前 Pyodide ABI）照旧适用于所有包。
+3. wheel 的来源核实（sha256 与发布方元数据比对）、依赖闭包是否完整、依赖顺序，是 capability-authoring 能力（它的 SKILL.md 与 locus_capability_sdk）的职责，由模型在打包前离线完成，不是导入端的职责。
+4. D13 第 4 条（sha256 必须与 pyodide-lock.json / PyPI 一致）仍只是 locus-example-capabilities 官方参考能力的构建要求，不适用于模型或用户自己做的能力。
+5. 跨能力携带同一个 Python 发行包（2026-10-29 本机实验 SPIKE-AUTHOR，runtime aca6c2f、harness 46e5d80）：
+   - plugin id 相同，且描述符与 wheel 完全相同：只注册一份、只安装一次，用户无感知；
+   - plugin id 相同，但描述符（哪怕 displayName 差一个字）或 wheel 不同：后导入的包被拒绝（“conflicts with an already registered plugin of the same id”）；
+   - plugin id 不同：都能注册，都进入安装负载，按能力的启用顺序安装；micropip 对已安装的同名发行包静默跳过，先启用的能力的版本生效，没有任何提示。
+
+   这些行为本条不改变；规避方式是 capability-authoring 的职责（见第 3 条）。
+6. 写能力时的测试方式（同一实验）：下载的 wheel，无论纯 Python 还是 Pyodide 原生（lxml 5.2.1 实测），都可以在 Python 中用 zipfile 解压到 /tmp 下的目录，再 sys.path.insert 后直接 import 测试，不需要 micropip，原生扩展不需要额外的加载调用；解压加载原生扩展之后，Python 网络拦截（js.fetch、pyfetch）照样有效。worker 重启后解压出的文件仍在，但需要重新 sys.path.insert。限制：runtime 把文件镜像进 Python 时，单文件超过 5 MiB、文件数超过 200、总量超过 25 MiB 的部分不进入 Python（shell.js 的 SYNC_MAX_FILE_BYTES / SYNC_MAX_FILES / SYNC_MAX_TOTAL_BYTES；python 命令输出中会出现 “[workspace sync: … NOT visible to Python …]” 提示）。是否放宽另行决定。
+
+**理由**：runtime 的 GET 本来就是放开的，`curl -o` 本来就能下载任何文件；C4 的 A5（“不支持模型自行下载第三方 wheel”）是范围上的收窄，不是技术限制。真实用户的需求（Word、PDF、图片处理）大量依赖第三方包，而平台无法预知用户会用哪些包、从哪里下载。导入时的点击仍然是唯一的信任决定（C4 §3 不变）。2026-10-29 本机实验（SPIKE-AUTHOR）：python-docx 1.2.0 + lxml 5.2.1 在已启动的 worker 中解压后直接导入，生成的 .docx 用 LibreOffice 打开正常。
+
+**影响范围**：locus-example-capabilities（capability-authoring 的 SKILL.md 与 SDK：下载、核实、依赖检查的流程与工具）；product 与 harness 无代码改动。
+
+**批准**：2026-10-29 所有者批准。
+
+**被取代的旧表述**：docs/C4-CAPABILITY-AUTHORING.md §1 A5 中“不支持模型自行下载第三方 wheel”；§4 第 3 条中“没有网络”。

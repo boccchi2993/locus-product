@@ -19,6 +19,8 @@
 
 > 2026-10-28：为满足 A2，.locus 写入端改为一律 store（见 CAPABILITY-INSTALL.md）。
 
+> 2026-10-29：A5 中“不支持模型自行下载第三方 wheel”被 DECISIONS.md D14 取代；MCP 仍不在本版范围。
+
 ## 2. 组成
 
 ### 2.1 `locus_capability_sdk`（纯 Python，只用标准库）
@@ -100,11 +102,11 @@ API（`import locus_capability_sdk as sdk`）：
    - 不需要新能力就能完成的（模型现有工具已经够用），直接做，不要造能力。
 2. **规范**
    - id 规则；版本号；目录约定（§2.2）。
-   - plugin 只用标准库和 runtime 预装包（pandas、numpy）。
+   - plugin 只用标准库和 runtime 预装包（pandas、numpy）；需要第三方包时，模型可以下载 wheel 打包进能力（2026-10-29：原“只用标准库和 runtime 预装包”的限制被 DECISIONS.md D14 取代；下载用 bash 中的 curl -o，来源核实、依赖闭包与顺序由 capability-authoring 负责，导入端仍执行 D13 第 2、3 条检查）。
    - 凭据声明的字段和限制。
    - skill 中 curl 只能写 `$NAME`。
 3. **Locus 环境限制**
-   - python heredoc 必须是一次单独的 bash 调用；不支持反斜杠续行；没有网络。
+   - python heredoc 必须是一次单独的 bash 调用；不支持反斜杠续行；网络：GET/HEAD 不需要审批（单个响应上限 16 MiB、直连 60 秒超时），写操作需要用户审批；Python 层没有网络，下载只能在 bash 中用 curl -o。（2026-10-29 更正，原文“没有网络”有误。）
    - 文件系统的各个目录及其用途。
 4. **流程**
    1. 和用户确认需求，必要时提一两个问题。
