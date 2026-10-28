@@ -45,6 +45,11 @@
       && !/File tasks need one/.test(railTextUnmounted), railTextUnmounted.slice(0, 200));
 
     // ---------- plus menu ----------
+    // MODIFIED in feat/composer-capabilities-menu (owner task 2026-10-29):
+    // the menu's Open terminal entry was REPLACED by the Capabilities
+    // cascade — U10 now asserts the new cascade parent, and U11 drives the
+    // untouched store action directly so the terminal drawer keeps its
+    // reserved-seam coverage without the removed menu entry.
     $('.plus-btn').click();
     await sleep(60);
     const plusTexts = $$('.plus-menu .plus-item').map((b) => b.textContent);
@@ -52,11 +57,14 @@
       plusTexts.some((t) => /Upload files/.test(t))
       && !plusTexts.some((t) => /Upload files/.test(t) && /not wired/.test(t)), plusTexts.join('/'));
     check('U09 plus menu: Mount folder', plusTexts.some((t) => /Mount folder/.test(t)));
-    check('U10 plus menu: Open terminal', plusTexts.some((t) => /Open terminal/.test(t)));
-    // Open terminal → reserved drawer, honestly marked
-    $$('.plus-menu .plus-item').find((b) => /Open terminal/.test(b.textContent)).click();
+    const capItem = $$('.plus-menu .plus-item, .plus-menu [role="menuitem"]')
+      .find((b) => /Capabilities/.test(b.textContent) && b.getAttribute('aria-haspopup'));
+    check('U10 plus menu: Capabilities cascade parent (aria-haspopup, Open terminal gone)',
+      !!capItem && !plusTexts.some((t) => /Open terminal/.test(t)), plusTexts.join('/'));
+    // Terminal drawer still opens through the unchanged store action.
+    L.actions.openTerminal();
     await sleep(60);
-    check('U11 terminal drawer opens as reserved seam',
+    check('U11 terminal drawer opens as reserved seam (via the store action)',
       !!$('.terminal-drawer') && /not wired/.test($('.terminal-drawer').textContent));
     $('.terminal-drawer .icon-btn').click();
     await sleep(60);
