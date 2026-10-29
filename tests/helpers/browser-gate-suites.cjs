@@ -39,6 +39,12 @@ const SUITES = [
   // confirm), the credential connect step writes none and no report ever
   // carries the test key, and a REAL task's bash cat reads a report back.
   'e2e-import-reports.cjs',
+  // Composer "+" menu (Capabilities cascade, owner task 2026-10-29): the
+  // real built app drives hover + keyboard cascade, imports from the
+  // /mnt/download listing through the GLOBAL confirm dialog (settings
+  // panel closed), checks the import-report cancellation, the @mention
+  // insertion and the <640px stepped mode.
+  'e2e-composer-menu.cjs',
 ];
 
 // Resolve requested suite names against the registry. Returns the run list
