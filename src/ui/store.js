@@ -378,7 +378,10 @@ const productCredentialPort = credentials
 // (the model reads them over bash and reacts to the diagnostics). The
 // provider is resolved lazily — memory before boot, OPFS after — and a
 // failed report write lands in the persistence-issue report; reporting
-// never breaks the import it describes.
+// never breaks the import it describes. The ONE report of a PASSED
+// inspection is written at DECISION time (confirm → commit report,
+// cancel → cancelled report); the dialog being open reports nothing, so
+// a page closed mid-decision leaves no report (2026-10-29 FIX-IR1).
 const importReports = createImportReports({
   resolveHome: () => {
     const r = vfs.resolveMount('/home/locus');
@@ -398,10 +401,11 @@ async function recordImportReport(report) {
   }
 }
 
-// The §2.4 inspect-stage body: a checked result (ok, id/version/kind) or a
-// refusal/throw (ok false + diagnostics). Structural facts only — the
-// summary's commit token and every credential value stay out by
-// construction.
+// The §2.4 inspect-stage REFUSAL body (ok false + diagnostics): a failed
+// check or a throw — the attempt's ONE report, written immediately. A
+// PASSED inspection reports at decision time instead (2026-10-29
+// FIX-IR1). Structural facts only — the summary's commit token and every
+// credential value stay out by construction.
 function inspectReportBody(source, label, result, errorMessage) {
   const ok = !errorMessage && !!result && result.ok === true;
   return {
@@ -430,46 +434,48 @@ function inspectReportBody(source, label, result, errorMessage) {
 //        connect-credentials step opens when connectStep is true (the key
 //        values live ONLY in the panel's local refs, never here)
 export async function beginCapabilityImportFromBytes(bytes, label) {
-  let report;
   try {
     const result = await inspectCapabilityPackage(bytes);
     if (result.ok) {
+      // FIX-IR1 (§2.4 one report per attempt): a passed inspection writes
+      // NOTHING while the confirm dialog is open — its decision reports
+      // (confirm → commit, cancel → cancelled). The old pre-decision
+      // inspect report made one import land TWO files, and the same-second
+      // filename sort picked the undecided one as "newest".
       store.capabilityImport = { source: 'file', label, summary: result };
-    } else {
-      store.capabilityImport = { source: 'file', label, diagnostics: result.diagnostics };
+      return;
     }
-    report = inspectReportBody('file', label, result, null);
+    store.capabilityImport = { source: 'file', label, diagnostics: result.diagnostics };
+    await recordImportReport(inspectReportBody('file', label, result, null));
   } catch (e) {
     store.capabilityImport = {
       source: 'file',
       label,
       diagnostics: [{ code: 'capability_import_failed', path: '', message: e.message }],
     };
-    report = inspectReportBody('file', label, null, e.message);
+    await recordImportReport(inspectReportBody('file', label, null, e.message));
   }
-  await recordImportReport(report);
 }
 
 export async function beginCapabilityImportFromPath(vfsPath) {
   const p = String(vfsPath || '');
-  let report;
   try {
     const result = await inspectCapabilityPackageFromPath(p);
     if (result.ok) {
+      // Same FIX-IR1 seam as the bytes entry point above.
       store.capabilityImport = { source: 'path', label: p, summary: result };
-    } else {
-      store.capabilityImport = { source: 'path', label: p, diagnostics: result.diagnostics };
+      return;
     }
-    report = inspectReportBody('path', p, result, null);
+    store.capabilityImport = { source: 'path', label: p, diagnostics: result.diagnostics };
+    await recordImportReport(inspectReportBody('path', p, result, null));
   } catch (e) {
     store.capabilityImport = {
       source: 'path',
       label: p,
       diagnostics: [{ code: 'capability_import_failed', path: '', message: e.message }],
     };
-    report = inspectReportBody('path', p, null, e.message);
+    await recordImportReport(inspectReportBody('path', p, null, e.message));
   }
-  await recordImportReport(report);
 }
 
 // D12: the credentials of JUST-committed capability that are still in the

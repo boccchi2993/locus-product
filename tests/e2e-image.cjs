@@ -169,7 +169,7 @@ async function main() {
     else { failed++; console.log('FAIL ' + name + (detail ? ' | ' + detail : '')); }
   };
   const boot = async (url) => {
-    await waitForCdp(chrome, { timeoutMs: 15000 });
+    await waitForCdp(chrome);
     const target = await waitForPageTarget(chrome, url, { timeoutMs: 15000 });
     cdp = await connectToTarget(target);
     await waitCond('!!(window.__locus && document.querySelector(".app-shell") && window.__locusWire)', 'image-app-boot', 15000);

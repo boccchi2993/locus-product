@@ -35,7 +35,7 @@ async function main() {
       chromePath: process.env.CHROME,
       label: 'responsive Chrome',
     });
-    await waitForCdp(chrome, { timeoutMs: 15000 });
+    await waitForCdp(chrome);
     const initialTarget = await waitForPageTarget(chrome, 'about:blank', { timeoutMs: 15000 });
     cdp = await connectToTarget(initialTarget);
     await cdp.send('Page.enable');
