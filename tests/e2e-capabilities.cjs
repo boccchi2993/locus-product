@@ -42,8 +42,9 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 const {
   allocateFreePort, closeChrome, closeManagedProcess, connectToTarget,
-  launchChrome, launchManagedProcess, waitForCdp, waitForHttp,
-  waitForPageTarget, waitForRuntimeCondition,
+  isProcessAlive, listenWithRetry, launchChrome, launchManagedProcess,
+  startServiceWithRetry, waitForCdp, waitForHttp, waitForPageTarget,
+  waitForRuntimeCondition,
 } = require('./helpers/chrome.cjs');
 const { loadPythonManifest } = require('./helpers/python-manifest.cjs');
 
@@ -178,9 +179,11 @@ async function main() {
   if (build.status !== 0) { console.error('build failed'); process.exit(1); }
 
   // ---- asset server (serves the pinned Pyodide set locally) ----
-  const assetPort = await allocateFreePort();
+  // allocateFreePort has a release/rebind race; bind through
+  // listenWithRetry so an EADDRINUSE retries on a freshly allocated port
+  // (up to 3 times) before any product check runs.
   const assetBytes = new Map();
-  const assetServer = http.createServer((req, res) => {
+  const { server: assetServer, port: assetPort } = await listenWithRetry(() => http.createServer((req, res) => {
     const name = decodeURIComponent(new URL(req.url, 'http://127.0.0.1').pathname.replace(/^\/assets\//, ''));
     const bytes = assetBytes.get(name);
     if (!bytes) { res.statusCode = 404; res.end('unknown asset'); return; }
@@ -189,18 +192,37 @@ async function main() {
     res.setHeader('content-type', entry ? entry.mime : 'application/octet-stream');
     res.setHeader('content-length', bytes.length);
     res.end(bytes);
-  });
-  await new Promise((r) => assetServer.listen(assetPort, '127.0.0.1', r));
+  }), await allocateFreePort());
   console.log('# loading pinned pyodide assets (' + PY_MANIFEST.length + ' files, cache or CDN)');
   for (const a of PY_MANIFEST) assetBytes.set(a.name, await loadAsset(a.name));
 
   // ---- vite preview (the built app) ----
-  const appPort = await allocateFreePort();
-  const preview = launchManagedProcess(process.execPath, [
-    VITE_CLI, 'preview', '--host', '127.0.0.1', '--port', String(appPort), '--strictPort',
-  ], { cwd: ROOT, port: appPort, label: 'Vite preview (capabilities)', env: process.env });
+  // --strictPort means an EADDRINUSE (allocateFreePort release/rebind
+  // race) kills the child before readiness: startServiceWithRetry
+  // re-spawns on a freshly allocated port, up to 3 times, BEFORE any
+  // product check runs.
+  const { handle: preview, port: appPort } = await startServiceWithRetry(async (port) => {
+    const child = launchManagedProcess(process.execPath, [
+      VITE_CLI, 'preview', '--host', '127.0.0.1', '--port', String(port), '--strictPort',
+    ], { cwd: ROOT, port, label: 'Vite preview (capabilities)', env: process.env });
+    try {
+      await waitForHttp('http://127.0.0.1:' + port + '/', { process: child, timeoutMs: 15000 });
+    } catch (e) {
+      // Retry ONLY the bind race: the child died with EADDRINUSE in its
+      // output. Any other readiness failure is rethrown untouched.
+      const raced = !isProcessAlive(child)
+        && /EADDRINUSE|address already in use/.test(child.stderrTail + '\n' + child.stdoutTail);
+      await closeManagedProcess(child);
+      if (raced) {
+        const bindError = new Error('vite preview could not bind port ' + port + ' (EADDRINUSE)');
+        bindError.code = 'EADDRINUSE';
+        throw bindError;
+      }
+      throw e;
+    }
+    return child;
+  }, await allocateFreePort());
   const appRoot = 'http://127.0.0.1:' + appPort + '/';
-  await waitForHttp(appRoot, { process: preview, timeoutMs: 15000 });
 
   let profileDir = null;
   let chrome = null;
@@ -214,7 +236,7 @@ async function main() {
       profileDir,
       extraArgs: ['--window-size=1280,800'],
     });
-    await waitForCdp(chrome, { timeoutMs: 15000 });
+    await waitForCdp(chrome);
     const target = await waitForPageTarget(chrome, appUrl, { timeoutMs: 15000 });
     cdp = await connectToTarget(target);
 

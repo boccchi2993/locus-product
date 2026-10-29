@@ -51,7 +51,7 @@ const http = require('http');
 const os = require('os');
 const path = require('path');
 const {
-  allocateFreePort, closeChrome, connectToTarget, launchChrome,
+  allocateFreePort, closeChrome, connectToTarget, launchChrome, listenWithRetry,
   waitForCdp, waitForPageTarget, waitForRuntimeCondition,
 } = require('./helpers/chrome.cjs');
 
@@ -85,39 +85,40 @@ const CURL_V2 = 'curl -X POST ' + ORIGIN + '/v2/tools/search '
 const LARGE_PAD = 'x'.repeat(9000);
 
 // ---------- upstream server (stands in for the credential's origin) ----------
+// Factories only — the bind goes through listenWithRetry (chrome.cjs):
+// allocateFreePort has a release/rebind race (EADDRINUSE 127.0.0.1:33221
+// crashed this suite at startup on run 40851648265), so a busy port is
+// retried on a freshly allocated one, up to 3 times, before any check runs.
 const upstreamSeen = { auths: [], hits: 0 };
-function startTargetServer(port) {
-  return new Promise((resolve) => {
-    const server = http.createServer((req, res) => {
-      const p = req.url.split('?')[0];
-      if (p === '/upstream/counts') {
-        res.writeHead(200, { 'content-type': 'application/json' });
-        return res.end(JSON.stringify({ hits: upstreamSeen.hits, auths: upstreamSeen.auths }));
-      }
-      if (p.startsWith('/v1/tools/') || p.startsWith('/v2/tools/')) {
-        upstreamSeen.hits++;
-        const auth = req.headers.authorization || null;
-        upstreamSeen.auths.push(auth);
-        const chunks = [];
-        req.on('data', (c) => chunks.push(c));
-        req.on('end', () => {
-          // Deliberate reflection: the response body carries the received
-          // credential back — the runtime must redact it (E-C3/E-C10).
-          const body = JSON.stringify({
-            ok: true,
-            authorization: auth,
-            note: 'reflecting credential: ' + auth,
-            pad: req.url.includes('/v1/tools/search') && upstreamSeen.hits > 1 ? LARGE_PAD : '',
-          });
-          res.writeHead(200, { 'content-type': 'application/json' });
-          res.end(body);
+function makeTargetServer() {
+  return (port) => http.createServer((req, res) => {
+    const p = req.url.split('?')[0];
+    if (p === '/upstream/counts') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ hits: upstreamSeen.hits, auths: upstreamSeen.auths }));
+    }
+    if (p.startsWith('/v1/tools/') || p.startsWith('/v2/tools/')) {
+      upstreamSeen.hits++;
+      const auth = req.headers.authorization || null;
+      upstreamSeen.auths.push(auth);
+      const chunks = [];
+      req.on('data', (c) => chunks.push(c));
+      req.on('end', () => {
+        // Deliberate reflection: the response body carries the received
+        // credential back — the runtime must redact it (E-C3/E-C10).
+        const body = JSON.stringify({
+          ok: true,
+          authorization: auth,
+          note: 'reflecting credential: ' + auth,
+          pad: req.url.includes('/v1/tools/search') && upstreamSeen.hits > 1 ? LARGE_PAD : '',
         });
-        return;
-      }
-      res.writeHead(404);
-      res.end('no such upstream path');
-    });
-    server.listen(port, '127.0.0.1', () => resolve(server));
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(body);
+      });
+      return;
+    }
+    res.writeHead(404);
+    res.end('no such upstream path');
   });
 }
 
@@ -130,51 +131,48 @@ const MIME = {
   '.png': 'image/png',
   '.json': 'application/json',
 };
-function startAppServer(port, distDir, relay) {
-  return new Promise((resolve) => {
-    const server = http.createServer(async (req, res) => {
-      const p = req.url.split('?')[0];
-      if (p === '/fetch') {
-        const body = req.method === 'GET' || req.method === 'HEAD' ? undefined : await new Promise((r, j) => {
-          const chunks = [];
-          req.on('data', (c) => chunks.push(c));
-          req.on('end', () => r(Buffer.concat(chunks)));
-          req.on('error', j);
-        });
-        const headers = Object.assign({}, req.headers);
-        delete headers.host;
-        delete headers['content-length'];
-        delete headers.connection;
-        let request;
-        try {
-          request = new Request('http://127.0.0.1:' + port + req.url, { method: req.method, headers, body });
-        } catch (e) {
-          res.writeHead(400, { 'content-type': 'application/json' });
-          return res.end('{"error":{"code":"network_invalid_url","message":"bad relay request"}}');
-        }
-        let resp;
-        try {
-          resp = await relay.onRequestPost({ request, env: {} });
-        } catch (e) {
-          res.writeHead(500, { 'content-type': 'application/json' });
-          return res.end(JSON.stringify({ error: { code: 'network_relay_failed', message: String(e && e.message || e) } }));
-        }
-        const outHeaders = {};
-        resp.headers.forEach((v, k) => { outHeaders[k] = v; });
-        res.writeHead(resp.status, outHeaders);
-        if (resp.status === 204 || resp.status === 205 || resp.status === 304) return res.end();
-        return res.end(Buffer.from(await resp.arrayBuffer()));
+function makeAppServer(distDir, relay) {
+  return (port) => http.createServer(async (req, res) => {
+    const p = req.url.split('?')[0];
+    if (p === '/fetch') {
+      const body = req.method === 'GET' || req.method === 'HEAD' ? undefined : await new Promise((r, j) => {
+        const chunks = [];
+        req.on('data', (c) => chunks.push(c));
+        req.on('end', () => r(Buffer.concat(chunks)));
+        req.on('error', j);
+      });
+      const headers = Object.assign({}, req.headers);
+      delete headers.host;
+      delete headers['content-length'];
+      delete headers.connection;
+      let request;
+      try {
+        request = new Request('http://127.0.0.1:' + port + req.url, { method: req.method, headers, body });
+      } catch (e) {
+        res.writeHead(400, { 'content-type': 'application/json' });
+        return res.end('{"error":{"code":"network_invalid_url","message":"bad relay request"}}');
       }
-      let rel = p === '/' ? '/index.html' : p;
-      const file = path.join(distDir, rel);
-      if (!file.startsWith(distDir) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {
-        res.writeHead(404);
-        return res.end('not found');
+      let resp;
+      try {
+        resp = await relay.onRequestPost({ request, env: {} });
+      } catch (e) {
+        res.writeHead(500, { 'content-type': 'application/json' });
+        return res.end(JSON.stringify({ error: { code: 'network_relay_failed', message: String(e && e.message || e) } }));
       }
-      res.writeHead(200, { 'content-type': MIME[path.extname(file)] || 'application/octet-stream' });
-      fs.createReadStream(file).pipe(res);
-    });
-    server.listen(port, '127.0.0.1', () => resolve(server));
+      const outHeaders = {};
+      resp.headers.forEach((v, k) => { outHeaders[k] = v; });
+      res.writeHead(resp.status, outHeaders);
+      if (resp.status === 204 || resp.status === 205 || resp.status === 304) return res.end();
+      return res.end(Buffer.from(await resp.arrayBuffer()));
+    }
+    let rel = p === '/' ? '/index.html' : p;
+    const file = path.join(distDir, rel);
+    if (!file.startsWith(distDir) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {
+      res.writeHead(404);
+      return res.end('not found');
+    }
+    res.writeHead(200, { 'content-type': MIME[path.extname(file)] || 'application/octet-stream' });
+    fs.createReadStream(file).pipe(res);
   });
 }
 
@@ -302,10 +300,8 @@ async function main() {
     v2: Buffer.from(PKG_V2).toString('base64'),
   };
 
-  // ---- servers ----
-  const targetPort = await allocateFreePort();
-  const appPort = await allocateFreePort();
-  const targetServer = await startTargetServer(targetPort);
+  // ---- servers (bind retried on a fresh port when EADDRINUSE) ----
+  const { server: targetServer, port: targetPort } = await listenWithRetry(makeTargetServer(), await allocateFreePort());
   const relay = await import('file://' + path.join(ROOT, 'functions', 'fetch.js').replace(/\\/g, '/'));
   // The e2e-network interception mechanism: the REAL relay handlers run in
   // THIS process; their upstream fetch maps the credential's origin onto
@@ -318,7 +314,8 @@ async function main() {
     }
     return realFetch(input, init);
   };
-  const appServer = await startAppServer(appPort, path.join(ROOT, 'dist'), relay);
+  const { server: appServer, port: appPort } = await listenWithRetry(
+    makeAppServer(path.join(ROOT, 'dist'), relay), await allocateFreePort());
   const appUrl = 'http://127.0.0.1:' + appPort + '/?e2e=1';
 
   let chrome = null;
@@ -337,7 +334,7 @@ async function main() {
         '--host-resolver-rules=MAP api.deepseek.com 127.0.0.1',
       ],
     });
-    await waitForCdp(chrome, { timeoutMs: 15000 });
+    await waitForCdp(chrome);
     const target = await waitForPageTarget(chrome, appUrl, { timeoutMs: 15000 });
     cdp = await connectToTarget(target);
     await waitForRuntimeCondition(cdp,
