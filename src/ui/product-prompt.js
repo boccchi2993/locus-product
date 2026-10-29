@@ -24,12 +24,27 @@
 
 // Product behavior notes for one task. `workspace` is the task's bound
 // filesystem (VirtualWorkspace — workspaceName getter — or a legacy
-// adapter with a name property), or null.
+// adapter with a name property), or null. `taskEnvironment` (when the
+// harness passes it) is the frozen TaskEnvironment — the @-mention line
+// below is a PURE function of its usable capability SET (sorted by id,
+// ready/needs-connection only — the same set the harness capability
+// index lists), never of the current message, so the per-request system
+// prompt stays cacheable across messages.
 export function locusEnvironmentNotes(opts) {
   const workspace = opts && opts.workspace;
   // Tolerate both a VirtualWorkspace (workspaceName getter) and a legacy
   // workspace adapter (name property).
   const wsName = workspace ? (workspace.workspaceName || workspace.name) : null;
+  const env = opts && opts.taskEnvironment;
+  const usableCaps = (env && Array.isArray(env.capabilities) ? env.capabilities : [])
+    .filter((c) => c && c.id && (c.state === 'ready' || c.state === 'needs-connection'))
+    .slice()
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const mentionLine = usableCaps.length
+    ? '- In a user message, "@' + '<capability id>' + '" means the user explicitly asks to use that capability in this task:'
+    + ' read its guidance file(s) listed under Capabilities before starting. Capability ids: '
+    + usableCaps.map((c) => c.id + ' = ' + (c.displayName || c.id)).join('; ') + ';'
+    : null;
   return [
     '- Prefer the local bash tool for everything. If a task can be done with python or the commands above, do it locally.',
     '- Do not assume commands exist beyond the list above. If a command is not available, accomplish the same thing with python.',
@@ -41,6 +56,7 @@ export function locusEnvironmentNotes(opts) {
     wsName
       ? 'An external folder "' + wsName + '" is currently mounted at /mnt/workspace (the default cwd).'
       : 'No external folder is currently mounted, so /mnt/workspace is unavailable; the default cwd is /home/locus. Use /mnt/upload for user-provided inputs (read-only), /mnt/download for files the user should receive, and /tmp for scratch space.',
+    mentionLine,
     opts && opts.toolOutputs === true
       ? '- When a long tool output is truncated, the truncation marker may name a file under /home/locus/history that holds the full output (read-only). Read it with head/tail/grep -n; to process it with python, cp it to /tmp first.'
       : null,

@@ -12,15 +12,52 @@
     </div>
 
     <div class="composer" :class="{ busy: store.busy }">
-      <textarea
-        ref="ta"
-        v-model="draft"
-        class="composer-input"
-        :placeholder="placeholder"
-        rows="1"
-        @keydown="onKeydown"
-        @input="autogrow"
-      ></textarea>
+      <!-- The textarea stays the single editable surface (no
+           contenteditable). The mirror div sits BEHIND it with identical
+           text metrics and invisible glyphs; recognized @-mention spans
+           paint a soft accent pill that shows through the transparent
+           textarea background under the normal-colored text. -->
+      <div class="composer-input-wrap">
+        <div ref="mirrorEl" class="composer-mirror" aria-hidden="true" data-testid="composer-mirror"><span
+            v-for="(f, i) in draftFragments" :key="i"
+            :class="f.mention ? 'mention-mark' : null">{{ f.text }}</span></div>
+        <textarea
+          ref="ta"
+          v-model="draft"
+          class="composer-input"
+          :placeholder="placeholder"
+          rows="1"
+          @keydown="onKeydown"
+          @input="onInput"
+          @compositionstart="onCompositionStart"
+          @compositionend="onCompositionEnd"
+          @blur="onBlur"
+          @scroll="syncMirrorScroll"
+        ></textarea>
+      </div>
+
+      <!-- @-mention candidate popup (owner task 2026-10-29): opens while
+           the caret sits right after a boundary-valid "@…" fragment.
+           Same surface/border/radius/item tokens as the "+" menu;
+           anchored above the input, left-aligned with it, flipping below
+           when the viewport has no room above. -->
+      <div v-if="mention.open && mentionCandidates.length" ref="mentionMenuEl" class="mention-menu"
+        :class="{ below: mention.below }" role="listbox" aria-label="Capability mentions"
+        data-testid="composer-mention-menu">
+        <div class="plus-menu-title">Capabilities</div>
+        <div class="mention-list" data-testid="composer-mention-list">
+          <div v-for="(c, i) in mentionCandidates" :key="c.id" class="plus-item mention-option" role="option"
+            :aria-selected="i === mention.active ? 'true' : 'false'"
+            :class="{ active: i === mention.active }"
+            :data-testid="'composer-mention-option-' + c.id"
+            @mousedown.prevent="insertMentionCandidate(c)" @mouseenter="mention.active = i">
+            <span class="plus-cap-id">@{{ c.id }}</span>
+            <span class="plus-cap-name">{{ c.displayName || c.id }}</span>
+            <span v-if="!c.enabled" class="mention-will-enable">will be enabled when sent</span>
+            <span v-else class="capability-state" :data-state="c.state">{{ stateText(c) }}</span>
+          </div>
+        </div>
+      </div>
 
       <div class="composer-bar">
         <div class="composer-left">
@@ -299,18 +336,41 @@
         </template>
       </div>
     </div>
+    <!-- @-mention send outcome lines: a mentioned capability whose enable
+         ended in state error blocks the send (the draft is preserved);
+         a mentioned capability left in needs-connection still sent. Both
+         point at the capability's settings card. -->
+    <div v-if="sendErrors.length" class="composer-notice composer-notice-error" data-testid="composer-mention-error">
+      <div v-for="e in sendErrors" :key="e.id" class="composer-notice-row">
+        <span class="composer-notice-cap">@{{ e.id }}</span>
+        <span class="composer-notice-text">{{ e.message }}</span>
+        <button class="plus-cap-settings" type="button"
+          :data-testid="'composer-mention-error-settings-' + e.id"
+          :aria-label="'Open settings for ' + e.id" @click="openCapabilitySettings(e.id)">Settings…</button>
+      </div>
+    </div>
+    <div v-if="sendNotices.length" class="composer-notice composer-notice-soft" data-testid="composer-mention-notice">
+      <div v-for="n in sendNotices" :key="n.id" class="composer-notice-row">
+        <span class="composer-notice-cap">@{{ n.id }}</span>
+        <span class="composer-notice-text">needs a connection before it can run in this task</span>
+        <button class="plus-cap-settings" type="button"
+          :data-testid="'composer-mention-notice-settings-' + n.id"
+          :aria-label="'Open settings for ' + n.id" @click="openCapabilitySettings(n.id)">Settings…</button>
+      </div>
+    </div>
     <div class="composer-caption">Files and Python run locally in your browser. Model requests and explicit network calls may leave this machine.</div>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, nextTick, watch, onBeforeUnmount } from 'vue';
+import { ref, reactive, computed, nextTick, watch, onBeforeUnmount } from 'vue';
 import {
-  store, submit, cancelTask, togglePlusMenu,
+  store, submitWithMentions, cancelTask, togglePlusMenu,
   uploadFiles, removeAttachment, mountFolder,
   beginCapabilityImportFromBytes, beginCapabilityImportFromPath,
   openCapabilitySettings, listDownloadLocusFiles,
 } from '../ui/store.js';
+import { splitMentionFragments, mentionQueryBefore } from '../ui/mentions.js';
 
 defineProps({ centered: { type: Boolean, default: false } });
 
@@ -322,17 +382,195 @@ const placeholder = computed(() => {
   return store.busy ? 'Working… (Esc to cancel)' : 'Describe a task for your workspace…';
 });
 
-function send() {
+// ---------- @-mentions: mirror highlight + candidate popup ----------
+// Recognition lives in src/ui/mentions.js (pure, unit-tested); this
+// component only projects it onto the draft: mirror fragments recompute
+// on every keystroke, so an edited mention that stops being an installed
+// id loses its pill immediately.
+const mirrorEl = ref(null);
+const draftFragments = computed(() =>
+  splitMentionFragments(draft.value, (store.capabilities || []).map((c) => c.id)));
+
+const mention = reactive({ open: false, at: -1, query: '', active: 0, below: false });
+const mentionMenuEl = ref(null);
+let mentionSuppressed = false; // Esc: stay closed until the text changes again
+let composing = false;         // an IME composition is in progress
+let sendInFlight = false;
+const sendErrors = ref([]);
+const sendNotices = ref([]);
+
+// Same order as the "+" menu's capability list: enabled first, then id.
+const mentionCandidates = computed(() => {
+  if (!mention.open) return [];
+  const q = mention.query.toLowerCase();
+  return capRows.value.filter((c) => !q
+    || c.id.toLowerCase().includes(q)
+    || String(c.displayName || '').toLowerCase().includes(q));
+});
+
+function closeMention() {
+  if (!mention.open) return;
+  mention.open = false;
+  mention.at = -1;
+  mention.query = '';
+  mention.active = 0;
+}
+
+// Re-evaluate the popup from the LIVE textarea value + caret (not the
+// draft — v-model flushes composition text late, and the popup must be
+// exact the moment composition ends).
+function refreshMention() {
+  const el = ta.value;
+  if (!el || composing || mentionSuppressed) {
+    closeMention();
+    return;
+  }
+  const hit = mentionQueryBefore(el.value, el.selectionStart);
+  if (!hit) {
+    closeMention();
+    return;
+  }
+  if (mention.at !== hit.at || mention.query !== hit.query) mention.active = 0;
+  mention.open = true;
+  mention.at = hit.at;
+  mention.query = hit.query;
+  nextTick(placeMentionMenu);
+}
+
+function onInput() {
+  mentionSuppressed = false;
+  autogrow();
+  refreshMention();
+}
+
+function onCompositionStart() {
+  composing = true;
+  closeMention();
+}
+
+function onCompositionEnd() {
+  composing = false;
+  // v-model flushes the composed text with this same event; re-evaluate
+  // once it has landed.
+  nextTick(refreshMention);
+}
+
+function onBlur() {
+  closeMention();
+}
+
+function onSelectionChange() {
+  if (!mention.open) return;
+  if (document.activeElement !== ta.value) {
+    closeMention();
+    return;
+  }
+  refreshMention();
+}
+document.addEventListener('selectionchange', onSelectionChange);
+onBeforeUnmount(() => document.removeEventListener('selectionchange', onSelectionChange));
+
+// Mirror/textarea pixel sync: same scrollTop, and — when the textarea
+// shows a scrollbar — the same effective wrap width (its content box
+// shrinks by the scrollbar; the mirror has none).
+function syncMirrorScroll() {
+  const el = ta.value;
+  const m = mirrorEl.value;
+  if (!el || !m) return;
+  m.style.paddingRight = Math.max(0, el.offsetWidth - el.clientWidth) + 'px';
+  m.scrollTop = el.scrollTop;
+}
+
+// Insert the selected candidate: the "@…partial" before the caret becomes
+// "@<id> ", caret after it. While the popup is open Enter NEVER submits.
+function insertMentionCandidate(c) {
+  const el = ta.value;
+  if (!el) return;
+  const text = el.value;
+  const caret = typeof el.selectionStart === 'number' ? el.selectionStart : text.length;
+  const hit = mentionQueryBefore(text, caret);
+  closeMention();
+  if (!hit) return;
+  const insert = '@' + c.id + ' ';
+  const before = text.slice(0, hit.at) + insert;
+  draft.value = before + text.slice(caret);
+  // The textarea is not part of the re-rendered popup subtree, so the
+  // DOM value can be synced by hand right here (same trick as
+  // insertMention — v-model catches up with the same string on flush).
+  el.value = draft.value;
+  el.focus();
+  el.setSelectionRange(before.length, before.length);
+  mentionSuppressed = false;
+  autogrow();
+}
+
+function placeMentionMenu() {
+  const menu = mentionMenuEl.value;
+  const host = menu && menu.parentElement;
+  if (!menu || !host) return;
+  mention.below = host.getBoundingClientRect().top < menu.offsetHeight + 24;
+}
+
+// ---------- send: enable mentioned capabilities, then submit ----------
+// submitWithMentions (store) recognizes the mentions, enables the ones
+// not enabled yet (the settings panel Add action), and submits only when
+// every mentioned capability resolved. status 'blocked' keeps the draft
+// and shows the error line; a needs-connection capability still sent
+// shows the soft notice line.
+async function send() {
   const text = draft.value;
   // A pending approval suspends the running task — it must never be
-  // bypassed (or double-tracked) by submitting over it.
-  if (!text.trim() || store.busy || store.pendingApproval) return;
-  draft.value = '';
-  autogrow();
-  submit(text);
+  // bypassed (or double-tracked) by submitting over it. busy/cancelling:
+  // nothing is sent and nothing is enabled.
+  if (!text.trim() || store.busy || store.cancelling || store.pendingApproval) return;
+  if (sendInFlight) return;
+  sendInFlight = true;
+  closeMention();
+  sendErrors.value = [];
+  sendNotices.value = [];
+  let outcome;
+  try {
+    outcome = await submitWithMentions(text);
+  } finally {
+    sendInFlight = false;
+  }
+  if (outcome.status === 'sent') {
+    // Only clear the draft if the user did not keep typing during the
+    // enable window; their newer text stays untouched then.
+    if (draft.value === text) {
+      draft.value = '';
+      autogrow();
+    }
+    if (outcome.needsConnection.length) sendNotices.value = outcome.needsConnection;
+  } else if (outcome.status === 'blocked') {
+    sendErrors.value = outcome.errors;
+  }
 }
 
 function onKeydown(e) {
+  // IME composition: never intercept — Enter/arrows belong to the
+  // composition until it ends (the popup stays closed meanwhile).
+  if (e.isComposing) return;
+  const candidates = mentionCandidates.value;
+  if (mention.open && candidates.length) {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      mention.active = (mention.active + (e.key === 'ArrowDown' ? 1 : -1) + candidates.length) % candidates.length;
+      return;
+    }
+    if (e.key === 'Enter' || e.key === 'Tab') {
+      e.preventDefault();
+      insertMentionCandidate(candidates[mention.active]);
+      return;
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      mentionSuppressed = true;
+      closeMention();
+      return;
+    }
+  }
   // Enter submits, Shift+Enter inserts a newline.
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
@@ -345,6 +583,7 @@ function autogrow() {
   if (!el) return;
   el.style.height = 'auto';
   el.style.height = Math.min(el.scrollHeight, 180) + 'px';
+  syncMirrorScroll();
 }
 
 // ---------- the "+" cascading menu ----------

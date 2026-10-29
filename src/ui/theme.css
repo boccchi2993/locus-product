@@ -877,3 +877,54 @@ input, select, textarea { font-family: inherit; font-size: inherit; color: inher
   white-space: pre-wrap; word-break: break-word;
   background: var(--surface-soft); border: 1px solid var(--border-soft); border-radius: 6px;
 }
+
+/* ============ @-mentions (owner task 2026-10-29) ============ */
+/* Mirror layer behind the transparent composer textarea: identical text
+   metrics (font family/size/line-height inherit from the same globals the
+   textarea gets; no border, no padding), invisible glyphs. Only the
+   recognized mention spans paint — a soft accent pill that shows through
+   the textarea background UNDER the normal-colored text, so IME
+   composition text stays visible. */
+.composer-input-wrap { position: relative; }
+.composer-input-wrap .composer-input { position: relative; z-index: 1; }
+.composer-mirror {
+  position: absolute; inset: 0; overflow: hidden;
+  font-size: 14.5px; line-height: 1.55;
+  white-space: pre-wrap; word-wrap: break-word;
+  color: transparent; pointer-events: none;
+}
+.composer-mirror .mention-mark { border-radius: 3px; }
+.mention-mark { background: var(--accent-soft); color: transparent; }
+/* timeline variant: the sent message text itself stays visible; only the
+   pill is added around it. */
+.user-bubble .mention-mark { color: inherit; border-radius: 4px; padding: 0 1px; }
+
+/* candidate popup: the same surface/border/radius/shadow/padding tokens
+   and the same anchor math as the "+" menu (left 10px, 6px above the
+   composer box), flipping below when the viewport has no room above.
+   The list scrolls on its own (~240px). */
+.mention-menu {
+  position: absolute; left: 10px; bottom: calc(100% + 6px); z-index: 28;
+  min-width: 260px; max-width: calc(100vw - 24px);
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; box-shadow: var(--shadow-soft);
+  padding: 6px;
+}
+.mention-menu.below { bottom: auto; top: calc(100% + 6px); }
+.mention-list { max-height: 240px; overflow-y: auto; overscroll-behavior: contain; }
+.mention-option { cursor: default; }
+.mention-option.active { background: var(--border-soft); }
+.mention-will-enable { margin-left: auto; font-style: normal; font-size: 11px; color: var(--warn); flex-shrink: 0; }
+
+/* send-outcome lines under the composer: blocked (error) and
+   needs-connection notices for mentioned capabilities. */
+.composer-notice { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+.composer-notice-row {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12.5px; padding: 6px 10px; border-radius: 8px;
+}
+.composer-notice-error .composer-notice-row { background: var(--error-bg); color: var(--error); }
+.composer-notice-soft .composer-notice-row { background: var(--warn-bg); color: var(--warn); }
+.composer-notice-cap { font-weight: 600; flex-shrink: 0; }
+.composer-notice-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.composer-notice .plus-cap-settings { flex-shrink: 0; }
