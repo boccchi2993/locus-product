@@ -43,7 +43,7 @@
     <p class="recents-note">Tasks are stored locally in this browser profile; they are not synced to a cloud service.</p>
 
     <div class="sidebar-footer">
-      <button class="footer-btn" type="button" @click="store.settingsOpen = true">
+      <button class="footer-btn" type="button" data-testid="sidebar-settings" @click="onOpenSettings">
         <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4">
           <circle cx="8" cy="8" r="2.2"/>
           <path d="M8 1.5v1.8M8 12.7v1.8M1.5 8h1.8M12.7 8h1.8M3.4 3.4l1.3 1.3M11.3 11.3l1.3 1.3M12.6 3.4l-1.3 1.3M4.7 11.3l-1.3 1.3"/>
@@ -71,6 +71,15 @@ function onNewTask() {
 
 function onOpenConversation(id) {
   openConversation(id);
+  store.sidebarDrawerOpen = false;
+}
+
+// Owner UI review 2026-10-29 (mobile item 10): opening Settings from the
+// drawer must CLOSE the drawer — otherwise the drawer overlay keeps
+// covering the settings modal and the first tap on the modal's × is
+// swallowed by the drawer's click-outside handler.
+function onOpenSettings() {
+  store.settingsOpen = true;
   store.sidebarDrawerOpen = false;
 }
 

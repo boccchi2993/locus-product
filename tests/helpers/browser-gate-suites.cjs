@@ -45,6 +45,13 @@ const SUITES = [
   // panel closed), checks the import-report cancellation, the @mention
   // insertion and the <640px stepped mode.
   'e2e-composer-menu.cjs',
+  // Settings-panel mobile checks (owner UI review 2026-10-29, items
+  // 9/10/11): under a 390×844 mobile+touch device simulation the settings
+  // panel keeps its head × reachable at the bottom of the scroll, opening
+  // Settings from the sidebar drawer closes the drawer and the FIRST touch
+  // on × closes the panel, and the composer "+" / send buttons expose
+  // ≥44×44 hit areas — every tap a real Input.dispatchTouchEvent.
+  'e2e-settings-mobile.cjs',
 ];
 
 // Resolve requested suite names against the registry. Returns the run list
