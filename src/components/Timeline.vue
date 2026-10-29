@@ -14,7 +14,14 @@
             </svg>
             {{ item.imageCount }} {{ item.imageCount === 1 ? 'image' : 'images' }}
           </span>
-          <span class="user-text">{{ item.content }}</span>
+          <!-- @-mention fragments render as plain text interpolation
+               (splitMentionFragments — never v-html); a recognized
+               capability mention gets the same soft pill as the
+               composer. History is recognized against the CURRENTLY
+               installed capabilities. -->
+          <span class="user-text"><template v-for="(f, i) in mentionFragments(item.content)" :key="i"><span
+              v-if="f.mention" class="mention-mark" :data-mention="f.mention">{{ f.text }}</span><span
+              v-else>{{ f.text }}</span></template></span>
         </div>
       </div>
 
@@ -48,8 +55,16 @@ import ReasoningItem from './ReasoningItem.vue';
 import ToolCallItem from './ToolCallItem.vue';
 import ToolResultItem from './ToolResultItem.vue';
 import { LocusMarkdown } from '../ui/markdown.js';
+import { store } from '../ui/store.js';
+import { splitMentionFragments } from '../ui/mentions.js';
 
 defineProps({ conversation: { type: Object, required: true } });
 
 const renderMd = (text) => LocusMarkdown.render(text);
+
+// The same recognition the composer used at send time, re-run against
+// the CURRENTLY installed capability ids (history stays honest about
+// what is a capability mention on this page session).
+const mentionFragments = (text) =>
+  splitMentionFragments(text, (store.capabilities || []).map((c) => c.id));
 </script>

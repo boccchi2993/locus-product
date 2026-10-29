@@ -325,6 +325,7 @@ tests.push(['registry: default suite list (14 original + review-round + C1-P3 + 
     'e2e-import-reports.cjs',
     'e2e-composer-menu.cjs',
     'e2e-settings-mobile.cjs',
+    'e2e-composer-mentions.cjs',
   ];
   check('default list intact', JSON.stringify(SUITES) === JSON.stringify(expected), JSON.stringify(SUITES));
   check('empty request -> full list', JSON.stringify(require('./helpers/browser-gate-suites.cjs').resolveSuites([]).suites) === JSON.stringify(expected));

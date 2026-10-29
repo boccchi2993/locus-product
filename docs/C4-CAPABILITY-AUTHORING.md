@@ -19,6 +19,8 @@
 
 > 2026-10-28：为满足 A2，.locus 写入端改为一律 store（见 CAPABILITY-INSTALL.md）。
 
+> 2026-10-29：A5 中“不支持模型自行下载第三方 wheel”被 DECISIONS.md D14 取代；MCP 仍不在本版范围。
+
 ## 2. 组成
 
 ### 2.1 `locus_capability_sdk`（纯 Python，只用标准库）
@@ -83,6 +85,8 @@ API（`import locus_capability_sdk as sdk`）：
 - 只保留最近 20 份，更早的自动删除。
 - `/home/locus/capability-imports` 加入 home 目录骨架（LOCUS_HOME_SKELETON）。
 - 用户在确认框里点了取消，同样写一份，`userAction` 为 `"cancelled"`，让模型知道用户没有导入。
+- 同一秒内文件名冲突时依次追加后缀 `~02`、`~03` … `~99`（`~` 排在 `.` 之后、两位补零，保证按文件名排序等于写入顺序；后缀位不复用——prune 删掉的名字不会再拿来写新报告）。
+- 2026-10-29 注记：一次导入尝试只写一份报告——检查失败立即写（就是最终报告）；检查通过后确认框弹出时不写，用户点 Import 写 commit 报告、点 Cancel 写 cancelled 报告；确认框开着时页面被关闭或刷新，不写报告。自此“每次导入尝试都写一个 JSON 文件”与实现一致（此前实现会在弹框时先写一份 `userAction: null` 的 inspect 报告，同秒两份会让自己被当成“最新”读到）。
 
 ## 3. 安全与信任
 
@@ -100,11 +104,11 @@ API（`import locus_capability_sdk as sdk`）：
    - 不需要新能力就能完成的（模型现有工具已经够用），直接做，不要造能力。
 2. **规范**
    - id 规则；版本号；目录约定（§2.2）。
-   - plugin 只用标准库和 runtime 预装包（pandas、numpy）。
+   - plugin 只用标准库和 runtime 预装包（pandas、numpy）；需要第三方包时，模型可以下载 wheel 打包进能力（2026-10-29：原“只用标准库和 runtime 预装包”的限制被 DECISIONS.md D14 取代；下载用 bash 中的 curl -o，来源核实、依赖闭包与顺序由 capability-authoring 负责，导入端仍执行 D13 第 2、3 条检查）。
    - 凭据声明的字段和限制。
    - skill 中 curl 只能写 `$NAME`。
 3. **Locus 环境限制**
-   - python heredoc 必须是一次单独的 bash 调用；不支持反斜杠续行；没有网络。
+   - python heredoc 必须是一次单独的 bash 调用；不支持反斜杠续行；网络：GET/HEAD 不需要审批（单个响应上限 16 MiB、直连 60 秒超时），写操作需要用户审批；Python 层没有网络，下载只能在 bash 中用 curl -o。（2026-10-29 更正，原文“没有网络”有误。）
    - 文件系统的各个目录及其用途。
 4. **流程**
    1. 和用户确认需求，必要时提一两个问题。

@@ -46,7 +46,7 @@ const os = require('os');
 const path = require('path');
 const {
   allocateFreePort, closeChrome, connectToTarget, isProcessAlive, launchChrome,
-  waitForCdp, waitForPageTarget, waitForRuntimeCondition,
+  listenWithRetry, waitForCdp, waitForPageTarget, waitForRuntimeCondition,
 } = require('./helpers/chrome.cjs');
 const { runStorageChecks } = require('./helpers/m3c-storage-checks.cjs');
 const { classifySelfProof } = require('./helpers/m3c-storage-built-verdict.cjs');
@@ -168,7 +168,7 @@ async function runBuiltGate(pageUrl, distDir, checker, opts = {}) {
       return infra('browser-launch', e);
     }
     try {
-      await waitForCdp(chrome, { timeoutMs: 15000 });
+      await waitForCdp(chrome);
       const target = await waitForPageTarget(chrome, 'about:blank', { timeoutMs: 15000 });
       cdp = await connectToTarget(target);
       await cdp.send('Page.enable');
@@ -274,12 +274,13 @@ async function runBuiltGate(pageUrl, distDir, checker, opts = {}) {
 // Every request+status is logged: the server's own record the judge
 // cross-checks against the browser-side CDP observation.
 async function serveDistCopy(rootDir) {
-  const port = await allocateFreePort();
   const log = [];
   const record = (req, status) => {
     try { log.push({ path: new URL(req.url, 'http://127.0.0.1').pathname, status }); } catch (e) { /* ignore */ }
   };
-  const server = http.createServer((req, res) => {
+  // Bind through listenWithRetry: allocateFreePort has a release/rebind
+  // race, so an EADDRINUSE retries on a freshly allocated port (up to 3).
+  const { server, port } = await listenWithRetry(() => http.createServer((req, res) => {
     let rel;
     try { rel = decodeURIComponent(new URL(req.url, 'http://127.0.0.1').pathname); }
     catch (e) { res.statusCode = 400; record(req, 400); return res.end(); }
@@ -291,8 +292,7 @@ async function serveDistCopy(rootDir) {
       record(req, 200);
       res.end(data);
     });
-  });
-  await new Promise((resolve) => server.listen(port, '127.0.0.1', resolve));
+  }), await allocateFreePort());
   return { server, url: 'http://127.0.0.1:' + port + '/', log };
 }
 

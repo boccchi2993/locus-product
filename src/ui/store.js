@@ -68,6 +68,7 @@ import { ConversationHistoryWorkspace, historyToolOutputPath } from '../conversa
 // M2b (repository split): the Product prompt inputs — behavior notes and
 // the descriptionPort adapter over the runtime's PUBLIC describeCommands().
 import { locusEnvironmentNotes, productDescriptionPort } from './product-prompt.js';
+import { parseMentions } from './mentions.js';
 // M3c: the presentation projector — the store imports it explicitly
 // (the classic global read is gone with the classic script tag).
 import { LocusProjector } from './projector.js';
@@ -377,7 +378,10 @@ const productCredentialPort = credentials
 // (the model reads them over bash and reacts to the diagnostics). The
 // provider is resolved lazily — memory before boot, OPFS after — and a
 // failed report write lands in the persistence-issue report; reporting
-// never breaks the import it describes.
+// never breaks the import it describes. The ONE report of a PASSED
+// inspection is written at DECISION time (confirm → commit report,
+// cancel → cancelled report); the dialog being open reports nothing, so
+// a page closed mid-decision leaves no report (2026-10-29 FIX-IR1).
 const importReports = createImportReports({
   resolveHome: () => {
     const r = vfs.resolveMount('/home/locus');
@@ -397,10 +401,11 @@ async function recordImportReport(report) {
   }
 }
 
-// The §2.4 inspect-stage body: a checked result (ok, id/version/kind) or a
-// refusal/throw (ok false + diagnostics). Structural facts only — the
-// summary's commit token and every credential value stay out by
-// construction.
+// The §2.4 inspect-stage REFUSAL body (ok false + diagnostics): a failed
+// check or a throw — the attempt's ONE report, written immediately. A
+// PASSED inspection reports at decision time instead (2026-10-29
+// FIX-IR1). Structural facts only — the summary's commit token and every
+// credential value stay out by construction.
 function inspectReportBody(source, label, result, errorMessage) {
   const ok = !errorMessage && !!result && result.ok === true;
   return {
@@ -429,46 +434,48 @@ function inspectReportBody(source, label, result, errorMessage) {
 //        connect-credentials step opens when connectStep is true (the key
 //        values live ONLY in the panel's local refs, never here)
 export async function beginCapabilityImportFromBytes(bytes, label) {
-  let report;
   try {
     const result = await inspectCapabilityPackage(bytes);
     if (result.ok) {
+      // FIX-IR1 (§2.4 one report per attempt): a passed inspection writes
+      // NOTHING while the confirm dialog is open — its decision reports
+      // (confirm → commit, cancel → cancelled). The old pre-decision
+      // inspect report made one import land TWO files, and the same-second
+      // filename sort picked the undecided one as "newest".
       store.capabilityImport = { source: 'file', label, summary: result };
-    } else {
-      store.capabilityImport = { source: 'file', label, diagnostics: result.diagnostics };
+      return;
     }
-    report = inspectReportBody('file', label, result, null);
+    store.capabilityImport = { source: 'file', label, diagnostics: result.diagnostics };
+    await recordImportReport(inspectReportBody('file', label, result, null));
   } catch (e) {
     store.capabilityImport = {
       source: 'file',
       label,
       diagnostics: [{ code: 'capability_import_failed', path: '', message: e.message }],
     };
-    report = inspectReportBody('file', label, null, e.message);
+    await recordImportReport(inspectReportBody('file', label, null, e.message));
   }
-  await recordImportReport(report);
 }
 
 export async function beginCapabilityImportFromPath(vfsPath) {
   const p = String(vfsPath || '');
-  let report;
   try {
     const result = await inspectCapabilityPackageFromPath(p);
     if (result.ok) {
+      // Same FIX-IR1 seam as the bytes entry point above.
       store.capabilityImport = { source: 'path', label: p, summary: result };
-    } else {
-      store.capabilityImport = { source: 'path', label: p, diagnostics: result.diagnostics };
+      return;
     }
-    report = inspectReportBody('path', p, result, null);
+    store.capabilityImport = { source: 'path', label: p, diagnostics: result.diagnostics };
+    await recordImportReport(inspectReportBody('path', p, result, null));
   } catch (e) {
     store.capabilityImport = {
       source: 'path',
       label: p,
       diagnostics: [{ code: 'capability_import_failed', path: '', message: e.message }],
     };
-    report = inspectReportBody('path', p, null, e.message);
+    await recordImportReport(inspectReportBody('path', p, null, e.message));
   }
-  await recordImportReport(report);
 }
 
 // D12: the credentials of JUST-committed capability that are still in the
@@ -2127,6 +2134,65 @@ export async function submit(text) {
   const handle = taskRunner.submit(input);
   if (!handle) return;
   await handle.ended;
+}
+
+// @-mentions (owner task 2026-10-29): the composer's send path. Mentions
+// are recognized against the INSTALLED capability ids; every mentioned
+// capability that is not enabled yet is enabled FIRST — the exact same
+// enableCapability() action the settings panel's Add button uses, so the
+// task freezes its TaskEnvironment with the capability already inside
+// (the environment snapshot is built at submit time). A mentioned
+// capability that ends in state 'error' (including one that was already
+// enabled as 'error') BLOCKS the send entirely; needs-connection
+// mentioned capabilities are enabled but the task runs anyway — the
+// harness capability index honestly marks what stays unavailable. The
+// message text is sent VERBATIM: "@charts" stays in the user message and
+// nothing hidden is appended to it. The task is NOT awaited — the
+// composer fires this and clears the draft as soon as the task is
+// admitted, exactly like its previous direct submit().
+export async function submitWithMentions(text) {
+  const input = String(text || '');
+  const clean = { errors: [], needsConnection: [] };
+  if (!input.trim()) return { status: 'refused', ...clean };
+  if (store.pendingApproval || store.busy || store.cancelling || session.task) {
+    return { status: 'refused', ...clean };
+  }
+  const installed = capabilityManager ? capabilityManager.listCapabilities() : [];
+  const { mentions } = parseMentions(input, installed.map((c) => c.id));
+  if (!mentions.length) {
+    submit(input);
+    return { status: 'sent', ...clean };
+  }
+  const errors = [];
+  const needsConnection = [];
+  for (const m of mentions) {
+    const cap = installed.find((c) => c.id === m.id);
+    if (!cap) continue;
+    if (cap.enabled) continue;
+    try {
+      await enableCapability(m.id);
+    } catch (e) {
+      // The enable action itself threw (storage gate, unknown id, …) —
+      // the original error text is what the user sees.
+      errors.push({ id: m.id, displayName: cap.displayName || m.id, message: String((e && e.message) || e) });
+      break; // the send is blocked either way; stop here
+    }
+  }
+  if (!errors.length) {
+    const after = capabilityManager.listCapabilities();
+    for (const m of mentions) {
+      const cap = after.find((c) => c.id === m.id);
+      if (!cap) continue;
+      if (cap.state === 'error') {
+        errors.push({ id: m.id, displayName: cap.displayName || m.id, message: String(cap.error || 'the capability failed to enable') });
+      } else if (cap.state === 'needs-connection') {
+        needsConnection.push({ id: m.id, displayName: cap.displayName || m.id });
+      }
+    }
+  }
+  if (errors.length) return { status: 'blocked', errors, needsConnection };
+  submit(input);
+  return { status: 'sent', errors: [], needsConnection };
 }
 
 export function cancelTask() {
