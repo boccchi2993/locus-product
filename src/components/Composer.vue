@@ -460,11 +460,11 @@ function onBlur() {
 }
 
 function onSelectionChange() {
+  // Caret tracking only: a caret that left the "@…" fragment closes the
+  // popup. Focus loss is onBlur's job — gating this on activeElement
+  // would race a just-opened popup whenever a selectionchange lands
+  // after focus moved elsewhere.
   if (!mention.open) return;
-  if (document.activeElement !== ta.value) {
-    closeMention();
-    return;
-  }
   refreshMention();
 }
 document.addEventListener('selectionchange', onSelectionChange);

@@ -43,8 +43,10 @@
 // upstream deliberately ECHOES the received Authorization header back in
 // the body — the runtime must mask it before the model sees it.
 //
-// Screenshots (§5, docs/screenshots/c3-*.png) are captured along the way;
-// set C3_SHOTS_DIR to redirect them.
+// Screenshots (§5) are captured along the way into a TEMP DIRECTORY (never
+// a path inside the repository — owner decision 2026-10-29 keeps generated
+// shots out of git); override with C3_SHOTS_DIR. The actual directory is
+// printed when the gate finishes.
 const { spawnSync } = require('child_process');
 const fs = require('fs');
 const http = require('http');
@@ -57,7 +59,8 @@ const {
 
 const ROOT = path.join(__dirname, '..');
 const VITE_CLI = path.join(ROOT, 'node_modules', 'vite', 'bin', 'vite.js');
-const SHOT_DIR = process.env.C3_SHOTS_DIR || path.join(ROOT, 'docs', 'screenshots');
+const SHOT_DIR = process.env.C3_SHOTS_DIR
+  || path.join(os.tmpdir(), 'locus-c3-shots-' + new Date().toISOString().replace(/[:.]/g, '-'));
 
 const CAP_ID = 'cred-web';
 const CRED_NAME = 'CRED_TEST_KEY';

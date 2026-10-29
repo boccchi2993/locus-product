@@ -4,11 +4,12 @@
 // and the timeline; these checks pin the owner rules:
 //
 //   MN1  "@" at the text start mentions; a bare "@" never does
-//   MN2  "@" after whitespace mentions; glued "a@charts" and email
-//        addresses never do
-//   MN3  after the id: end of text, whitespace or punctuation terminate
-//        the mention; a following letter ("@chartsX") or non-latin
-//        letter ("@charts中") glues it into a longer word — plain text
+//   MN2  "@" after whitespace or a non-ASCII character mentions (CJK
+//        boundary, owner decision 2026-10-29); glued "a@charts" and
+//        email addresses never do
+//   MN3  after the id: end of text, whitespace, punctuation or any
+//        non-ASCII character terminates the mention; a following ASCII
+//        letter ("@chartsX") glues it into a longer word — plain text
 //   MN4  only INSTALLED ids count; unknown "@xxx" stays plain text
 //   MN5  trailing separators are backtracked when the maximal id run is
 //        not installed ("@charts." recognizes "charts"; "@charts.x"
@@ -20,6 +21,9 @@
 //   MN9  mentionQueryBefore: the popup trigger — boundary-valid "@"
 //        followed by 0..n id chars directly before the caret
 //   MN10 mentions list carries first-occurrence spans in order
+//   MN11 CJK boundaries (owner decision 2026-10-29): 中文前后不需要空格 —
+//        用@charts画个图 mentions; only ASCII word chars glue on the
+//        left, only ASCII letters glue on the right
 //
 // Run: node tests/mentions.test.mjs
 import { parseMentions, splitMentionFragments, mentionQueryBefore } from '../src/ui/mentions.js';
@@ -44,8 +48,8 @@ check('MN2a @ after a space mentions', ids('use @charts please') === 'charts');
 check('MN2b @ after a newline mentions', ids('one\ntwo @charts') === 'charts');
 check('MN2c glued a@charts never mentions', ids('a@charts') === '');
 check('MN2d an email address never mentions', ids('write to user@example.com now') === '');
-check('MN2e punctuation before @ does not enable it ((@charts))',
-  ids('see (@charts) now') === '');
+check('MN2e ASCII punctuation before @ is a legal boundary (owner decision 2026-10-29: only ASCII word chars glue)',
+  ids('see (@charts) now') === 'charts');
 
 // ---------- MN3 terminator ----------
 check('MN3a punctuation after the id terminates it', ids('try @charts.') === 'charts');
@@ -53,8 +57,8 @@ check('MN3b end of text terminates', ids('try @charts') === 'charts');
 check('MN3c a comma terminates', ids('try @charts, then @deepseek-web') === 'charts,deepseek-web');
 check('MN3d a following uppercase letter glues the word (plain text)',
   ids('try @chartsX now') === '');
-check('MN3e a following non-latin letter glues the word (plain text)',
-  ids('试试@charts中文') === '');
+check('MN3e CJK text after the id terminates it cleanly (owner decision 2026-10-29: 中文前后不需要空格)',
+  ids('试试@charts中文') === 'charts');
 check('MN3f two mentions separated by whitespace keep their order',
   ids('@charts @deepseek-web 帮我画图并总结') === 'charts,deepseek-web');
 
@@ -135,6 +139,28 @@ check('MN10a first-occurrence order with exact spans',
   spans(two.mentions) === 'deepseek-web@0-13,charts@19-26', spans(two.mentions));
 check('MN10b occurrences carry every span in text order',
   spans(two.occurrences) === spans(two.mentions));
+
+// ---------- MN11 CJK boundaries (owner decision 2026-10-29: 中文前后不需要空格) ----------
+check('MN11a 用@charts画个图 mentions charts (no spaces needed)', ids('用@charts画个图') === 'charts');
+check('MN11b two CJK-glued mentions in one sentence both recognized',
+  ids('用@charts和@deepseek-web') === 'charts,deepseek-web');
+check('MN11c an ASCII-letter-glued @ (email-like) stays unrecognized',
+  ids('联系 a@charts.com') === '');
+check('MN11d an ASCII letter after the id still glues the word',
+  ids('用@chartsX的图') === '');
+check('MN11e full-width punctuation before @ is a legal boundary',
+  ids('（@charts）') === 'charts');
+check('MN11f fragments highlight ONLY @charts inside CJK text',
+  (() => {
+    const f = splitMentionFragments('用@charts画个图', INSTALLED);
+    return f.length === 3 && f[0].text === '用' && f[0].mention === null
+      && f[1].text === '@charts' && f[1].mention === 'charts'
+      && f[2].text === '画个图' && f[2].mention === null;
+  })(), JSON.stringify(splitMentionFragments('用@charts画个图', INSTALLED)));
+check('MN11g the popup trigger fires behind CJK text (用@)',
+  JSON.stringify(mentionQueryBefore('用@', 2)) === '{"at":1,"query":""}');
+check('MN11h a full-width comma terminates the id',
+  ids('用@charts，谢谢') === 'charts');
 
 console.log('---');
 console.log(failed ? failed + ' check(s) FAILED' : 'all ' + passed + ' checks passed');

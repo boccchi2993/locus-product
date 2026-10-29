@@ -7,13 +7,17 @@
 //  so the composer popup, the mirror highlight, the send-time enable
 //  pass and the timeline all see exactly the same mentions.
 //
-//  Owner rules (2026-10-29):
+//  Owner rules (2026-10-29, revised the same day for CJK input):
 //    - a mention is "@" immediately followed by a capability id;
-//    - the "@" must sit at the text start or right after whitespace
-//      ("a@charts" and email addresses never mention);
+//    - the "@" must sit at the text start OR after a character that is
+//      NOT an ASCII letter/digit/./_/- . Whitespace, Chinese text and
+//      full-width punctuation are all legal boundaries ("用@charts画个图"
+//      mentions charts). An ASCII word character before the "@" glues it
+//      into a longer token — "a@charts" and email addresses never mention;
 //    - ids are [a-z0-9._-]; after the id the text must end, or continue
-//      with whitespace or punctuation — a following LETTER glues the id
-//      into a longer word ("@chartsX", "@charts中文" stay plain text);
+//      with whitespace/punctuation/ANY non-ASCII character. Only an
+//      immediately following ASCII LETTER glues the id into a longer word
+//      ("@chartsX" stays plain text; "@charts中文" mentions charts);
 //    - only INSTALLED ids count; an unrecognized "@xxx" stays plain text
 //      (no highlight, no enable, nothing at all);
 //    - when the maximal id run is not installed, trailing [._-]
@@ -30,15 +34,30 @@ function isIdChar(ch) {
     || ch === '.' || ch === '_' || ch === '-';
 }
 
-// A mention must not run into a longer word: any following letter or
-// digit (any script) kills the mention. Digits and ascii lowercase can
-// never actually reach this check (they are id chars, consumed by the
-// maximal run) — uppercase letters and non-latin letters do.
+// The GLUE class: ASCII letters, digits, dot, underscore, dash. An "@"
+// preceded by one of these is part of a longer ASCII token (a@charts,
+// user@example.com, foo.@bar) and never starts a mention; anything else —
+// whitespace, start of text, Chinese, full-width punctuation, other ASCII
+// punctuation like "("/"," — is a legal boundary (owner decision
+// 2026-10-29: CJK users write 用@charts画个图 without spaces).
+function isAsciiWordChar(ch) {
+  return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')
+    || (ch >= '0' && ch <= '9') || ch === '.' || ch === '_' || ch === '-';
+}
+
+function isMentionStart(text, at) {
+  return at === 0 || !isAsciiWordChar(text[at - 1]);
+}
+
+// A mention must not run into a longer ASCII word: an immediately
+// following ASCII LETTER kills the mention. Non-ASCII letters (中文, é)
+// and punctuation terminate it cleanly — again the CJK no-space rule.
+// Digits and ascii lowercase can never actually reach this check (they
+// are id chars, consumed by the maximal run).
 function endsCleanly(text, end) {
   if (end >= text.length) return true;
-  const ch = text[end];
-  if (/\s/.test(ch)) return true;
-  return !/[\p{L}\p{N}]/u.test(ch);
+  if (/\s/.test(text[end])) return true;
+  return !/[A-Za-z]/.test(text[end]);
 }
 
 // Parse one text against the installed capability ids.
@@ -52,7 +71,7 @@ export function parseMentions(text, installedIds) {
   const occurrences = [];
   for (let i = 0; i < src.length; i++) {
     if (src[i] !== '@') continue;
-    if (i > 0 && !/\s/.test(src[i - 1])) continue;
+    if (!isMentionStart(src, i)) continue;
     let runEnd = i + 1;
     while (runEnd < src.length && isIdChar(src[runEnd])) runEnd++;
     if (runEnd === i + 1) continue; // a bare "@" never mentions
@@ -113,6 +132,6 @@ export function mentionQueryBefore(text, caret) {
   while (runStart > 0 && isIdChar(src[runStart - 1])) runStart--;
   const at = runStart - 1;
   if (at < 0 || src[at] !== '@') return null;
-  if (at > 0 && !/\s/.test(src[at - 1])) return null;
+  if (at > 0 && isAsciiWordChar(src[at - 1])) return null;
   return { at, query: src.slice(at + 1, at0) };
 }

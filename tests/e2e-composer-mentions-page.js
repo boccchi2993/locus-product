@@ -24,6 +24,9 @@
 //           line + the capability index; the user message is verbatim
 //     MN-G  timeline highlight (text interpolation; message content never
 //           becomes innerHTML)
+//     MN-H  CJK boundaries (owner decision 2026-10-29): 用@ triggers the
+//           popup; 用@charts画个图 highlights only @charts in the mirror
+//           AND in the sent timeline message
 //   phase 2 (390×844): popup + insert + highlight on a phone viewport.
 //
 // Returns a string report; each line is "PASS name" / "FAIL name | detail".
@@ -59,6 +62,7 @@
   const capOf = (id) => (L.store.capabilities || []).find((c) => c.id === id) || null;
   const type = (text, caret) => {
     const el = ta();
+    el.focus(); // real typing has the caret: the popup tracks a focused composer
     el.value = text;
     if (caret === undefined) caret = text.length;
     el.setSelectionRange(caret, caret);
@@ -298,6 +302,36 @@
       check('G6 the raw message text is present as TEXT',
         $$('.user-bubble').some((b) => b.textContent.includes('<img src=x onerror=window.__mentionXss=1>')),
         JSON.stringify($$('.user-bubble').map((b) => b.textContent.slice(0, 80))));
+
+      // ---------- MN-H: CJK boundaries (owner decision 2026-10-29) ----------
+      type('用@', 2);
+      check('H1 typing 用@ opens the popup (CJK boundary before @)',
+        await waitFor(() => !!menu(), 4000),
+        JSON.stringify({ v: ta().value, caret: ta().selectionStart, caps: (L.store.capabilities || []).length }));
+      type('用@charts画个图');
+      await sleep(150); // a stale popup would have closed by now (Vue flush)
+      check('H2 no popup with the caret after CJK text', !menu());
+      check('H3 the mirror highlights ONLY @charts inside 用@charts画个图',
+        await waitFor(() => JSON.stringify(mirrorMarks()) === JSON.stringify(['@charts']), 4000),
+        JSON.stringify(mirrorMarks()));
+      window.__e2eReplies.push(FINAL('mentions e2e: cjk done.'));
+      const usersBeforeH = $$('.item-user').length;
+      key('Enter');
+      await waitTaskDone('cjk mention', usersBeforeH);
+      check('H4 the CJK message rendered in the timeline',
+        $$('.item-user').length > usersBeforeH
+        && $$('.item-user').some((b) => b.textContent.includes('画个图')),
+        JSON.stringify($$('.item-user').slice(-1).map((b) => b.textContent.slice(0, 60))));
+      check('H5 the timeline highlight covers ONLY the @charts span of the CJK message',
+        (() => {
+          const bubble = $$('.item-user').find((b) => b.textContent.includes('画个图'));
+          if (!bubble) return false;
+          const marks = bubble.querySelectorAll('.mention-mark');
+          const text = bubble.querySelector('.user-text');
+          return marks.length === 1 && marks[0].textContent === '@charts'
+            && !!text && text.textContent.startsWith('用@charts画个图');
+        })(),
+        JSON.stringify($$('.item-user').slice(-1).map((b) => b.innerHTML.slice(0, 120))));
 
       resetComposer();
       check('Z1 no console errors / unhandled rejections',
