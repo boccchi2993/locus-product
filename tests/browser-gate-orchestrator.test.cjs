@@ -311,7 +311,7 @@ function captureErrors(store) {
 
 const tests = [];
 
-tests.push(['registry: default suite list (14 original + review-round + C1-P3 + C3-P1b + C4 §2.4 + composer-menu registration)', async () => {
+tests.push(['registry: default suite list (14 original + review-round + C1-P3 + C3-P1b + C4 §2.4 + composer-menu + settings-mobile registration)', async () => {
   const expected = [
     'e2e-ui.cjs',
     'e2e-capability-ui.cjs',
@@ -324,6 +324,7 @@ tests.push(['registry: default suite list (14 original + review-round + C1-P3 + 
     'e2e-credentials.cjs',
     'e2e-import-reports.cjs',
     'e2e-composer-menu.cjs',
+    'e2e-settings-mobile.cjs',
     'e2e-composer-mentions.cjs',
   ];
   check('default list intact', JSON.stringify(SUITES) === JSON.stringify(expected), JSON.stringify(SUITES));

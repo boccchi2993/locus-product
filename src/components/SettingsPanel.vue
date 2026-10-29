@@ -1,336 +1,376 @@
 <template>
   <div class="modal-backdrop" @click.self="close">
     <div ref="panelEl" class="modal settings-panel" role="dialog" aria-label="Settings">
-      <div class="modal-head">
+      <div class="modal-head" data-testid="settings-head">
         <span>Settings</span>
-        <button class="icon-btn" type="button" @click="close">×</button>
+        <button class="icon-btn" type="button" data-testid="settings-close" aria-label="Close settings" @click="close">×</button>
       </div>
 
-      <div class="field">
-        <label for="set-api-key">API key</label>
-        <input id="set-api-key" v-model="store.settings.apiKey" type="password" placeholder="sk-…" spellcheck="false" autocomplete="off">
-      </div>
-      <div class="field">
-        <label for="set-api-base">API endpoint</label>
-        <input id="set-api-base" v-model="store.settings.apiBase" type="text" spellcheck="false" autocomplete="off">
-      </div>
-      <div class="field">
-        <label for="set-model">Model</label>
-        <input id="set-model" v-model="store.settings.model" type="text" spellcheck="false" autocomplete="off">
-      </div>
-      <div class="field">
-        <label for="set-max-tokens">Max output tokens</label>
-        <input id="set-max-tokens" v-model.number="store.settings.maxTokens" type="number" min="1" step="1" inputmode="numeric">
-        <div class="hint">Upper bound for one model reply. Lower it if the provider rejects requests; Locus never guesses it from the model name.</div>
-      </div>
-      <div class="field">
-        <label for="set-context-window">Context window (tokens)</label>
-        <input id="set-context-window" v-model.number="store.settings.contextWindow" type="number" min="1" step="1" inputmode="numeric" placeholder="unknown">
-        <div class="hint">Optional: the model's total context size. When set, Locus keeps each request within it, calibrated from the token counts the provider reports. Leave empty if unknown; Locus never guesses it from the model name.</div>
-      </div>
-      <div class="field">
-        <label for="set-dialect">API dialect</label>
-        <select id="set-dialect" v-model="store.settings.dialect">
-          <option value="auto">auto — detect from endpoint</option>
-          <option value="openai">openai — OpenAI-compatible</option>
-          <option value="anthropic">anthropic — Anthropic-compatible</option>
-        </select>
-        <div class="hint">Set manually when a gateway or corporate proxy cannot be auto-detected.</div>
-      </div>
-      <div class="field">
-        <label for="set-proxy">Relay / proxy <span class="hint-inline">optional</span></label>
-        <input id="set-proxy" v-model="store.settings.proxy" type="text" placeholder="https://your-proxy.workers.dev" spellcheck="false" autocomplete="off">
-        <div class="hint">Routes the model call through your own relay to work around CORS. Empty = direct.</div>
-      </div>
-
-      <label class="check-row">
-        <input v-model="store.settings.remember" type="checkbox">
-        Remember API key on this device (local browser profile)
-      </label>
-      <div class="hint">Saved in this browser on this device. Uncheck on a shared computer.</div>
-
-      <section class="storage-controls">
-        <div class="section-label">Image input</div>
-        <div class="hint">
-          {{ imageCapabilitySummary }}
-          <span v-if="store.imageCapability && store.imageCapability.lastProbeFailure">Last check: {{ store.imageCapability.lastProbeFailure }}</span>
-        </div>
-        <button
-          class="rail-btn"
-          type="button"
-          :disabled="store.busy || store.cancelling || !store.imageCapability"
-          data-testid="recheck-image-capability"
-          @click="recheckCapability"
-        >Forget &amp; recheck image capability</button>
-      </section>
-
-      <section class="storage-controls" data-testid="capabilities-section">
-        <div class="section-label">Capabilities</div>
-
-        <!-- Capability packages (D10 / C1-P3). Everything the package or the
-             archive carries (author, purpose, body, component displayNames,
-             diagnostic messages) is UNTRUSTED model-adjacent content: it is
-             rendered exclusively through text interpolation — never v-html,
-             never innerHTML, never a URL attribute. The body is a plain
-             monospace, line-preserving text block; no Markdown rendering. -->
-
-        <!-- The import confirmation dialog (both entry points shared it)
-             moved to the GLOBAL CapabilityImportDialog component (app root,
-             driven by store.capabilityImport) so the composer's
-             Capabilities menu can import while this panel is closed. The
-             entries below trigger that same dialog. -->
-
-        <!-- C3 §3.2: the Connect dialog. One at a time. The send rule is
-             restated above the input (plain text); the value lives in one
-             ref that is cleared when the dialog closes — it never reaches
-             the store, storage or any error message. -->
-        <div v-if="credDialog" class="capability-import-dialog" :data-testid="'credential-dialog-' + credDialog.name">
-          <div class="capability-import-title">Connect credential</div>
-          <div class="hint">{{ credentialSendLine(dialogCredential) }}</div>
+      <!-- Owner UI review 2026-10-29: head and foot are FIXED, only the
+           body scrolls (item 7/9) — the × never scrolls out of reach, and
+           "Done" stays pinned at the bottom. -->
+      <div class="settings-body">
+        <!-- Owner UI review 2026-10-29 item 1: the top group had no section
+             title; every section now shares one .section-label style, in
+             the fixed order Model / Image input / Capabilities / Always
+             allowed / Local storage. Test connection moved here (item 7):
+             it tests THESE settings and shows its result directly below. -->
+        <section class="settings-section" data-testid="model-section">
+          <div class="section-label">Model</div>
           <div class="field">
-            <label :for="'credential-key-input-' + credDialog.name">Key</label>
-            <input
-              :id="'credential-key-input-' + credDialog.name"
-              v-model="credDialogKey"
-              type="password"
-              :data-testid="'credential-input-' + credDialog.name"
-              spellcheck="false" autocomplete="off">
+            <label for="set-api-key">API key</label>
+            <input id="set-api-key" v-model="store.settings.apiKey" type="password" placeholder="sk-…" spellcheck="false" autocomplete="off">
           </div>
-          <label class="check-row">
-            <input v-model="credDialogRemember" type="checkbox" :data-testid="'credential-remember-' + credDialog.name">
-            Remember on this device
-          </label>
-          <div class="hint">Saved in this browser on this device. Uncheck on a shared computer.</div>
-          <div v-if="credDialog.error" class="hint storage-notice" :data-testid="'credential-dialog-error-' + credDialog.name">
-            {{ credDialog.error }}
+          <div class="field">
+            <label for="set-api-base">API endpoint</label>
+            <input id="set-api-base" v-model="store.settings.apiBase" type="text" spellcheck="false" autocomplete="off">
           </div>
-          <div class="capability-row capability-import-actions">
-            <button class="rail-btn" type="button" :data-testid="'credential-cancel-' + credDialog.name" @click="closeCredentialDialog">Cancel</button>
-            <button class="rail-btn" type="button" :disabled="credDialog.busy" :data-testid="'credential-confirm-' + credDialog.name" @click="confirmCredentialConnect">Connect</button>
+          <div class="field">
+            <label for="set-model">Model</label>
+            <input id="set-model" v-model="store.settings.model" type="text" spellcheck="false" autocomplete="off">
           </div>
-        </div>
-
-        <!-- Unsupported core: everything below is hidden -->
-        <div v-if="!capabilityPackagesSupported()" class="hint" data-testid="capability-packages-unsupported">
-          This Locus core version does not support installing capability packages.
-        </div>
-        <template v-else>
-          <div class="capability-row capability-import-row">
-            <button class="rail-btn" type="button" data-testid="capability-import-file"
-              :disabled="store.busy || store.cancelling" @click="pickImportFile">Import .locus file</button>
-            <input ref="importFileInput" data-testid="capability-import-file-input" type="file" accept=".locus"
-              style="display:none" @change="onImportFileChanged">
-            <input class="capability-import-path" data-testid="capability-import-path" v-model="importPath"
-              type="text" placeholder="/mnt/download/example.locus" spellcheck="false" autocomplete="off">
-            <button class="rail-btn" type="button" data-testid="capability-import-path-button"
-              :disabled="store.busy || store.cancelling" @click="importFromPath">Import from path</button>
+          <div class="field">
+            <label for="set-max-tokens">Max output tokens</label>
+            <input id="set-max-tokens" v-model.number="store.settings.maxTokens" type="number" min="1" step="1" inputmode="numeric">
+            <div class="hint">Upper bound for one model reply. Lower it if the provider rejects requests; Locus never guesses it from the model name.</div>
+          </div>
+          <div class="field">
+            <label for="set-context-window">Context window (tokens) <span class="hint-inline">optional</span></label>
+            <input id="set-context-window" v-model.number="store.settings.contextWindow" type="number" min="1" step="1" inputmode="numeric" placeholder="unknown">
+            <div class="hint">Optional: the model's total context size. When set, Locus keeps each request within it, calibrated from the token counts the provider reports. Leave empty if unknown; Locus never guesses it from the model name.</div>
+          </div>
+          <div class="field">
+            <label for="set-dialect">API dialect</label>
+            <select id="set-dialect" v-model="store.settings.dialect">
+              <option value="auto">auto — detect from endpoint</option>
+              <option value="openai">openai — OpenAI-compatible</option>
+              <option value="anthropic">anthropic — Anthropic-compatible</option>
+            </select>
+            <div class="hint">Set manually when a gateway or corporate proxy cannot be auto-detected.</div>
+          </div>
+          <div class="field">
+            <label for="set-proxy">Relay / proxy <span class="hint-inline">optional</span></label>
+            <input id="set-proxy" v-model="store.settings.proxy" type="text" placeholder="https://your-proxy.workers.dev" spellcheck="false" autocomplete="off">
+            <div class="hint">Routes the model call through your own relay to work around CORS. Empty = direct.</div>
           </div>
 
-          <div v-if="store.capabilityPackages && store.capabilityPackages.durable === false"
-            class="hint" data-testid="capability-packages-not-durable">
-            This browser cannot keep installed packages; they will need to be imported again after a reload.
+          <div class="field check-field">
+            <label class="check-row">
+              <input v-model="store.settings.remember" type="checkbox">
+              Remember API key on this device (local browser profile)
+            </label>
+            <div class="hint">Saved in this browser on this device. Uncheck on a shared computer.</div>
           </div>
 
-          <!-- Boot-time verification notices (§5.3) -->
-          <div v-for="n in store.capabilityPackageNotices" :key="n.id" class="capability-item"
-            :data-testid="'capability-notice-' + n.id">
-            <div v-if="n.status === 'mismatch'" class="hint">
-              {{ n.id }} {{ n.version }} was not loaded: its content no longer matches the recorded file list
-              ({{ (n.mismatched || []).join(', ') }}).
+          <div class="model-test">
+            <button class="rail-btn primary" type="button" data-testid="settings-test-connection" :disabled="store.settingsTesting" @click="testConnection">
+              {{ store.settingsTesting ? 'Testing…' : 'Test connection' }}
+            </button>
+            <div v-if="store.settingsResult" class="settings-result" :class="{ ok: store.settingsResult.ok }">
+              {{ store.settingsResult.message }}
             </div>
-            <div v-else class="hint">
-              {{ n.id }} {{ n.version }} could not be loaded: {{ n.message }}.
+          </div>
+        </section>
+
+        <section class="settings-section" data-testid="image-section">
+          <div class="section-label">Image input</div>
+          <div class="hint">
+            {{ imageCapabilitySummary }}
+            <span v-if="store.imageCapability && store.imageCapability.lastProbeFailure">Last check: {{ store.imageCapability.lastProbeFailure }}</span>
+          </div>
+          <button
+            class="rail-btn"
+            type="button"
+            :disabled="store.busy || store.cancelling || !store.imageCapability"
+            data-testid="recheck-image-capability"
+            @click="recheckCapability"
+          >Forget &amp; recheck image capability</button>
+        </section>
+
+        <section class="settings-section" data-testid="capabilities-section">
+          <div class="section-label">Capabilities</div>
+
+          <!-- Capability packages (D10 / C1-P3). Everything the package or the
+               archive carries (author, purpose, body, component displayNames,
+               diagnostic messages) is UNTRUSTED model-adjacent content: it is
+               rendered exclusively through text interpolation — never v-html,
+               never innerHTML, never a URL attribute. The body is a plain
+               monospace, line-preserving text block; no Markdown rendering. -->
+
+          <!-- The import confirmation dialog (both entry points shared it)
+               moved to the GLOBAL CapabilityImportDialog component (app root,
+               driven by store.capabilityImport) so the composer's
+               Capabilities menu can import while this panel is closed. The
+               entries below trigger that same dialog. -->
+
+          <!-- C3 §3.2: the Connect dialog. One at a time. The send rule is
+               restated above the input (plain text); the value lives in one
+               ref that is cleared when the dialog closes — it never reaches
+               the store, storage or any error message. -->
+          <div v-if="credDialog" class="capability-import-dialog" :data-testid="'credential-dialog-' + credDialog.name">
+            <div class="capability-import-title">Connect credential</div>
+            <div class="hint">{{ credentialSendLine(dialogCredential) }}</div>
+            <div class="field">
+              <label :for="'credential-key-input-' + credDialog.name">Key</label>
+              <input
+                :id="'credential-key-input-' + credDialog.name"
+                v-model="credDialogKey"
+                type="password"
+                :data-testid="'credential-input-' + credDialog.name"
+                spellcheck="false" autocomplete="off">
             </div>
-            <div v-if="uninstallArmId === n.id" class="hint">
-              The package is removed; its guidance files under /home/locus/.skills/{{ n.id }}/ are kept.
+            <label class="check-row">
+              <input v-model="credDialogRemember" type="checkbox" :data-testid="'credential-remember-' + credDialog.name">
+              Remember on this device
+            </label>
+            <div class="hint">Saved in this browser on this device. Uncheck on a shared computer.</div>
+            <div v-if="credDialog.error" class="hint storage-notice" :data-testid="'credential-dialog-error-' + credDialog.name">
+              {{ credDialog.error }}
             </div>
-            <div class="capability-row">
-              <button v-if="n.status === 'mismatch'" class="rail-btn" type="button"
-                :disabled="store.busy || store.cancelling"
-                :data-testid="'capability-notice-accept-' + n.id" @click="acceptNotice(n.id)">Continue (re-pin)</button>
-              <button v-if="n.status === 'corrupt'" class="rail-btn danger" type="button"
-                :disabled="store.busy || store.cancelling"
-                :data-testid="(uninstallArmId === n.id ? 'capability-notice-uninstall-confirm-' : 'capability-notice-uninstall-') + n.id"
-                @click="noticeUninstall(n.id)">{{ uninstallArmId === n.id ? 'Confirm uninstall' : 'Uninstall' }}</button>
-              <button class="rail-btn" type="button" :data-testid="'capability-notice-skip-' + n.id"
-                @click="dismissNotice(n.id)">Skip this time</button>
+            <div class="capability-row capability-import-actions">
+              <button class="rail-btn" type="button" :data-testid="'credential-cancel-' + credDialog.name" @click="closeCredentialDialog">Cancel</button>
+              <button class="rail-btn" type="button" :disabled="credDialog.busy" :data-testid="'credential-confirm-' + credDialog.name" @click="confirmCredentialConnect">Connect</button>
             </div>
           </div>
 
-          <!-- Installed packages that could NOT be loaded (D10 §5): a
-               loaded package is shown inside its Capability entry below
-               instead of being duplicated here. -->
-          <div v-for="p in installedNotLoadedPackages" :key="p.id" class="capability-item"
-            :data-testid="'capability-package-' + p.id">
-            <div class="capability-row">
-              <span class="capability-name">{{ p.id }}</span>
-              <span class="mono">{{ p.version }}</span>
-              <span class="hint">Not loaded</span>
-              <button v-if="uninstallArmId !== p.id" class="rail-btn danger" type="button"
-                :disabled="store.busy || store.cancelling"
-                :data-testid="'capability-package-uninstall-' + p.id" @click="uninstallArmId = p.id">Uninstall</button>
-              <button v-else class="rail-btn danger" type="button" :disabled="store.busy || store.cancelling"
-                :data-testid="'capability-package-uninstall-confirm-' + p.id" @click="uninstallPackage(p.id)">Confirm uninstall</button>
-            </div>
-            <div v-if="packageNoticesById[p.id]" class="hint" :data-testid="'capability-package-reason-' + p.id">
-              {{ packageNoticesById[p.id].status }}: {{ packageNoticesById[p.id].message }}
-            </div>
-            <div v-if="uninstallArmId === p.id" class="hint">
-              Uninstall deletes this package from Locus. The package is removed; its guidance files under
-              /home/locus/.skills/{{ p.id }}/ are kept.
-            </div>
-            <div class="hint">Author (self-declared): {{ p.author }}</div>
-            <div v-if="p.purpose" class="hint">Purpose: {{ p.purpose }}</div>
+          <!-- Unsupported core: everything below is hidden -->
+          <div v-if="!capabilityPackagesSupported()" class="hint" data-testid="capability-packages-unsupported">
+            This Locus core version does not support installing capability packages.
           </div>
-        </template>
+          <template v-else>
+            <!-- Owner UI review 2026-10-29 item 3: two lines — a full-width
+                 path input with its button beside it, then the file entry.
+                 The old layout squeezed the input between two buttons and
+                 truncated the placeholder. -->
+            <div class="capability-import-entry">
+              <div class="capability-import-line">
+                <input class="capability-import-path" data-testid="capability-import-path" v-model="importPath"
+                  type="text" placeholder="/mnt/download/<name>.locus" spellcheck="false" autocomplete="off">
+                <button class="rail-btn" type="button" data-testid="capability-import-path-button"
+                  :disabled="store.busy || store.cancelling" @click="importFromPath">Import from path</button>
+              </div>
+              <div class="capability-import-line">
+                <button class="rail-btn" type="button" data-testid="capability-import-file"
+                  :disabled="store.busy || store.cancelling" @click="pickImportFile">Import .locus file…</button>
+                <input ref="importFileInput" data-testid="capability-import-file-input" type="file" accept=".locus"
+                  style="display:none" @change="onImportFileChanged">
+              </div>
+            </div>
 
-        <div v-if="!capabilities.length" class="hint" data-testid="capabilities-empty">No optional capabilities available yet.</div>
-        <div v-for="c in capabilities" :key="c.id" class="capability-item" :data-testid="'capability-' + c.id">
-          <div class="capability-row">
-            <span class="capability-name">{{ c.displayName }}</span>
-            <span class="capability-state" :data-state="c.state">{{ stateLabel(c) }}</span>
-            <button v-if="!c.enabled" class="rail-btn" type="button" :disabled="store.busy || store.cancelling"
-              :data-testid="'capability-add-' + c.id" @click="addCapability(c)">Add</button>
-            <button v-else-if="removingId !== c.id" class="rail-btn danger" type="button" :disabled="store.busy || store.cancelling"
-              :data-testid="'capability-remove-' + c.id" @click="beginRemoveCapability(c)">Remove</button>
-            <button v-else class="rail-btn danger" type="button" :disabled="store.busy || store.cancelling"
-              :data-testid="'capability-remove-confirm-' + c.id" @click="removeCapability(c)">Confirm remove</button>
-          </div>
-          <div class="hint">{{ c.description }}</div>
-          <div v-if="c.enabled" class="hint" :data-testid="'capability-includes-' + c.id">
-            Includes: {{ c.includes.plugins }} local software · {{ c.includes.skills }} guidance · {{ c.includes.mcps }} external connections
-          </div>
-          <div v-if="c.enabled" class="hint" data-testid="capability-remove-warning">
-            Removing this capability disables it and deletes its customized guidance; re-adding it restores the
-            default guidance.<span v-if="loadedPackagesById[c.id]"> To delete this package from Locus instead, use
-            Uninstall below.</span>
-          </div>
-          <div v-if="c.enabled && c.error" class="hint">{{ c.error }}</div>
-          <template v-if="c.enabled">
-            <div v-for="m in c.mcps" :key="m.id" class="hint" :data-testid="'capability-mcp-' + c.id">
-              External connection: {{ m.displayName }} — {{ m.state === 'connected' ? 'Connected' : 'Connection required' }}
-              <button v-if="m.state !== 'connected'" class="rail-btn" type="button" :disabled="store.busy || store.cancelling"
-                :data-testid="'capability-connect-' + c.id" @click="connectMcp(c, m)">Connect</button>
+            <div v-if="store.capabilityPackages && store.capabilityPackages.durable === false"
+              class="hint" data-testid="capability-packages-not-durable">
+              This browser cannot keep installed packages; they will need to be imported again after a reload.
+            </div>
+
+            <!-- Boot-time verification notices (§5.3) -->
+            <div v-for="n in store.capabilityPackageNotices" :key="n.id" class="capability-item"
+              :data-testid="'capability-notice-' + n.id">
+              <div v-if="n.status === 'mismatch'" class="hint">
+                {{ n.id }} {{ n.version }} was not loaded: its content no longer matches the recorded file list
+                ({{ (n.mismatched || []).join(', ') }}).
+              </div>
+              <div v-else class="hint">
+                {{ n.id }} {{ n.version }} could not be loaded: {{ n.message }}.
+              </div>
+              <div v-if="uninstallArmId === n.id" class="hint">
+                The package is removed; its guidance files under /home/locus/.skills/{{ n.id }}/ are kept.
+              </div>
+              <div class="capability-row">
+                <button v-if="n.status === 'mismatch'" class="rail-btn" type="button"
+                  :disabled="store.busy || store.cancelling"
+                  :data-testid="'capability-notice-accept-' + n.id" @click="acceptNotice(n.id)">Continue (re-pin)</button>
+                <button v-if="n.status === 'corrupt'" class="rail-btn danger" type="button"
+                  :disabled="store.busy || store.cancelling"
+                  :data-testid="(uninstallArmId === n.id ? 'capability-notice-uninstall-confirm-' : 'capability-notice-uninstall-') + n.id"
+                  @click="noticeUninstall(n.id)">{{ uninstallArmId === n.id ? 'Confirm uninstall' : 'Uninstall' }}</button>
+                <button class="rail-btn" type="button" :data-testid="'capability-notice-skip-' + n.id"
+                  @click="dismissNotice(n.id)">Skip this time</button>
+              </div>
+            </div>
+
+            <!-- Installed packages that could NOT be loaded (D10 §5): a
+                 loaded package is shown inside its Capability entry below
+                 instead of being duplicated here. -->
+            <div v-for="p in installedNotLoadedPackages" :key="p.id" class="capability-item"
+              :data-testid="'capability-package-' + p.id">
+              <div class="capability-row capability-head">
+                <span class="capability-name">{{ p.id }}</span>
+                <span class="capability-version">{{ p.version }}</span>
+                <span class="capability-state" data-state="error">Not loaded</span>
+                <span class="capability-actions">
+                  <button v-if="uninstallArmId !== p.id" class="rail-btn danger" type="button"
+                    :disabled="store.busy || store.cancelling"
+                    :data-testid="'capability-package-uninstall-' + p.id" @click="uninstallArmId = p.id">Uninstall</button>
+                  <button v-else class="rail-btn danger" type="button" :disabled="store.busy || store.cancelling"
+                    :data-testid="'capability-package-uninstall-confirm-' + p.id" @click="uninstallPackage(p.id)">Confirm uninstall</button>
+                </span>
+              </div>
+              <div v-if="packageNoticesById[p.id]" class="hint" :data-testid="'capability-package-reason-' + p.id">
+                {{ packageNoticesById[p.id].status }}: {{ packageNoticesById[p.id].message }}
+              </div>
+              <div v-if="uninstallArmId === p.id" class="hint">
+                Uninstall deletes this package from Locus. The package is removed; its guidance files under
+                /home/locus/.skills/{{ p.id }}/ are kept.
+              </div>
+              <div class="capability-meta">Author (self-declared): {{ p.author }}<template v-if="p.purpose"> · Purpose: {{ p.purpose }}</template></div>
             </div>
           </template>
-          <!-- C3 §3.2: this capability's credentials, in EVERY state
-               (added, removed, enable-failed). Values are never rendered:
-               a connected row shows only the last 4 characters that
-               credentials.summary reports; every string here goes through
-               text interpolation. -->
-          <div v-for="cred in (credentialViews[c.id] || [])" :key="cred.name" class="cred-item"
-            :data-testid="'credential-' + cred.name">
-            <div class="capability-row cred-row">
-              <span class="cred-label">{{ cred.label }}</span>
-              <span class="mono">${{ cred.name }}</span>
-              <span class="capability-state" :data-state="cred.decl.state"
-                :data-testid="'credential-state-' + cred.name">{{ cred.stateLabel }}</span>
-              <button v-if="cred.decl.state === 'needs-connection'" class="rail-btn" type="button"
-                :disabled="store.busy || store.cancelling"
-                :data-testid="'credential-connect-' + cred.name" @click="openCredentialDialog(cred)">Connect</button>
-              <template v-if="cred.decl.state === 'connected'">
-                <button v-if="credDisconnectArm !== cred.name" class="rail-btn danger" type="button"
-                  :disabled="store.busy || store.cancelling"
-                  :data-testid="'credential-disconnect-' + cred.name"
-                  @click="credDisconnectArm = cred.name">Disconnect</button>
+
+          <div v-if="!capabilities.length" class="hint" data-testid="capabilities-empty">No optional capabilities available yet.</div>
+          <!-- Owner UI review 2026-10-29 item 6: one merged card per
+               capability. Line 1: display name · version (plain, secondary)
+               · state label · actions (Remove + Uninstall side by side).
+               Line 2: description. Line 3 (small, secondary): Includes /
+               Author / Purpose. The package-origin content keeps the
+               capability-package-<id> testid on a transparent wrapper so
+               the merged-card and standalone-list displays stay
+               distinguishable to the gates. The remove/uninstall warnings
+               are no longer permanent: they render only in the armed
+               (Confirm …) state, text unchanged (owner decision). -->
+          <div v-for="c in capabilities" :key="c.id" class="capability-item" :data-testid="'capability-' + c.id">
+            <div class="capability-row capability-head">
+              <span class="capability-name">{{ c.displayName }}</span>
+              <span v-if="loadedPackagesById[c.id]" class="capability-version">{{ loadedPackagesById[c.id].version }}</span>
+              <span class="capability-state" :data-state="c.state">{{ stateLabel(c) }}</span>
+              <span class="capability-actions">
+                <button v-if="!c.enabled" class="rail-btn" type="button" :disabled="store.busy || store.cancelling"
+                  :data-testid="'capability-add-' + c.id" @click="addCapability(c)">Add</button>
+                <button v-else-if="removingId !== c.id" class="rail-btn danger" type="button" :disabled="store.busy || store.cancelling"
+                  :data-testid="'capability-remove-' + c.id" @click="beginRemoveCapability(c)">Remove</button>
                 <button v-else class="rail-btn danger" type="button" :disabled="store.busy || store.cancelling"
-                  :data-testid="'credential-disconnect-confirm-' + cred.name"
-                  @click="disconnectCredentialNow(cred.name)">Confirm disconnect</button>
-              </template>
-              <template v-if="cred.decl.state === 'needs-reconfirm'">
-                <button class="rail-btn" type="button" :disabled="store.busy || store.cancelling"
-                  :data-testid="'credential-reconfirm-' + cred.name"
-                  @click="reconfirmCredentialNow(cred.name)">Confirm</button>
-                <button v-if="credDisconnectArm !== cred.name" class="rail-btn danger" type="button"
+                  :data-testid="'capability-remove-confirm-' + c.id" @click="removeCapability(c)">Confirm remove</button>
+                <template v-if="loadedPackagesById[c.id]">
+                  <button v-if="uninstallArmId !== c.id" class="rail-btn danger" type="button"
+                    :disabled="store.busy || store.cancelling"
+                    :data-testid="'capability-package-uninstall-' + c.id" @click="uninstallArmId = c.id">Uninstall</button>
+                  <button v-else class="rail-btn danger" type="button" :disabled="store.busy || store.cancelling"
+                    :data-testid="'capability-package-uninstall-confirm-' + c.id" @click="uninstallPackage(c.id)">Confirm uninstall</button>
+                </template>
+              </span>
+            </div>
+            <div class="hint">{{ c.description }}</div>
+            <div v-if="c.enabled" class="capability-meta" :data-testid="'capability-includes-' + c.id">
+              Includes: {{ c.includes.plugins }} local software · {{ c.includes.skills }} guidance · {{ c.includes.mcps }} external connections<template v-if="loadedPackagesById[c.id]"> · Author (self-declared): {{ loadedPackagesById[c.id].author }}<template v-if="loadedPackagesById[c.id].purpose"> · Purpose: {{ loadedPackagesById[c.id].purpose }}</template></template>
+            </div>
+            <div v-if="loadedPackagesById[c.id]" class="capability-package-part" :data-testid="'capability-package-' + c.id">
+              <div v-if="uninstallArmId === c.id" class="hint">
+                Uninstall deletes this package from Locus. The package is removed; its guidance files under
+                /home/locus/.skills/{{ loadedPackagesById[c.id].id }}/ are kept.
+              </div>
+              <!-- C3 §3.2: uninstalling removes the capability's bindings and
+                   keys — stated only when the capability declares any. -->
+              <div v-if="uninstallArmId === c.id && (c.credentials || []).length" class="hint"
+                data-testid="capability-uninstall-credentials-warning">
+                Connected credentials of this capability will be removed.
+              </div>
+            </div>
+            <div v-if="c.enabled && removingId === c.id" class="hint" data-testid="capability-remove-warning">
+              Removing this capability disables it and deletes its customized guidance; re-adding it restores the
+              default guidance.<span v-if="loadedPackagesById[c.id]"> To delete this package from Locus instead, use
+              Uninstall.</span>
+            </div>
+            <div v-if="c.enabled && c.error" class="hint">{{ c.error }}</div>
+            <template v-if="c.enabled">
+              <div v-for="m in c.mcps" :key="m.id" class="hint" :data-testid="'capability-mcp-' + c.id">
+                External connection: {{ m.displayName }} — {{ m.state === 'connected' ? 'Connected' : 'Connection required' }}
+                <button v-if="m.state !== 'connected'" class="rail-btn" type="button" :disabled="store.busy || store.cancelling"
+                  :data-testid="'capability-connect-' + c.id" @click="connectMcp(c, m)">Connect</button>
+              </div>
+            </template>
+            <!-- C3 §3.2: this capability's credentials, in EVERY state
+                 (added, removed, enable-failed). Values are never rendered:
+                 a connected row shows only the last 4 characters that
+                 credentials.summary reports; every string here goes through
+                 text interpolation. -->
+            <div v-for="cred in (credentialViews[c.id] || [])" :key="cred.name" class="cred-item"
+              :data-testid="'credential-' + cred.name">
+              <div class="capability-row cred-row">
+                <span class="cred-label">{{ cred.label }}</span>
+                <span class="mono">${{ cred.name }}</span>
+                <span class="capability-state" :data-state="cred.decl.state"
+                  :data-testid="'credential-state-' + cred.name">{{ cred.stateLabel }}</span>
+                <button v-if="cred.decl.state === 'needs-connection'" class="rail-btn" type="button"
                   :disabled="store.busy || store.cancelling"
-                  :data-testid="'credential-disconnect-' + cred.name"
-                  @click="credDisconnectArm = cred.name">Disconnect</button>
-                <button v-else class="rail-btn danger" type="button" :disabled="store.busy || store.cancelling"
-                  :data-testid="'credential-disconnect-confirm-' + cred.name"
-                  @click="disconnectCredentialNow(cred.name)">Confirm disconnect</button>
-              </template>
-            </div>
-            <div class="hint" :data-testid="'credential-sendline-' + cred.name">{{ credentialSendLine(cred.decl) }}</div>
-            <div v-if="cred.decl.state === 'needs-reconfirm'" class="hint"
-              :data-testid="'credential-old-binding-' + cred.name">
-              Confirmed earlier as: {{ credentialOldLine(cred.name) }}
+                  :data-testid="'credential-connect-' + cred.name" @click="openCredentialDialog(cred)">Connect</button>
+                <template v-if="cred.decl.state === 'connected'">
+                  <button v-if="credDisconnectArm !== cred.name" class="rail-btn danger" type="button"
+                    :disabled="store.busy || store.cancelling"
+                    :data-testid="'credential-disconnect-' + cred.name"
+                    @click="credDisconnectArm = cred.name">Disconnect</button>
+                  <button v-else class="rail-btn danger" type="button" :disabled="store.busy || store.cancelling"
+                    :data-testid="'credential-disconnect-confirm-' + cred.name"
+                    @click="disconnectCredentialNow(cred.name)">Confirm disconnect</button>
+                </template>
+                <template v-if="cred.decl.state === 'needs-reconfirm'">
+                  <button class="rail-btn" type="button" :disabled="store.busy || store.cancelling"
+                    :data-testid="'credential-reconfirm-' + cred.name"
+                    @click="reconfirmCredentialNow(cred.name)">Confirm</button>
+                  <button v-if="credDisconnectArm !== cred.name" class="rail-btn danger" type="button"
+                    :disabled="store.busy || store.cancelling"
+                    :data-testid="'credential-disconnect-' + cred.name"
+                    @click="credDisconnectArm = cred.name">Disconnect</button>
+                  <button v-else class="rail-btn danger" type="button" :disabled="store.busy || store.cancelling"
+                    :data-testid="'credential-disconnect-confirm-' + cred.name"
+                    @click="disconnectCredentialNow(cred.name)">Confirm disconnect</button>
+                </template>
+              </div>
+              <div class="hint" :data-testid="'credential-sendline-' + cred.name">{{ credentialSendLine(cred.decl) }}</div>
+              <div v-if="cred.decl.state === 'needs-reconfirm'" class="hint"
+                :data-testid="'credential-old-binding-' + cred.name">
+                Confirmed earlier as: {{ credentialOldLine(cred.name) }}
+              </div>
             </div>
           </div>
-          <!-- The installed package this capability came from (D10): shown
-               here INSTEAD of a separate installed-list entry. Everything it
-               renders is untrusted package metadata via text interpolation. -->
-          <div v-if="loadedPackagesById[c.id]" class="capability-package-block"
-            :data-testid="'capability-package-' + c.id">
-            <div class="capability-row">
-              <span class="mono">{{ loadedPackagesById[c.id].id }}</span>
-              <span class="mono">{{ loadedPackagesById[c.id].version }}</span>
-              <button v-if="uninstallArmId !== c.id" class="rail-btn danger" type="button"
-                :disabled="store.busy || store.cancelling"
-                :data-testid="'capability-package-uninstall-' + c.id" @click="uninstallArmId = c.id">Uninstall</button>
-              <button v-else class="rail-btn danger" type="button" :disabled="store.busy || store.cancelling"
-                :data-testid="'capability-package-uninstall-confirm-' + c.id" @click="uninstallPackage(c.id)">Confirm uninstall</button>
-            </div>
-            <div v-if="uninstallArmId === c.id" class="hint">
-              Uninstall deletes this package from Locus. The package is removed; its guidance files under
-              /home/locus/.skills/{{ loadedPackagesById[c.id].id }}/ are kept.
-            </div>
-            <!-- C3 §3.2: uninstalling removes the capability's bindings and
-                 keys — stated only when the capability declares any. -->
-            <div v-if="uninstallArmId === c.id && (c.credentials || []).length" class="hint"
-              data-testid="capability-uninstall-credentials-warning">
-              Connected credentials of this capability will be removed.
-            </div>
-            <div class="hint">Author (self-declared): {{ loadedPackagesById[c.id].author }}</div>
-            <div v-if="loadedPackagesById[c.id].purpose" class="hint">Purpose: {{ loadedPackagesById[c.id].purpose }}</div>
-          </div>
-        </div>
-      </section>
+        </section>
 
-      <section class="storage-controls" data-testid="always-allowed-section">
-        <div class="section-label">Always allowed</div>
-        <div v-if="!store.persistentApprovalsSupported" class="hint" data-testid="always-allowed-unsupported">
-          This Locus core does not support always-allowed approvals.
-        </div>
-        <template v-else>
-          <div v-if="!store.alwaysAllowed.length" class="hint" data-testid="always-allowed-empty">
-            Nothing is always allowed.
+        <section class="settings-section" data-testid="always-allowed-section">
+          <div class="section-label">Always allowed</div>
+          <div v-if="!store.persistentApprovalsSupported" class="hint" data-testid="always-allowed-unsupported">
+            This Locus core does not support always-allowed approvals.
           </div>
-          <div v-for="(g, i) in store.alwaysAllowed" :key="g.policyKey" class="capability-row cred-row"
-            :data-testid="'always-allowed-item-' + i">
-            <span class="hint">{{ g.label }}</span>
-            <button class="rail-btn danger" type="button" :data-testid="'always-allowed-remove-' + i"
-              @click="removeAlwaysAllowed(g.policyKey)">Remove</button>
+          <template v-else>
+            <div v-if="!store.alwaysAllowed.length" class="hint" data-testid="always-allowed-empty">
+              Nothing is always allowed.
+            </div>
+            <div v-for="(g, i) in store.alwaysAllowed" :key="g.policyKey" class="capability-row cred-row"
+              :data-testid="'always-allowed-item-' + i">
+              <span class="hint">{{ g.label }}</span>
+              <button class="rail-btn danger" type="button" :data-testid="'always-allowed-remove-' + i"
+                @click="removeAlwaysAllowed(g.policyKey)">Remove</button>
+            </div>
+          </template>
+        </section>
+
+        <section class="settings-section" data-testid="storage-section">
+          <div class="section-label">Local storage</div>
+          <div class="hint">
+            {{ storageSummary }}
+            <span v-if="store.storageStatus.error">Persistence fallback: {{ store.storageStatus.error }}</span>
           </div>
-        </template>
-      </section>
-
-      <section class="storage-controls">
-        <div class="section-label">Local storage</div>
-        <div class="hint">
-          {{ storageSummary }}
-          <span v-if="store.storageStatus.error">Persistence fallback: {{ store.storageStatus.error }}</span>
-        </div>
-        <div v-if="store.storageNotice" class="hint storage-notice">{{ store.storageNotice }}</div>
-        <button class="rail-btn" type="button" @click="keepStorage">
-          {{ store.storageStatus.persistent ? 'Persistent storage granted' : 'Keep Locus data on this device' }}
-        </button>
-        <div class="storage-actions">
-          <button class="rail-btn" type="button" :disabled="store.busy || store.cancelling" @click="clearConversations">Clear conversations</button>
-          <button class="rail-btn" type="button" :disabled="store.busy || store.cancelling" @click="clearHome">Clear home</button>
-          <button class="rail-btn" type="button" :disabled="store.busy || store.cancelling" @click="clearPlugins">Clear plugins</button>
-          <button class="rail-btn danger" type="button" :disabled="store.busy || store.cancelling" @click="forgetApiKeys">Forget API keys</button>
-          <button class="rail-btn danger" type="button" :disabled="store.busy || store.cancelling" @click="resetAllData">Reset all local data</button>
-        </div>
-      </section>
-
-      <div class="modal-actions">
-        <button class="primary-btn" type="button" :disabled="store.settingsTesting" @click="testConnection">
-          {{ store.settingsTesting ? 'Testing…' : 'Test connection' }}
-        </button>
-        <button class="rail-btn" type="button" @click="close">Done</button>
+          <div v-if="store.storageNotice" class="hint storage-notice">{{ store.storageNotice }}</div>
+          <!-- Owner UI review 2026-10-29 item 5: after the grant this is a
+               STATE (dot + colored text, not a button); the button only
+               exists while storage is not yet granted. Behavior unchanged. -->
+          <button v-if="!store.storageStatus.persistent" class="rail-btn" type="button" data-testid="storage-keep" @click="keepStorage">
+            Keep Locus data on this device
+          </button>
+          <div v-else class="capability-state" data-state="ready" data-testid="storage-persistent-state">Persistent storage granted</div>
+          <div class="storage-actions">
+            <div class="storage-actions-group">
+              <button class="rail-btn" type="button" :disabled="store.busy || store.cancelling" @click="clearConversations">Clear conversations</button>
+              <button class="rail-btn" type="button" :disabled="store.busy || store.cancelling" @click="clearHome">Clear home</button>
+              <button class="rail-btn" type="button" :disabled="store.busy || store.cancelling" @click="clearPlugins">Clear plugins</button>
+            </div>
+            <div class="storage-actions-group">
+              <button class="rail-btn danger" type="button" :disabled="store.busy || store.cancelling" @click="forgetApiKeys">Forget API keys</button>
+              <button class="rail-btn danger" type="button" :disabled="store.busy || store.cancelling" @click="resetAllData">Reset all local data</button>
+            </div>
+          </div>
+        </section>
       </div>
-      <div v-if="store.settingsResult" class="settings-result" :class="{ ok: store.settingsResult.ok }">
-        {{ store.settingsResult.message }}
+
+      <div class="modal-foot" data-testid="settings-foot">
+        <button class="rail-btn primary" type="button" data-testid="settings-done" @click="close">Done</button>
       </div>
     </div>
   </div>
@@ -400,7 +440,8 @@ const packageNoticesById = computed(() => {
 // Two-step destructive confirmation for Remove (fixed UI copy, never a
 // model-controlled ApprovalCard — this is the USER's own button action).
 // Removing a capability deletes its durable skill instances; the warning
-// above the buttons states that semantics permanently.
+// states that semantics while the Remove step is armed (owner UI decision
+// 2026-10-29: the warning is no longer permanent).
 const removingId = ref(null);
 
 function stateLabel(c) {

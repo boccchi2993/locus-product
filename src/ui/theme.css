@@ -572,7 +572,7 @@ input, select, textarea { font-family: inherit; font-size: inherit; color: inher
 
 /* global capability import confirmation dialog (app root): it must be
    reachable with the settings panel open AND closed, so it overlays the
-   whole app above the settings modal (z-index 50) and drawers (55/60). */
+   whole app above the settings modal (z-index 65) and drawers (55/60/61). */
 .capability-import-overlay {
   position: fixed; inset: 0; z-index: 70;
   display: flex; align-items: center; justify-content: center;
@@ -610,12 +610,24 @@ input, select, textarea { font-family: inherit; font-size: inherit; color: inher
 .rail-chev.closed { transform: rotate(-90deg); }
 .rail-body { padding: 2px 12px 12px; }
 .rail-hint { font-size: 12px; color: var(--faint); line-height: 1.5; }
+/* The ONE base button (owner UI review 2026-10-29, item 4): one size
+   everywhere, plus a solid primary and a red danger variant. Buttons in a
+   row share the same height and baseline via inline-flex. */
 .rail-btn {
-  margin-top: 8px; padding: 5px 12px;
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 5px 12px; min-height: 30px;
   border: 1px solid var(--border); border-radius: 8px;
   font-size: 12.5px; color: var(--text); background: var(--surface);
+  text-align: center;
 }
-.rail-btn:hover { border-color: var(--accent); }
+.rail-btn:hover:not(:disabled) { border-color: var(--accent); }
+.rail-btn:disabled { opacity: 0.5; cursor: default; }
+.rail-btn.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); font-weight: 600; }
+.rail-btn.primary:hover:not(:disabled) { background: var(--accent-strong); border-color: var(--accent-strong); }
+.rail-btn.danger { color: var(--error); border-color: var(--error); background: transparent; }
+.rail-btn.danger:hover:not(:disabled) { background: var(--error-bg); border-color: var(--error); }
+/* The context rail's flow layout relied on the old built-in margin. */
+.rail-body .rail-btn { margin-top: 8px; }
 
 .progress-row { margin-bottom: 6px; }
 .status-pill {
@@ -671,51 +683,96 @@ input, select, textarea { font-family: inherit; font-size: inherit; color: inher
 .artifact-download:hover { border-color: var(--accent); }
 
 /* ============ modal / settings ============ */
+/* z-index 65: the settings modal must sit ABOVE the overlay drawers
+   (backdrop 55, rail 60, sidebar 61) so an open drawer can never cover it
+   (owner UI review 2026-10-29, mobile item 10). The global capability
+   import dialog (70) still stacks above everything. */
 .modal-backdrop {
-  position: fixed; inset: 0; z-index: 50;
+  position: fixed; inset: 0; z-index: 65;
   background: rgba(20, 19, 16, 0.35);
   display: flex; align-items: center; justify-content: center; padding: 24px;
 }
 .modal {
-  width: 100%; max-width: 440px; max-height: 90vh; overflow-y: auto;
+  width: 100%; max-width: 440px; max-height: 90vh;
   background: var(--surface); border: 1px solid var(--border);
   border-radius: 14px; box-shadow: var(--shadow-soft); padding: 18px 20px 20px;
 }
-.modal-head {
-  display: flex; align-items: center; justify-content: space-between;
-  font-size: 15px; font-weight: 650; margin-bottom: 14px;
+/* Owner UI review 2026-10-29 (items 7/9): the settings panel is a fixed
+   head / scrolling body / fixed foot shell — the × and Done stay reachable
+   no matter how far the body is scrolled. */
+.settings-panel {
+  display: flex; flex-direction: column;
+  overflow: hidden; padding: 0;
+  max-height: 90vh;
+  max-height: 90dvh;
 }
-.field { margin-bottom: 14px; }
-.field label {
+.settings-panel .modal-head {
+  flex-shrink: 0; margin-bottom: 0;
+  padding: 14px 20px 12px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.settings-body {
+  flex: 1; min-height: 0;
+  overflow-y: auto; overscroll-behavior: contain;
+  padding: 6px 20px 20px;
+}
+.modal-foot {
+  flex-shrink: 0;
+  display: flex; align-items: center; justify-content: flex-end;
+  padding: 12px 20px calc(14px + env(safe-area-inset-bottom, 0px));
+  border-top: 1px solid var(--border-soft);
+}
+
+/* Owner UI review 2026-10-29 (items 1/2): one section style — a uniform
+   top gap plus a hairline above every section, one .section-label style,
+   and one internal spacing value (12px) across the whole panel. */
+.settings-section {
+  display: flex; flex-direction: column; gap: 12px;
+  margin-top: 16px; padding-top: 16px;
+  border-top: 1px solid var(--border-soft);
+}
+.settings-section:first-child { margin-top: 0; padding-top: 8px; border-top: none; }
+.section-label { font-size: 13px; font-weight: 650; color: var(--text); }
+/* buttons keep their intrinsic width inside the section column */
+.settings-section > .rail-btn { align-self: flex-start; }
+
+.field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 0; }
+.field > label:not(.check-row) {
   display: block; font-size: 11.5px; font-weight: 600; color: var(--muted);
-  text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 5px;
+  text-transform: uppercase; letter-spacing: 0.04em;
 }
-.field input, .field select {
+.field input, .field select, .capability-import-path {
   width: 100%; padding: 8px 11px;
   border: 1px solid var(--border); border-radius: 8px;
   background: var(--bg); font-size: 13px; outline: none;
 }
-.field input:focus, .field select:focus { border-color: var(--accent); }
-.hint { font-size: 11.5px; color: var(--faint); margin-top: 4px; line-height: 1.45; }
+.field input:focus, .field select:focus, .capability-import-path:focus { border-color: var(--accent); }
+/* Owner UI review 2026-10-29 (item 3): hide the native number spinners —
+   the arrow keys keep working. */
+.settings-panel input[type="number"] { appearance: textfield; -moz-appearance: textfield; }
+.settings-panel input[type="number"]::-webkit-outer-spin-button,
+.settings-panel input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none; margin: 0;
+}
+.hint { font-size: 11.5px; color: var(--faint); line-height: 1.45; }
 .hint-inline { opacity: 0.6; text-transform: none; letter-spacing: 0; }
 .check-row {
   display: flex; align-items: flex-start; gap: 8px;
   font-size: 12px; color: var(--muted); line-height: 1.45;
-  margin: 4px 0 14px; cursor: pointer;
+  cursor: pointer;
 }
 .check-row input { margin-top: 2px; accent-color: var(--accent); }
-.modal-actions { display: flex; gap: 8px; }
-.primary-btn {
-  padding: 8px 16px; border-radius: 9px;
-  background: var(--accent); color: var(--bg); font-weight: 600; font-size: 13px;
+
+/* Owner UI review 2026-10-29 (item 7): Test connection lives at the end of
+   the Model section, its result directly beneath it. */
+.model-test {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 8px;
 }
-.primary-btn:hover:not(:disabled) { background: var(--accent-strong); }
-.primary-btn:disabled { opacity: 0.5; cursor: default; }
-.modal-actions .rail-btn { margin-top: 0; padding: 8px 14px; }
 .settings-result {
-  margin-top: 12px; font-size: 12.5px; color: var(--error);
+  font-size: 12.5px; color: var(--error);
   padding: 8px 10px; border-radius: 8px; background: var(--error-bg);
   overflow-wrap: anywhere;
+  align-self: stretch;
 }
 .settings-result.ok { color: var(--ok); background: rgba(61, 122, 78, 0.10); }
 
@@ -812,63 +869,96 @@ input, select, textarea { font-family: inherit; font-size: inherit; color: inher
   .ws-chip { max-width: 140px; }
   .composer { border-radius: 14px; padding: 10px 12px 8px; }
 
-  /* Touch targets */
-  .icon-btn { width: 36px; height: 36px; }
-  .send-btn { height: 36px; min-width: 36px; border-radius: 18px; }
-  .cancel-btn { padding: 0 16px; }
-  .attach-x { padding: 6px 8px; margin: -4px -6px -4px 0; font-size: 15px; }
+  /* Touch targets (owner UI review 2026-10-29, item 11): every tappable
+     control gets a hit area of at least 44×44 CSS px in the mobile
+     breakpoint. Visual size may grow slightly; that is fine. */
+  .icon-btn { width: 44px; height: 44px; }
+  .send-btn { height: 44px; min-width: 44px; border-radius: 22px; }
+  .cancel-btn { height: 44px; padding: 0 16px; }
+  .ws-chip { min-height: 44px; }
+  .footer-btn { min-height: 44px; }
+  .recent-item { min-height: 44px; }
+  .rail-btn { min-height: 44px; }
+  .plus-item { min-height: 44px; }
+  .plus-cap-settings { min-height: 44px; }
+  .artifact-download { min-height: 44px; }
+  .attach-x { padding: 11px 8px; margin: -8px -6px -8px 0; font-size: 15px; }
 
   .user-bubble { max-width: 92%; }
   .modal-backdrop { padding: 12px; }
   .empty-brand { font-size: 28px; }
 }
 
-/* capabilities (Capability Composition v1 settings section) */
-.capability-item { padding: 8px 0; border-top: 1px solid var(--border-soft); }
-.capability-item:last-child { border-bottom: none; }
-.capability-row { display: flex; align-items: center; gap: 8px; }
-.capability-name { font-weight: 550; font-size: 13px; flex: 1; min-width: 0; }
-.capability-state {
-  flex-shrink: 0; font-size: 11px; padding: 1px 8px; border-radius: 999px;
-  border: 1px solid var(--border); color: var(--faint);
+/* capabilities (Capability Composition v1 settings section).
+   Owner UI review 2026-10-29 (item 6): one merged card per capability —
+   no nested inner box. The package-origin content sits in a transparent
+   wrapper (.capability-package-part) that carries the package testid. */
+.capability-item {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 10px 0 2px;
+  border-top: 1px solid var(--border-soft);
 }
-.capability-state[data-state="ready"] { color: var(--ok); border-color: currentColor; }
-.capability-state[data-state="needs-connection"] { color: var(--warn); border-color: currentColor; }
-.capability-state[data-state="error"] { color: var(--error); border-color: currentColor; }
+.capability-row { display: flex; align-items: center; gap: 8px; }
+.capability-head { flex-wrap: wrap; row-gap: 6px; }
+.capability-name { font-weight: 550; font-size: 13px; flex: 1; min-width: 0; }
+.capability-version { flex-shrink: 0; font-size: 12px; color: var(--muted); }
+.capability-actions {
+  display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end;
+  gap: 8px; flex-shrink: 0;
+}
+.capability-meta {
+  font-size: 11.5px; color: var(--faint); line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.capability-package-part { display: flex; flex-direction: column; gap: 6px; }
+
+/* Owner UI review 2026-10-29 (item 5): state labels are NOT buttons —
+   dot + colored text, no border, no pill background. Real buttons keep
+   the button style. */
+.capability-state {
+  display: inline-flex; align-items: center; gap: 6px;
+  flex-shrink: 0; font-size: 11.5px; font-weight: 600;
+  color: var(--faint);
+}
+.capability-state::before {
+  content: ''; width: 7px; height: 7px; border-radius: 50%;
+  background: currentColor; flex-shrink: 0;
+}
+.capability-state[data-state="ready"] { color: var(--ok); }
+.capability-state[data-state="needs-connection"] { color: var(--warn); }
+.capability-state[data-state="error"] { color: var(--error); }
 
 /* capability credentials (C3 §3.2 settings UI): rows may wrap on narrow
    panels — buttons must never push the card wider than the modal. */
-.cred-item { padding: 6px 0 2px; }
+.cred-item { display: flex; flex-direction: column; gap: 4px; padding: 6px 0 2px; }
 .cred-row { flex-wrap: wrap; row-gap: 4px; }
 .cred-label { font-weight: 550; font-size: 13px; }
-.capability-state[data-state="connected"] { color: var(--ok); border-color: currentColor; }
-.capability-state[data-state="needs-reconfirm"] { color: var(--warn); border-color: currentColor; }
+.capability-state[data-state="connected"] { color: var(--ok); }
+.capability-state[data-state="needs-reconfirm"] { color: var(--warn); }
+
+/* Local storage action groups (owner UI review 2026-10-29, item 4):
+   the three plain clears are one group, the two destructive actions a
+   separate danger group with a gap between the groups. */
+.storage-actions { display: flex; flex-direction: column; gap: 10px; }
+.storage-actions-group { display: flex; flex-wrap: wrap; gap: 8px; }
 
 /* capability packages (D10 install UI) */
 .capability-import-dialog {
-  margin-top: 8px; padding: 10px 12px;
+  padding: 14px 16px;
   border: 1px solid var(--accent); border-radius: 10px;
   background: var(--surface);
+  display: flex; flex-direction: column; gap: 8px;
 }
 .capability-import-title { font-weight: 600; font-size: 13px; }
-.capability-import-row { flex-wrap: wrap; margin-top: 4px; }
-.capability-import-row .rail-btn { margin-top: 0; }
-/* Same visual tokens as .field input (the settings panel's other inputs):
-   the path box must not fall back to the browser's default light styling. */
-.capability-import-path {
-  flex: 1; min-width: 0;
-  padding: 8px 11px;
-  border: 1px solid var(--border); border-radius: 8px;
-  background: var(--bg); font-size: 13px; outline: none;
-}
-.capability-import-path:focus { border-color: var(--accent); }
-.capability-package-block {
-  margin-top: 6px; padding: 6px 8px;
-  border: 1px solid var(--border-soft); border-radius: 8px;
-  background: var(--surface-soft);
-}
-.capability-import-actions { margin-top: 8px; }
-.capability-import-body-wrap { margin-top: 6px; }
+/* Owner UI review 2026-10-29 (item 3): the import entry is two lines —
+   a full-width path input with the button beside it, then the file
+   entry — instead of one input squeezed between two buttons. */
+.capability-import-entry { display: flex; flex-direction: column; gap: 8px; }
+.capability-import-line { display: flex; align-items: center; gap: 8px; }
+.capability-import-path { flex: 1; min-width: 0; }
+.capability-import-line .rail-btn { flex-shrink: 0; }
+.capability-import-actions { margin-top: 0; }
+.capability-import-body-wrap { margin-top: 0; }
 .capability-import-body-wrap summary { cursor: pointer; font-size: 11.5px; color: var(--faint); }
 .capability-import-body {
   margin: 6px 0 0; padding: 8px;

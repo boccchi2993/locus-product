@@ -140,12 +140,16 @@
         await waitFor(() => Array.isArray(L.store.capabilityPackages.packages)
           && L.store.capabilityPackages.packages.some((p) => p.id === PKG_ID && p.loaded === true), 5000),
         JSON.stringify(L.store.capabilityPackages.packages.map((p) => p.id)));
-      const rowText = installedRow() ? installedRow().textContent : '';
-      check('K19 merged block shows id, version, author, purpose',
-        rowText.includes('demo-package') && rowText.includes('1.0.0')
-        && rowText.includes('Author (self-declared): e2e-suite')
-        && rowText.includes('Purpose: capability install UI e2e'),
-        rowText.slice(0, 300));
+      // 2026-10-29 owner UI decision: the merged package block became ONE
+      // capability card whose first line shows the DISPLAY NAME (the raw
+      // package id is no longer rendered for a loaded package), so K19
+      // reads the card text instead of the package wrapper.
+      const capCardText = capItem() ? capItem().textContent : '';
+      check('K19 merged card shows display name, version, author, purpose',
+        capCardText.includes('Demo Package') && capCardText.includes('1.0.0')
+        && capCardText.includes('Author (self-declared): e2e-suite')
+        && capCardText.includes('Purpose: capability install UI e2e'),
+        capCardText.slice(0, 300));
       check('K19a the Capability entry offers the package Uninstall button',
         !!$('[data-testid="capability-package-uninstall-' + PKG_ID + '"]'),
         'capability-package-uninstall-demo-package not found');
