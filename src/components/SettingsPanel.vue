@@ -267,7 +267,7 @@
             <div v-if="c.enabled && removingId === c.id" class="hint" data-testid="capability-remove-warning">
               Removing this capability disables it and deletes its customized guidance; re-adding it restores the
               default guidance.<span v-if="loadedPackagesById[c.id]"> To delete this package from Locus instead, use
-              Uninstall below.</span>
+              Uninstall.</span>
             </div>
             <div v-if="c.enabled && c.error" class="hint">{{ c.error }}</div>
             <template v-if="c.enabled">
