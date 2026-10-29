@@ -97,6 +97,12 @@ const SUITES = [
   // drives (no Open terminal, cascade parent ARIA, global dialog, store
   // surface, independent scroll areas, <640px stepped boundary).
   'composer-menu-structure.test.cjs',
+  // @-mentions (owner task 2026-10-29): the pure recognizer (boundaries,
+  // terminator, backtrack, dedupe, fragments, popup trigger) and the
+  // environment-notes line (ready/needs-connection ids, verbatim format,
+  // set-determinism, ordering).
+  'mentions.test.mjs',
+  'product-prompt-mentions.test.mjs',
 ];
 
 let failed = 0;

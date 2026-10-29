@@ -45,6 +45,13 @@ const SUITES = [
   // panel closed), checks the import-report cancellation, the @mention
   // insertion and the <640px stepped mode.
   'e2e-composer-menu.cjs',
+  // Composer @-mentions (owner task 2026-10-29): the candidate popup
+  // (trigger/filter/keyboard/insert/Enter-not-send), the mirror
+  // highlight, the IME composition guard, send-time auto-enable with the
+  // mention semantics inside the RECORDED system prompt, the error-state
+  // block, the "+"-menu insert path and the timeline highlight (no
+  // message-content innerHTML), over the real built app.
+  'e2e-composer-mentions.cjs',
 ];
 
 // Resolve requested suite names against the registry. Returns the run list
