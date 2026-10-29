@@ -5,17 +5,21 @@
 //   IR2  filename rules: UTC YYYYMMDD-HHMMSS stamp, slug from id, slug
 //        from the label basename, [a-z0-9._-] normalization, 64-char cap,
 //        empty-slug fallback
-//   IR3  same-second collision suffixes -2 / -3 (different slugs never
-//        collide)
-//   IR4  retention: only the newest 20 reports survive, by FILENAME sort
+//   IR3  same-second collision suffixes ~02 / ~03 (different slugs never
+//        collide); filename sort equals write order
+//   IR4  retention: only the newest 20 reports survive, by FILENAME sort —
+//        under a frozen clock (one stem, 25 writes) exactly the last 20
+//        written
 //   IR5  write failures never propagate: record() resolves null and notes
 //        through the injected sink (missing home, refusing provider);
 //        the next record recovers
 //   IR6  a prune failure does not undo a successful write
-//   IR7  store-level: inspect report (ok), commit report (ok, result
-//        shape), cancelled report, failed-inspect report via path — and
-//        NEITHER the credential test key NOR the commit token appears in
-//        any report file (full-text over the whole home)
+//   IR7  store-level: a PASSED inspection writes NO report until the
+//        dialog decision (one report per attempt: confirm → exactly one
+//        commit report, cancel → exactly one cancelled report), refused
+//        inspect reports via path and via broken bytes — and NEITHER the
+//        credential test key NOR the commit token appears in any report
+//        file (full-text over the whole home)
 //
 // The browser gate drives the same flow over the REAL built app
 // (tests/e2e-import-reports.cjs, registered in run-browser-gates.cjs).
@@ -150,13 +154,18 @@ const namesOf = (home) => [...home._files.keys()].map((p) => p.slice('capability
   const n2 = await service.record({ id: 'dup', stage: 'inspect', ok: true });
   const n3 = await service.record({ id: 'dup', stage: 'inspect', ok: true });
   const nOther = await service.record({ id: 'other', stage: 'inspect', ok: true });
-  check('IR3 collisions append -2 then -3',
-    n1 === '20261027-080000-dup.json' && n2 === '20261027-080000-dup-2.json'
-    && n3 === '20261027-080000-dup-3.json',
+  // 2026-10-29 FIX-IR1：后缀改为 ~NN 以保证文件名排序 = 写入顺序
+  //（旧 "-2" 的字符码排在 ".json" 的 "." 之前，同一秒先写的那份反而排序最新）。
+  check('IR3 collisions append ~02 then ~03',
+    n1 === '20261027-080000-dup.json' && n2 === '20261027-080000-dup~02.json'
+    && n3 === '20261027-080000-dup~03.json',
     JSON.stringify([n1, n2, n3]));
   check('IR3 a different slug in the same second never collides',
     nOther === '20261027-080000-other.json', nOther);
   check('IR3 all four files exist', namesOf(home).length === 4, JSON.stringify(namesOf(home)));
+  check('IR3 filename sort equals write order',
+    JSON.stringify(namesOf(home)) === JSON.stringify([n1, n2, n3, nOther]),
+    JSON.stringify({ sorted: namesOf(home), written: [n1, n2, n3, nOther] }));
 }
 
 {
@@ -178,13 +187,31 @@ const namesOf = (home) => [...home._files.keys()].map((p) => p.slice('capability
     JSON.stringify(names.slice(0, 3)) + ' … ' + JSON.stringify(names.slice(-2)));
 
   // 30 same-second collisions: filename sort still keeps a well-defined
-  // newest-20 (the -2…-21 suffixes sort ahead of the bare name).
+  // newest-20, and since FIX-IR1 it is exactly the last 20 written (the
+  // picker never hands out a name the pruner deleted).
   const home2 = fakeHome();
   const { service: s2 } = serviceWith(home2);
-  for (let i = 0; i < 30; i++) await s2.record({ id: 'burst', stage: 'inspect', ok: true });
+  const written2 = [];
+  for (let i = 0; i < 30; i++) {
+    written2.push(await s2.record({ id: 'burst', stage: 'inspect', ok: true }));
+  }
   const names2 = namesOf(home2);
   check('IR4 a same-second burst keeps exactly 20 too', names2.length === 20,
     JSON.stringify(names2.length));
+
+  // Fixed clock, 25 writes, ONE stem (the FIX-IR1 acceptance shape): the
+  // survivors are exactly the last 20 written, no name reused.
+  const home3 = fakeHome();
+  const { service: s3 } = serviceWith(home3);
+  const written3 = [];
+  for (let i = 0; i < 25; i++) {
+    written3.push(await s3.record({ id: 'freeze', stage: 'inspect', ok: true }));
+  }
+  const names3 = namesOf(home3);
+  check('IR4 a frozen clock keeps exactly the last 20 written',
+    new Set(written3).size === 25 && names3.length === 20
+    && JSON.stringify(names3) === JSON.stringify(written3.slice(-20).sort()),
+    JSON.stringify({ written: written3, remain: names3 }));
 }
 
 {
@@ -300,9 +327,11 @@ const namesOf = (home) => [...home._files.keys()].map((p) => p.slice('capability
     await walk('/home/locus');
     return chunks.join('\\n');
   };
-  // The newest by the at stamp: same-second collisions suffix the FILE
-  // name (-2 sorts ahead of the bare .json), so filename order is not
-  // write order within one second.
+  // The newest report by the at stamp (millisecond tiebreak). Filename
+  // sort orders reports within ONE slug family — the FIX-IR1 ~NN suffix
+  // keeps a collision chain in write order — but two DIFFERENT slugs
+  // landing in the same second stay alphabetical, not chronological, so
+  // this helper (like the e2e reader) picks by at.
   const lastReport = async () => {
     const names = await listReports();
     const docs = await Promise.all(names.map(readReport));
@@ -311,20 +340,17 @@ const namesOf = (home) => [...home._files.keys()].map((p) => p.slice('capability
     return best;
   };
 
-  // inspect (ok) — the report lands before begin() resolves.
+  // inspect (ok) — FIX-IR1: a passed inspection writes NOTHING while the
+  // confirm dialog is open; the attempt reports once, at the decision.
+  let rep = null;
+  const namesBeforeBegin = await listReports();
   await store.beginCapabilityImportFromBytes(PKG, 'report-cap-1.0.0.locus');
-  let rep = await lastReport();
-  check('IR7 inspect-ok report: stage/ok/kind/id/version, userAction null',
-    rep.stage === 'inspect' && rep.ok === true && rep.kind === 'new'
-    && rep.id === 'report-cap' && rep.version === '1.0.0' && rep.userAction === null
-    && rep.source === 'file' && rep.label === 'report-cap-1.0.0.locus'
-    && Array.isArray(rep.diagnostics) && rep.diagnostics.length === 0,
-    JSON.stringify(rep));
-  check('IR7 inspect-ok carries NO commit token',
-    !('token' in rep) && !JSON.stringify(rep).includes('token'),
-    JSON.stringify(Object.keys(rep)));
+  check('IR7 a passed inspection writes NO report while the dialog is open',
+    JSON.stringify(await listReports()) === JSON.stringify(namesBeforeBegin),
+    JSON.stringify(await listReports()));
 
-  // commit (ok) — result.state / enabled / enableError.
+  // commit (ok) — result.state / enabled / enableError, and the attempt's
+  // ONLY report.
   await store.confirmCapabilityImport();
   rep = await lastReport();
   check('IR7 commit-ok report: stage commit, confirmed, result shape',
@@ -334,6 +360,9 @@ const namesOf = (home) => [...home._files.keys()].map((p) => p.slice('capability
     && rep.result.enableError === null
     && Array.isArray(rep.diagnostics) && rep.diagnostics.length === 0,
     JSON.stringify(rep));
+  check('IR7 the Import flow (begin + confirm) added EXACTLY ONE report',
+    (await listReports()).length === namesBeforeBegin.length + 1,
+    JSON.stringify({ before: namesBeforeBegin.length, after: (await listReports()).length }));
 
   // cancel — userAction 'cancelled' (cancel is fire-and-forget: poll).
   await store.beginCapabilityImportFromBytes(PKG, 'report-cap-again.locus');
@@ -350,6 +379,9 @@ const namesOf = (home) => [...home._files.keys()].map((p) => p.slice('capability
     !!cancelled && cancelled.stage === 'inspect' && cancelled.ok === true
     && cancelled.userAction === 'cancelled' && cancelled.id === 'report-cap',
     JSON.stringify(cancelled));
+  check('IR7 the cancel flow added EXACTLY ONE report',
+    (await listReports()).length === beforeNames.size + 1,
+    JSON.stringify(await listReports()));
 
   // refused inspect via PATH (missing file → capability_import_failed).
   await store.beginCapabilityImportFromPath('/mnt/download/missing.locus');

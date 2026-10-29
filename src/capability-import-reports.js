@@ -23,8 +23,11 @@ export const CAPABILITY_IMPORTS_DIR = 'capability-imports';
 export const CAPABILITY_IMPORTS_KEEP = 20;
 export const CAPABILITY_IMPORT_REPORT_SCHEMA_VERSION = 1;
 
-// Same-second name collisions append -2, -3, …; a hard cap keeps a frozen
-// test clock from spinning forever.
+// Same-second name collisions append ~02, ~03, … ('~' sorts AFTER the
+// '.' of the bare .json and the two digits are zero-padded, so a
+// collision chain keeps filename sort == write order; "-2" sorted AHEAD
+// of the bare name and made the FIRST report of a second sort newest). A
+// hard cap keeps a frozen test clock from spinning forever.
 const COLLISION_LIMIT = 100;
 const SLUG_MAX = 64;
 const SLUG_FALLBACK = 'import';
@@ -70,17 +73,25 @@ export function createImportReports(opts) {
     if (noteError) noteError(error, operation);
   }
 
-  // Pick the first free `<stamp>-<slug>.json` (collisions append -2, -3…)
-  // against the CURRENT directory listing.
-  async function _pickName(provider, existing, stem) {
-    let name = stem + '.json';
-    if (!existing.has(name)) return name;
-    for (let n = 2; n < COLLISION_LIMIT; n++) {
-      name = stem + '-' + n + '.json';
-      if (!existing.has(name)) return name;
+  // The report names of ONE `<stamp>-<slug>` family, in FILENAME sort
+  // order: the bare `.json`, then ~02, ~03, …
+  function _familyName(stem, n) {
+    return stem + (n === 1 ? '.json' : '~' + String(n).padStart(2, '0') + '.json');
+  }
+
+  // Pick the name AFTER the last family member already on disk (the bare
+  // `<stamp>-<slug>.json` first, collisions ~02, ~03…) against the CURRENT
+  // directory listing. Lower free slots are NOT reused: when prune has
+  // removed the bare name while ~NN siblings remain, taking it again would
+  // sort the NEW report OLDEST and break filename sort == write order.
+  function _pickName(existing, stem) {
+    let highest = 0;
+    for (let n = 1; n < COLLISION_LIMIT; n++) {
+      if (existing.has(_familyName(stem, n))) highest = n;
     }
+    if (highest + 1 < COLLISION_LIMIT) return _familyName(stem, highest + 1);
     throw new Error('capability-imports: no free report name for ' + stem
-      + ' after ' + COLLISION_LIMIT + ' attempts');
+      + ' after ' + COLLISION_LIMIT + ' names');
   }
 
   // Keep the newest KEEP reports by FILENAME sort, delete the rest. A
@@ -135,7 +146,7 @@ export function createImportReports(opts) {
       }
       const entries = await provider.list(CAPABILITY_IMPORTS_DIR);
       const existing = new Set(entries.map((entry) => entry.name));
-      const name = await _pickName(provider, existing, stem);
+      const name = _pickName(existing, stem);
       // UTF-8 BYTES, never a raw string: the byte path is the one every
       // provider (memory + OPFS) is proven on — a string write can land
       // silently empty on OPFS.
