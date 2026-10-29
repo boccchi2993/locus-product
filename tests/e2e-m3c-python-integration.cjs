@@ -72,8 +72,8 @@ const { spawnSync } = require('child_process');
 const nodeCrypto = require('crypto');
 const {
   allocateFreePort, closeChrome, closeManagedProcess, connectToTarget,
-  launchChrome, launchManagedProcess, waitForCdp, waitForHttp,
-  waitForPageTarget, waitForRuntimeCondition,
+  isProcessAlive, launchChrome, launchManagedProcess, startServiceWithRetry,
+  waitForCdp, waitForHttp, waitForPageTarget, waitForRuntimeCondition,
 } = require('./helpers/chrome.cjs');
 const { loadPythonManifest } = require('./helpers/python-manifest.cjs');
 const {
@@ -173,12 +173,32 @@ async function main() {
     console.log('# building dist (vite build)');
     const build = spawnSync(process.execPath, [VITE_CLI, 'build'], { stdio: 'inherit', cwd: ROOT });
     if (build.status !== 0) { console.error('BUILD FAILED'); process.exit(1); }
-    const appPort = await allocateFreePort();
-    preview = launchManagedProcess(process.execPath, [
-      VITE_CLI, 'preview', '--host', '127.0.0.1', '--port', String(appPort), '--strictPort',
-    ], { cwd: ROOT, port: appPort, label: 'Vite preview (m3c python integration)', env: process.env });
-    appRoot = 'http://127.0.0.1:' + appPort + '/';
-    await waitForHttp(appRoot, { process: preview, timeoutMs: 20000 });
+    // --strictPort means an EADDRINUSE (allocateFreePort release/rebind
+    // race) kills the child before readiness: startServiceWithRetry
+    // re-spawns on a freshly allocated port, up to 3 times, BEFORE any
+    // product check runs. A retry triggers ONLY when the child died with
+    // EADDRINUSE in its output; any other readiness failure is rethrown.
+    const bound = await startServiceWithRetry(async (port) => {
+      const child = launchManagedProcess(process.execPath, [
+        VITE_CLI, 'preview', '--host', '127.0.0.1', '--port', String(port), '--strictPort',
+      ], { cwd: ROOT, port, label: 'Vite preview (m3c python integration)', env: process.env });
+      try {
+        await waitForHttp('http://127.0.0.1:' + port + '/', { process: child, timeoutMs: 20000 });
+      } catch (e) {
+        const raced = !isProcessAlive(child)
+          && /EADDRINUSE|address already in use/.test(child.stderrTail + '\n' + child.stdoutTail);
+        await closeManagedProcess(child);
+        if (raced) {
+          const bindError = new Error('vite preview could not bind port ' + port + ' (EADDRINUSE)');
+          bindError.code = 'EADDRINUSE';
+          throw bindError;
+        }
+        throw e;
+      }
+      return child;
+    }, await allocateFreePort());
+    preview = bound.handle;
+    appRoot = 'http://127.0.0.1:' + bound.port + '/';
   }
   const APP_URL = appRoot.replace(/\/$/, '') + '/?e2e=1&wire=1';
 
@@ -193,7 +213,7 @@ async function main() {
       profileDir,
       extraArgs: ['--window-size=1440,900'],
     });
-    await waitForCdp(chrome, { timeoutMs: 15000 });
+    await waitForCdp(chrome);
     const target = await waitForPageTarget(chrome, APP_URL, { timeoutMs: 15000 });
     cdp = await connectToTarget(target);
     // The interception patch is registered for the NEXT document start, so

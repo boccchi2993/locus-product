@@ -38,8 +38,8 @@ const http = require('http');
 const os = require('os');
 const path = require('path');
 const {
-  allocateFreePort, closeChrome, connectToTarget, launchChrome, waitForCdp,
-  waitForPageTarget, waitForRuntimeCondition,
+  allocateFreePort, closeChrome, connectToTarget, launchChrome, listenWithRetry,
+  waitForCdp, waitForPageTarget, waitForRuntimeCondition,
 } = require('./helpers/chrome.cjs');
 const { runStorageChecks } = require('./helpers/m3c-storage-checks.cjs');
 
@@ -146,8 +146,9 @@ async function main() {
     else { failed++; console.log('FAIL ' + name + (detail !== undefined ? ' | ' + detail : '')); }
   };
 
-  const port = await allocateFreePort();
-  server = http.createServer((req, res) => {
+  // Bind through listenWithRetry: allocateFreePort has a release/rebind
+  // race, so an EADDRINUSE retries on a freshly allocated port (up to 3).
+  const bound = await listenWithRetry(() => http.createServer((req, res) => {
     const u = new URL(req.url, 'http://127.0.0.1');
     const p = u.pathname;
     if (p === '/' || p === '/index.html') {
@@ -175,9 +176,9 @@ async function main() {
     }
     res.statusCode = 404;
     res.end('not found');
-  });
-  await new Promise((resolve) => server.listen(port, '127.0.0.1', resolve));
-  const pageUrl = 'http://127.0.0.1:' + port + '/';
+  }), await allocateFreePort());
+  server = bound.server;
+  const pageUrl = 'http://127.0.0.1:' + bound.port + '/';
   try {
     profileDir = await fs.mkdtemp(path.join(os.tmpdir(), 'locus-m3cb-profile-'));
     chrome = await launchChrome(pageUrl, {
@@ -186,7 +187,7 @@ async function main() {
       profileDir,
       extraArgs: ['--window-size=1280,800'],
     });
-    await waitForCdp(chrome, { timeoutMs: 15000 });
+    await waitForCdp(chrome);
     const target = await waitForPageTarget(chrome, pageUrl, { timeoutMs: 15000 });
     const cdp = await connectToTarget(target);
     await waitForRuntimeCondition(cdp, '!!(window.__m3c && window.__m3c.ready)',

@@ -21,7 +21,7 @@
 const fs = require('fs').promises;
 const http = require('http');
 const path = require('path');
-const { allocateFreePort } = require('./chrome.cjs');
+const { allocateFreePort, listenWithRetry } = require('./chrome.cjs');
 
 // Disk caches, most-specific first (same pattern as e2e-skill-instances):
 // this repo's scratch dir, then the source-snapshot repo's warm cache.
@@ -76,8 +76,9 @@ async function startM3cPythonAssetServer(manifest) {
   let mode = 'good';
   const hits = [];
   const bytes = new Map(); // name -> Buffer (populated by the caller)
-  const port = await allocateFreePort();
-  const server = http.createServer((req, res) => {
+  // Bind through listenWithRetry: allocateFreePort has a release/rebind
+  // race, so an EADDRINUSE retries on a freshly allocated port (up to 3).
+  const { server, port } = await listenWithRetry(() => http.createServer((req, res) => {
     const name = decodeURIComponent(new URL(req.url, 'http://127.0.0.1').pathname.replace(/^\/assets\//, ''));
     hits.push({ name, t: Date.now() });
     const buf = bytes.get(name);
@@ -97,8 +98,7 @@ async function startM3cPythonAssetServer(manifest) {
     res.setHeader('content-type', entry ? entry.mime : 'application/octet-stream');
     res.setHeader('content-length', String(buf.length));
     res.end(buf);
-  });
-  await new Promise((r) => server.listen(port, '127.0.0.1', r));
+  }), await allocateFreePort());
   return {
     port,
     origin: 'http://127.0.0.1:' + port + '/assets/',
@@ -124,8 +124,8 @@ async function startM3cPythonAssetServer(manifest) {
 //   /target/counts          { hits: {path: n}, total } — in-page delta reads
 async function startM3cPythonProbeServer() {
   const hits = [];
-  const port = await allocateFreePort();
-  const server = http.createServer(async (req, res) => {
+  // Bind through listenWithRetry (same EADDRINUSE retry as the asset server).
+  const { server, port } = await listenWithRetry(() => http.createServer(async (req, res) => {
     const u = new URL(req.url, 'http://127.0.0.1');
     const p = u.pathname;
     const cors = {
@@ -167,8 +167,7 @@ async function startM3cPythonProbeServer() {
     }
     res.writeHead(200, Object.assign({ 'content-type': 'text/plain' }, cors));
     res.end('probe-hit');
-  });
-  await new Promise((r) => server.listen(port, '127.0.0.1', r));
+  }), await allocateFreePort());
   return {
     port,
     origin: 'http://127.0.0.1:' + port,

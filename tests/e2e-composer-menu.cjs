@@ -63,7 +63,7 @@ async function main() {
       label: 'composer-menu Chrome',
       extraArgs: ['--window-size=1440,900'],
     });
-    await waitForCdp(chrome, { timeoutMs: 15000 });
+    await waitForCdp(chrome);
     const target = await waitForPageTarget(chrome, APP_URL, { timeoutMs: 15000 });
     cdp = await connectToTarget(target);
 

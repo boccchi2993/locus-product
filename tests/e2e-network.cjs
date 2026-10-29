@@ -29,6 +29,7 @@ const {
   closeChrome,
   connectToTarget,
   launchChrome,
+  startServiceWithRetry,
   waitForCdp,
   waitForPageTarget,
   waitForRuntimeCondition,
@@ -64,8 +65,12 @@ function json(res, status, body, headers) {
 
 // ---------- target server (stands in for the internet) ----------
 const BIG = Buffer.alloc(BIG_BYTES, 0x41);
+// The bind goes through startServiceWithRetry at the call site: an
+// EADDRINUSE (allocateFreePort release/rebind race) retries on a freshly
+// allocated port before any check runs — never an unhandled 'error' crash
+// like run 40851648265.
 function startTargetServer(port) {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const server = http.createServer(async (req, res) => {
       const p = req.url.split('?')[0];
       const cors = { 'access-control-allow-origin': '*' };
@@ -157,7 +162,11 @@ function startTargetServer(port) {
       res.writeHead(404);
       res.end('no such target');
     });
-    server.listen(port, '127.0.0.1', () => resolve(server));
+    server.once('error', reject);
+    server.listen(port, '127.0.0.1', () => {
+      server.removeListener('error', reject);
+      resolve(server);
+    });
   });
 }
 
@@ -172,7 +181,7 @@ const MIME = {
 };
 const echoLog = Object.create(null);
 function startAppServer(port, distDir, relay) {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const server = http.createServer(async (req, res) => {
       const p = req.url.split('?')[0];
       if (p === '/fetch') {
@@ -228,7 +237,11 @@ function startAppServer(port, distDir, relay) {
       res.writeHead(200, { 'content-type': MIME[path.extname(file)] || 'application/octet-stream' });
       fs.createReadStream(file).pipe(res);
     });
-    server.listen(port, '127.0.0.1', () => resolve(server));
+    server.once('error', reject);
+    server.listen(port, '127.0.0.1', () => {
+      server.removeListener('error', reject);
+      resolve(server);
+    });
   });
 }
 
@@ -627,9 +640,13 @@ async function main() {
       if (build.status !== 0) throw new Error('vite build failed');
     }
 
-    // 2. ports
-    const appPort = await allocateFreePort();
-    const targetPort = await allocateFreePort();
+    // 2. ports (bind retried on a fresh port when EADDRINUSE)
+
+    // 2b. the upstream stand-in binds BEFORE the fetch patch below (the
+    // patch closes over the FINAL port — the EADDRINUSE retry may have
+    // moved it to a freshly allocated one).
+    const targetService = await startServiceWithRetry(startTargetServer, await allocateFreePort());
+    const targetPort = targetService.port;
 
     // 3. relay import + upstream fetch patch (test-host mapping only)
     const relay = await import('file://' + path.join(ROOT, 'functions', 'fetch.js').replace(/\\/g, '/'));
@@ -642,8 +659,10 @@ async function main() {
     };
 
     // 4. servers
-    servers.push(await startTargetServer(targetPort));
-    servers.push(await startAppServer(appPort, distDir, relay));
+    const appService = await startServiceWithRetry(
+      (port) => startAppServer(port, distDir, relay), await allocateFreePort());
+    servers.push(targetService.handle, appService.handle);
+    const appPort = appService.port;
     const appUrl = 'http://127.0.0.1:' + appPort + '/?e2e=1';
     const targetOrigin = 'http://127.0.0.1:' + targetPort;
 
@@ -656,7 +675,7 @@ async function main() {
         '--host-resolver-rules=MAP api.test.local 127.0.0.1,MAP api2.test.local 127.0.0.1',
       ],
     });
-    await waitForCdp(chrome, { timeoutMs: 15000 });
+    await waitForCdp(chrome);
     const target = await waitForPageTarget(chrome, appUrl, { timeoutMs: 15000 });
     const cdp = await connectToTarget(target);
     await waitForRuntimeCondition(cdp,
