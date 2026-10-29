@@ -85,6 +85,8 @@ API（`import locus_capability_sdk as sdk`）：
 - 只保留最近 20 份，更早的自动删除。
 - `/home/locus/capability-imports` 加入 home 目录骨架（LOCUS_HOME_SKELETON）。
 - 用户在确认框里点了取消，同样写一份，`userAction` 为 `"cancelled"`，让模型知道用户没有导入。
+- 同一秒内文件名冲突时依次追加后缀 `~02`、`~03` … `~99`（`~` 排在 `.` 之后、两位补零，保证按文件名排序等于写入顺序；后缀位不复用——prune 删掉的名字不会再拿来写新报告）。
+- 2026-10-29 注记：一次导入尝试只写一份报告——检查失败立即写（就是最终报告）；检查通过后确认框弹出时不写，用户点 Import 写 commit 报告、点 Cancel 写 cancelled 报告；确认框开着时页面被关闭或刷新，不写报告。自此“每次导入尝试都写一个 JSON 文件”与实现一致（此前实现会在弹框时先写一份 `userAction: null` 的 inspect 报告，同秒两份会让自己被当成“最新”读到）。
 
 ## 3. 安全与信任
 

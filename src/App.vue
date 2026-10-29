@@ -24,6 +24,10 @@
     >‹</button>
     <SettingsPanel v-if="store.settingsOpen" />
     <TerminalPanel v-if="store.terminalOpen" />
+    <!-- Global import confirmation dialog: rendered at the root so an
+         import can be confirmed whether or not the settings panel is open
+         (the composer's Capabilities menu begins imports too). -->
+    <CapabilityImportDialog />
   </div>
 </template>
 
@@ -35,6 +39,7 @@ import MainWorkspace from './components/MainWorkspace.vue';
 import ContextRail from './components/ContextRail.vue';
 import SettingsPanel from './components/SettingsPanel.vue';
 import TerminalPanel from './components/TerminalPanel.vue';
+import CapabilityImportDialog from './components/CapabilityImportDialog.vue';
 
 const DRAWER_FOCUSABLE = [
   'button:not([disabled])',

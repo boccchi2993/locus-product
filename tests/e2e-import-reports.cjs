@@ -20,6 +20,12 @@
 //         with userAction "cancelled" lands (stage inspect, ok true)
 //   IR-G4 a REAL task's bash `cat` reads a report verbatim (the model can
 //         react to it) — the output carries the §2.4 fields
+//   IR-G5 (2026-10-29 FIX-IR1 additions across G2/G3 + this block) one
+//         report per attempt: the G2 Import flow adds EXACTLY one report,
+//         the open dialog adds none and the G3 Cancel flow exactly one,
+//         and two cancels raced into the SAME second keep filename sort
+//         == write order — the ~NN collision suffix puts the SECOND
+//         cancel's report last
 //
 // Run standalone: npm run build && npx vite preview --port 4173 & then
 //   node tests/e2e-import-reports.cjs
@@ -31,8 +37,9 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 const {
   allocateFreePort, closeChrome, closeManagedProcess, connectToTarget,
-  launchChrome, launchManagedProcess, waitForCdp, waitForHttp,
-  waitForPageTarget, waitForRuntimeCondition,
+  isProcessAlive, listenWithRetry, launchChrome, launchManagedProcess,
+  startServiceWithRetry, waitForCdp, waitForHttp, waitForPageTarget,
+  waitForRuntimeCondition,
 } = require('./helpers/chrome.cjs');
 const { loadPythonManifest } = require('./helpers/python-manifest.cjs');
 
@@ -138,9 +145,11 @@ async function main() {
     + ' await window.__locus.vfs.write("/mnt/download/' + name + '", bytes); return "written"; })()');
 
   // ---- asset server (the pinned Pyodide set, served locally) ----
-  const assetPort = await allocateFreePort();
+  // allocateFreePort has a release/rebind race; bind through
+  // listenWithRetry so an EADDRINUSE retries on a freshly allocated port
+  // (up to 3 times) before any product check runs.
   const assetBytes = new Map();
-  const assetServer = http.createServer((req, res) => {
+  const { server: assetServer, port: assetPort } = await listenWithRetry(() => http.createServer((req, res) => {
     const name = decodeURIComponent(new URL(req.url, 'http://127.0.0.1').pathname.replace(/^\/assets\//, ''));
     const bytes = assetBytes.get(name);
     if (!bytes) { res.statusCode = 404; res.end('unknown asset'); return; }
@@ -149,18 +158,37 @@ async function main() {
     res.setHeader('content-type', entry ? entry.mime : 'application/octet-stream');
     res.setHeader('content-length', bytes.length);
     res.end(bytes);
-  });
-  await new Promise((r) => assetServer.listen(assetPort, '127.0.0.1', r));
+  }), await allocateFreePort());
   console.log('# loading pinned pyodide assets (' + PY_MANIFEST.length + ' files, cache or CDN)');
   for (const a of PY_MANIFEST) assetBytes.set(a.name, await loadAsset(a.name));
 
   // ---- vite preview (the built app) ----
-  const appPort = await allocateFreePort();
-  const preview = launchManagedProcess(process.execPath, [
-    VITE_CLI, 'preview', '--host', '127.0.0.1', '--port', String(appPort), '--strictPort',
-  ], { cwd: ROOT, port: appPort, label: 'Vite preview (import-reports)', env: process.env });
+  // --strictPort means an EADDRINUSE (allocateFreePort release/rebind
+  // race) kills the child before readiness: startServiceWithRetry
+  // re-spawns on a freshly allocated port, up to 3 times, BEFORE any
+  // product check runs.
+  const { handle: preview, port: appPort } = await startServiceWithRetry(async (port) => {
+    const child = launchManagedProcess(process.execPath, [
+      VITE_CLI, 'preview', '--host', '127.0.0.1', '--port', String(port), '--strictPort',
+    ], { cwd: ROOT, port, label: 'Vite preview (import-reports)', env: process.env });
+    try {
+      await waitForHttp('http://127.0.0.1:' + port + '/', { process: child, timeoutMs: 15000 });
+    } catch (e) {
+      // Retry ONLY the bind race: the child died with EADDRINUSE in its
+      // output. Any other readiness failure is rethrown untouched.
+      const raced = !isProcessAlive(child)
+        && /EADDRINUSE|address already in use/.test(child.stderrTail + '\n' + child.stdoutTail);
+      await closeManagedProcess(child);
+      if (raced) {
+        const bindError = new Error('vite preview could not bind port ' + port + ' (EADDRINUSE)');
+        bindError.code = 'EADDRINUSE';
+        throw bindError;
+      }
+      throw e;
+    }
+    return child;
+  }, await allocateFreePort());
   const appRoot = 'http://127.0.0.1:' + appPort + '/';
-  await waitForHttp(appRoot, { process: preview, timeoutMs: 15000 });
 
   let profileDir = null;
   let chrome = null;
@@ -173,7 +201,7 @@ async function main() {
       profileDir,
       extraArgs: ['--window-size=1440,900'],
     });
-    await waitForCdp(chrome, { timeoutMs: 15000 });
+    await waitForCdp(chrome);
     const target = await waitForPageTarget(chrome, appUrl, { timeoutMs: 15000 });
     cdp = await connectToTarget(target);
 
@@ -299,6 +327,9 @@ async function main() {
 
     // ---------- IR-G2: good credential package → commit report → connect ----------
     await writeDownload('report-cap-1.0.0.locus', B64.v1);
+    // FIX-IR1: the whole import flow that follows must land EXACTLY ONE
+    // report (the commit one) — the open dialog itself writes none.
+    const countBeforeG2 = (await readReports()).length;
     await importFromPath('report-cap-1.0.0.locus');
     await waitForRuntimeCondition(cdp,
       '!!document.querySelector(\'[data-testid="capability-import-confirm"]\')',
@@ -323,6 +354,9 @@ async function main() {
       && r2.doc.result.enabled === true && r2.doc.result.enableError === null
       && Array.isArray(r2.doc.diagnostics) && r2.doc.diagnostics.length === 0,
       JSON.stringify(r2 && r2.doc.result));
+    check('IR-G2 the Import flow (dialog open -> confirm) added EXACTLY ONE report',
+      (await readReports()).length === countBeforeG2 + 1,
+      JSON.stringify({ before: countBeforeG2, after: (await readReports()).length }));
     const COMMIT_REPORT_NAME = r2 ? r2.name : null;
     const countBeforeConnect = (await readReports()).length;
     check('IR-G2 the connect step restates label, $NAME and the send rule',
@@ -356,11 +390,15 @@ async function main() {
       await evaluate(cdp, 'window.__locus.store.capabilityImport === null'));
 
     // ---------- IR-G3: cancel the confirm dialog ----------
+    const countBeforeG3 = (await readReports()).length;
     await writeDownload('report-cap-1.0.1.locus', B64.v2);
     await importFromPath('report-cap-1.0.1.locus');
     await waitForRuntimeCondition(cdp,
       '!!document.querySelector(\'[data-testid="capability-import-confirm"]\')',
       { process: chrome, phase: 'ir-summary-dialog-2', timeoutMs: 8000 });
+    check('IR-G3 the open confirm dialog has written NO report yet',
+      (await readReports()).length === countBeforeG3,
+      JSON.stringify({ before: countBeforeG3, after: (await readReports()).length }));
     const namesBeforeG3 = new Set((await readReports()).map((r) => r.name));
     check('IR-G3 cancel clicked', (await clickTestid('capability-import-cancel')) === 'clicked');
     let cancelledDoc = null;
@@ -375,8 +413,67 @@ async function main() {
       && cancelledDoc.userAction === 'cancelled' && cancelledDoc.id === CAP_ID
       && cancelledDoc.version === '1.0.1' && cancelledDoc.kind === 'replace',
       JSON.stringify(cancelledDoc));
+    check('IR-G3 the cancel flow added EXACTLY ONE report',
+      (await readReports()).length === countBeforeG3 + 1,
+      JSON.stringify({ before: countBeforeG3, after: (await readReports()).length }));
     check('IR-G3 the dialog closed on cancel',
       await evaluate(cdp, 'window.__locus.store.capabilityImport === null'));
+
+    // ---------- IR-G5: two cancels raced into the SAME second ----------
+    // FIX-IR1's ~NN suffix promises filename sort == write order even when
+    // two attempts land in one wall-clock second. The race is real-clock:
+    // run import+cancel flows until two CONSECUTIVE cancelled reports
+    // carry the same stamp (a flow takes a few hundred ms, so six tries
+    // make a total miss very unlikely), then the FILENAME-sort newest
+    // report must be the SECOND cancel's.
+    const stampOf = (name) => name.slice(0, 15); // 'YYYYMMDD-HHMMSS'
+    let prevG5 = null;
+    let g5pair = null;
+    for (let attempt = 0; attempt < 6 && !g5pair; attempt++) {
+      await importFromPath('report-cap-1.0.1.locus');
+      await waitForRuntimeCondition(cdp,
+        '!!document.querySelector(\'[data-testid="capability-import-confirm"]\')',
+        { process: chrome, phase: 'ir-summary-dialog-g5', timeoutMs: 8000 });
+      const namesBeforeG5 = new Set((await readReports()).map((r) => r.name));
+      check('IR-G5 cancel clicked (flow ' + (attempt + 1) + ')',
+        (await clickTestid('capability-import-cancel')) === 'clicked');
+      let landedG5 = null;
+      for (let t = 0; t < 100 && !landedG5; t++) {
+        await new Promise((r) => setTimeout(r, 50));
+        const fresh = (await readReports()).map((r) => r.name).filter((n) => !namesBeforeG5.has(n));
+        if (fresh.length) landedG5 = fresh;
+      }
+      check('IR-G5 exactly one report landed (flow ' + (attempt + 1) + ')',
+        !!landedG5 && landedG5.length === 1, JSON.stringify(landedG5));
+      if (!landedG5 || landedG5.length !== 1) break;
+      const cur = { name: landedG5[0] };
+      if (prevG5 && stampOf(prevG5.name) === stampOf(cur.name)) g5pair = [prevG5, cur];
+      prevG5 = cur;
+    }
+    check('IR-G5 two consecutive cancels shared one second (the ~NN suffix exercised)',
+      !!g5pair, JSON.stringify({ lastReport: prevG5 && prevG5.name }));
+    if (g5pair) {
+      const [firstG5, secondG5] = g5pair;
+      const allG5 = await readReports();
+      const sortedG5 = allG5.map((r) => r.name).sort();
+      const docsG5 = new Map(allG5.map((r) => {
+        try { return [r.name, JSON.parse(r.text)]; } catch (e) { return [r.name, null]; }
+      }));
+      check('IR-G5 the filename-sort newest report is the SECOND cancel',
+        sortedG5[sortedG5.length - 1] === secondG5.name
+        && sortedG5.indexOf(secondG5.name) === sortedG5.indexOf(firstG5.name) + 1,
+        JSON.stringify({ tail: sortedG5.slice(-4), first: firstG5.name, second: secondG5.name }));
+      check('IR-G5 both same-second reports are cancelled reports of this capability',
+        !!docsG5.get(firstG5.name) && !!docsG5.get(secondG5.name)
+        && docsG5.get(firstG5.name).userAction === 'cancelled'
+        && docsG5.get(secondG5.name).userAction === 'cancelled'
+        && docsG5.get(firstG5.name).id === CAP_ID && docsG5.get(secondG5.name).id === CAP_ID
+        && docsG5.get(firstG5.name).stage === 'inspect' && docsG5.get(secondG5.name).ok === true,
+        JSON.stringify([docsG5.get(firstG5.name), docsG5.get(secondG5.name)]));
+      check('IR-G5 the second report is written at or after the first',
+        docsG5.get(secondG5.name).at >= docsG5.get(firstG5.name).at,
+        JSON.stringify([docsG5.get(firstG5.name).at, docsG5.get(secondG5.name).at]));
+    }
 
     // ---------- IR-G4: a REAL task's bash cat reads the report ----------
     check('IR-G4 a commit report filename is known', typeof COMMIT_REPORT_NAME === 'string'

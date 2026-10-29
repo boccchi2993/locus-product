@@ -92,6 +92,11 @@ const SUITES = [
   // (M4a-C shipped it standalone; registered here so the matrix regresses
   // with the rest — the real tool stays GET-only and is not run by this).
   'm4a-mainline-preflight.test.cjs',
+  // Composer "+" menu (Capabilities cascade) + the global import dialog:
+  // source-level structure gate pinning the menu surface the browser gate
+  // drives (no Open terminal, cascade parent ARIA, global dialog, store
+  // surface, independent scroll areas, <640px stepped boundary).
+  'composer-menu-structure.test.cjs',
 ];
 
 let failed = 0;
