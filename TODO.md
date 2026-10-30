@@ -96,6 +96,16 @@ warm-up change made. No inference about relative failure probability is possible
 > 重跑前，必须先在这里追加一行：失败 run 的链接、head SHA、日期、DIAG 原文的最后一行。重跑后再追加结果。重跑仍失败，或任一条件不满足，照常停下来报告，不得再次重跑。
 > 背景：2026-10-23 本机实验，PR #32 前后各 10 次，各失败 1 次，异常均为上述 SystemError，探针 0 请求；根因在 runtime 的 Pyodide 桥接层，调查中（RT-D3）。
 
+### 追记 2026-10-30：PR #49 / PR #52 的修复与 B-PY1 的区分
+
+- 2026-10-30：PR #52（CI-STAB，合并提交 a70c301）修复了 Chrome 就绪与端口冲突问题：
+  `tests/helpers/chrome.cjs` 改为 `--remote-debugging-port=0` + 读取 DevToolsActivePort、
+  就绪等待 60 秒、服务端口 EADDRINUSE 重试（同 runtime TODO RT-CI-001 下 2026-10-30 追记）。
+  harness TODO 中 2026-10-16 的证据显示 Chrome 在启动后约 10–15 秒才打印 DevTools 监听行，
+  与 15 秒就绪超时吻合。
+- 2026-10-30：PR #49（FIX-IR1）修复了 IR-G3 同秒报告排序问题；PR #52 修复了服务端口
+  EADDRINUSE。这两类（IR-G3 排序、EADDRINUSE）不属于 B-PY1。
+
 ## 3. core-main-candidate red since 2026-10-17
 
 - [ ] **CANDIDATE-RED-2026-10-17** — first failure: scheduled
@@ -130,3 +140,83 @@ do not use retries or relaxed assertions to manufacture success.
 The verified M4b tuple and candidate artifact remain documented in
 [the mainline verification record](docs/M4B-MAINLINE-VERIFICATION.md). Future
 compatibility requires a fresh candidate result for the precise tuple.
+
+## 2026-10-30 新增条目
+
+以下条目为 2026-10-30 TODO 同步新增；跨仓库总索引见文末「2026-10-30 待办索引」。
+
+- [ ] **C3-P2（product）：能力内 MCP**
+  - 现状：待实现。设计依据：docs/C3-CREDENTIALS-MCP.md 与 DECISIONS.md D4；形态为
+    `mcp` shell 命令，先 bearer、后 OAuth。
+  - 下一步：按上述设计实现 `mcp` shell 命令。
+  - 验收：待确认。
+- [ ] **SEC-E2E-SEAM（product）：`?e2e=1` 测试接缝安全审查**
+  - 现状：`?e2e=1` 测试接缝在生产包中可用（部署冒烟就用它跑过）；脚本化回复应为
+    固定内容，未核实。
+  - 下一步：核实脚本化回复是否为固定内容；列入安全审查（见 SEC-REVIEW）。
+  - 验收：待确认。
+- [ ] **SEC-REVIEW（product）：整体安全审查**
+  - 现状：待做；范围含 `?e2e=1` 接缝（SEC-E2E-SEAM）、凭据、导入流程。
+  - 下一步：执行整体安全审查。
+  - 验收：待确认。
+- [ ] **MOBILE-REAL（product）：真机验证**
+  - 现状：2026-10-29 Chromium 设备模拟检查（412×915、390×844）核心链路可用；
+    iOS Safari 真引擎的内存与 WebAssembly 限制、真实软键盘行为只能真机确认。
+  - 下一步：待所有者真机测试。
+  - 验收：真机上核心链路可用（待确认）。
+- [ ] **CACHE-CTRL（product）：Anthropic 方言显式 cache_control**
+  - 现状：Anthropic 方言下显式 cache_control 标记待做；@ 点名说明已设计为不破坏
+    提示词缓存（PR #51），但缓存是否实际命中未验证。
+  - 下一步：实现 Anthropic 方言下的显式 cache_control 标记；验证缓存是否实际命中。
+  - 验收：待确认。
+- [ ] **CROSS-CAP-DIST（product）：同发行包多 plugin id 的注册提示**
+  - 现状：不同 plugin id 携带同一发行包时，先启用者生效、后者静默跳过
+    （DECISIONS.md D14 第 5 条）；当前由 capability-authoring 规避。
+  - 下一步：将来可考虑在注册/启用时提示。
+  - 验收：待确认。
+- [ ] **SCREENSHOTS-C3（product）：旧 c3 截图清理决策**
+  - 现状：仓库中存在旧的 docs/screenshots/c3-*.png；gate 已不再写入仓库（PR #51）。
+    是否清理待所有者决定。
+  - 下一步：等所有者决定后清理或保留。
+  - 验收：待确认。
+- [ ] **UX-BACKLOG（product）：UX 积压**
+  - 现状：待做项：设置中「作为依赖安装的插件」的角色展示；对话删除界面；附件清理
+    （GC）；npm audit；终端（菜单入口已在 PR #48 移除，代码保留）。
+  - 下一步：逐项排期实现。
+  - 验收：待确认（逐项）。
+- [ ] **MILESTONE-V1（product）：里程碑**
+  - 现状：待做：REAL-WORLD-50 真实任务基准；SDK README 与演示；v1 tag。
+  - 下一步：完成上述三项。
+  - 验收：待确认。
+- [ ] **CI-NODE24（product）：GitHub Actions "Node.js 20 is deprecated" 警告**
+  - 现状：同 harness HN-CI-NODE24：CI 每次运行都有 "Node.js 20 is deprecated"
+    警告（actions/checkout@v4、actions/setup-node@v4、actions/upload-artifact@v4
+    被强制以 Node 24 运行）。
+  - 下一步：升级 product 自己的 workflow 所用 action 版本。
+  - 验收：CI 运行不再出现该 deprecation 警告。
+
+## 2026-10-30 待办索引
+
+各条目正文在负责仓库的 TODO.md 中：
+
+- runtime（[TODO.md](https://github.com/boccchi2993/locus-runtime/blob/main/TODO.md)）：
+  - [RT-SYNC-INC 增量同步](https://github.com/boccchi2993/locus-runtime/blob/main/TODO.md#2026-10-30-新增条目)
+  - [RT-SYNC-LIMIT 单文件同步上限 16 MiB](https://github.com/boccchi2993/locus-runtime/blob/main/TODO.md#2026-10-30-新增条目)
+- harness（[TODO.md](https://github.com/boccchi2993/locus-harness/blob/main/TODO.md)）：
+  - [HN-CI-NODE24 Node 20 deprecation 警告](https://github.com/boccchi2993/locus-harness/blob/main/TODO.md#2026-10-30-新增条目)
+- example-capabilities（[TODO.md](https://github.com/boccchi2993/locus-example-capabilities/blob/main/TODO.md)）：
+  - [CA-1.1.0 capability-authoring 1.1.0](https://github.com/boccchi2993/locus-example-capabilities/blob/main/TODO.md#2026-10-30-新增条目)
+  - [CAP-GROUP2 第二批官方能力](https://github.com/boccchi2993/locus-example-capabilities/blob/main/TODO.md#2026-10-30-新增条目)
+  - [deepseek-web 发布状态](https://github.com/boccchi2993/locus-example-capabilities/blob/main/TODO.md#2026-10-30-新增条目)
+  - [VW2 反例测试修正](https://github.com/boccchi2993/locus-example-capabilities/blob/main/TODO.md#2026-10-30-新增条目)
+- product（本文件）：
+  - [C3-P2 能力内 MCP](#2026-10-30-新增条目)
+  - [SEC-E2E-SEAM `?e2e=1` 接缝安全审查](#2026-10-30-新增条目)
+  - [SEC-REVIEW 整体安全审查](#2026-10-30-新增条目)
+  - [MOBILE-REAL 真机验证](#2026-10-30-新增条目)
+  - [CACHE-CTRL 显式 cache_control](#2026-10-30-新增条目)
+  - [CROSS-CAP-DIST 同发行包多 plugin id 提示](#2026-10-30-新增条目)
+  - [SCREENSHOTS-C3 旧 c3 截图清理决策](#2026-10-30-新增条目)
+  - [UX-BACKLOG UX 积压](#2026-10-30-新增条目)
+  - [MILESTONE-V1 里程碑](#2026-10-30-新增条目)
+  - [CI-NODE24 Node 20 deprecation 警告](#2026-10-30-新增条目)
