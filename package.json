@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "locus-harness": "github:boccchi2993/locus-harness#1ad317c339775771f4877e876b6b61b8e35d0832",
-    "locus-runtime": "github:boccchi2993/locus-runtime#aca6c2f047c597ed814ffe24b6606a87d6886f51",
+    "locus-runtime": "github:boccchi2993/locus-runtime#2a38c130f1bd4f345ea146f32cce77fd691bd5d0",
     "vue": "^3.5.13"
   },
   "devDependencies": {
