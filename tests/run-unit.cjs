@@ -103,6 +103,11 @@ const SUITES = [
   // set-determinism, ordering).
   'mentions.test.mjs',
   'product-prompt-mentions.test.mjs',
+  // Markdown-lite extended rendering (owner task 2026-10-31): fenced code
+  // blocks, ordered lists, GFM tables, protocol-allowlisted links,
+  // sandbox: file-card slots, the injection sweep and the environment
+  // note's file-delivery line.
+  'markdown-render.test.mjs',
 ];
 
 let failed = 0;

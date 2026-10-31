@@ -809,7 +809,7 @@ const DEFAULTS = {
   model: 'deepseek-flash',
   proxy: '',
   dialect: 'auto',
-  maxTokens: 8192,
+  maxTokens: 32768,
   contextWindow: null,
   // D12: remembering on this device is the default; the checkbox starts
   // checked and only an explicit user choice turns it off (persisted as
@@ -1204,6 +1204,45 @@ function providerSessionsAdapter() {
 // providerSessions.restoreInto(session, conv) and
 // providerSessions.makeContext(conv, providerSession).
 
+// ---------- task output files (the 本次生成的文件 row) ----------
+// Basis (owner task 2026-10-31): the download provider write journal
+// (journalDownloadProvider, below) records EVERY write to the LIVE
+// /mnt/download provider with a timestamp — in-task agent writes route
+// to the same provider object — so a task's produced files are the
+// journal DIFF against the snapshot taken at its task_start: entries
+// that appeared or were re-written (timestamp moved) while it ran. This
+// catches new AND modified files, is independent of tool-result text
+// formats, and needs no list-refresh timing; deletions are journal
+// removals and never listed. Chosen over parsing tool results for write
+// records (format-coupled) and over before/after refreshArtifacts diffs
+// (racy, and {path,size} carries no mtime).
+const taskDownloadWriteSnapshots = new Map(); // conversation id → Map(rel path → epoch ms)
+
+function snapshotTaskDownloadWrites(conversationId) {
+  if (conversationId == null) return;
+  taskDownloadWriteSnapshots.set(conversationId, new Map(downloadWriteRecency));
+}
+
+function collectTaskOutputFiles(conv, conversationId) {
+  const snap = taskDownloadWriteSnapshots.get(conversationId);
+  taskDownloadWriteSnapshots.delete(conversationId);
+  if (!snap || conv == null) return;
+  const produced = [];
+  downloadWriteRecency.forEach((ts, rel) => {
+    if (snap.get(rel) !== ts) produced.push(ARTIFACTS_ROOT + '/' + rel);
+  });
+  if (!produced.length) return;
+  // Attach to THIS task's last assistant message — in a continued
+  // conversation every task keeps its own row under its own closing
+  // message. A task that ends without a final text shows no row.
+  for (let i = conv.items.length - 1; i >= 0; i--) {
+    if (conv.items[i] && conv.items[i].kind === 'assistant') {
+      conv.items[i].taskOutputFiles = produced.sort();
+      return;
+    }
+  }
+}
+
 function handleRuntimeEvent(event) {
   // Task-identity routing (lifecycle fix): a stamped event belongs to the
   // conversation its task bound AT EXECUTION START — never to whichever
@@ -1223,8 +1262,12 @@ function handleRuntimeEvent(event) {
   if (conv) {
     LocusProjector.projectEvent(conv, event);
     conv.presentationSequence = (conv.presentationSequence || 0) + 1;
-    if (event.type === 'task_start') conv.runState = 'running';
+    if (event.type === 'task_start') {
+      conv.runState = 'running';
+      snapshotTaskDownloadWrites(targetId);
+    }
     if (event.type === 'task_end') {
+      collectTaskOutputFiles(conv, targetId);
       conv.runState = event.reason === 'persistence_error' || event.reason === 'interrupted' ? 'interrupted' : 'idle';
       if (event.reason === 'persistence_error') conv.persistenceState = 'degraded';
     }

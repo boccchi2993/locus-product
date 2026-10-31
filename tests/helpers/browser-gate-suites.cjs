@@ -59,6 +59,13 @@ const SUITES = [
   // block, the "+"-menu insert path and the timeline highlight (no
   // message-content innerHTML), over the real built app.
   'e2e-composer-mentions.cjs',
+  // Markdown rendering + file delivery (owner task 2026-10-31): fenced
+  // code block with Copy, ordered list, GFM table, protocol-allowlisted
+  // links (javascript: stays literal), sandbox: file cards (existing /
+  // missing) over the real VFS, the GLOBAL import confirm dialog over a
+  // REAL fixture .locus (Cancel, nothing installed), the 本次生成的文件
+  // row (sandbox dedupe) and no horizontal page scroll at 390×844.
+  'e2e-render.cjs',
 ];
 
 // Resolve requested suite names against the registry. Returns the run list

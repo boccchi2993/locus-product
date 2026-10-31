@@ -351,7 +351,8 @@ async function main() {
     check('I-E18 unsure → exactly one probe request, then exactly one image request',
       callsE.length === 2 && callsE[0].body.max_tokens === 64 && !callsE[0].body.tools
         && JSON.stringify(callsE[0].body).includes('image')
-        && callsE[1].body.max_tokens === 8192
+        // 32768 = the fresh-default maxTokens since the 2026-10-31 task (was 8192).
+        && callsE[1].body.max_tokens === 32768
         && JSON.stringify(callsE[1].body).includes(SENTINEL_PNG_B64),
       'calls=' + callsE.length + ' shapes=' + JSON.stringify(callsE.map((c) => ({
         mt: c.body.max_tokens, tools: !!c.body.tools,

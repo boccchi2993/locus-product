@@ -32,7 +32,7 @@
           <div class="field">
             <label for="set-max-tokens">Max output tokens</label>
             <input id="set-max-tokens" v-model.number="store.settings.maxTokens" type="number" min="1" step="1" inputmode="numeric">
-            <div class="hint">Upper bound for one model reply. Lower it if the provider rejects requests; Locus never guesses it from the model name.</div>
+            <div class="hint">Upper bound for one model reply. Mainstream models support 128K+; lower it if the provider rejects the request. Locus never guesses it from the model name.</div>
           </div>
           <div class="field">
             <label for="set-context-window">Context window (tokens) <span class="hint-inline">optional</span></label>

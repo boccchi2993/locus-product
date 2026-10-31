@@ -1,11 +1,12 @@
 // Max output tokens setting tests (node, NO DOM):
 // DECISIONS.md D5: max_tokens is USER configuration, never inferred from the
-// model name. The setting lives in store.settings.maxTokens (default 8192),
+// model name. The setting lives in store.settings.maxTokens (default 32768
+// since the 2026-10-31 rendering/file-delivery task — was 8192),
 // persists through the regular settings rows (string storage, no schema
 // bump), and reaches the provider session through applySettings →
 // session.setMaxTokens (guarded: injected test sessions may lack the method):
-//   SET1 fresh defaults       → maxTokens 8192
-//   SET2 parseMaxTokens       → '4096'→4096; 0/-1/'abc'/''/1.5 → 8192
+//   SET1 fresh defaults       → maxTokens 32768
+//   SET2 parseMaxTokens       → '4096'→4096; 0/-1/'abc'/''/1.5 → 32768
 //                               (observed through the real sessionStorage read
 //                               path — the helper is module-private)
 //   SET3 persistence          → saveSettings stores a string; boot parses it
@@ -74,7 +75,7 @@ function seededMaxTokensConfig(v) {
   // ---------- SET1. fresh defaults ----------
   {
     const m = await loadStore(null); // boot runs applySettings() with the defaults
-    check('SET1 default maxTokens is 8192', m.store.settings.maxTokens === 8192,
+    check('SET1 default maxTokens is 32768', m.store.settings.maxTokens === 32768,
       m.store.settings.maxTokens);
   }
 
@@ -82,11 +83,11 @@ function seededMaxTokensConfig(v) {
   {
     const cases = [
       ['\'4096\' parses to 4096', '4096', 4096],
-      ['0 falls back to 8192', 0, 8192],
-      ['-1 falls back to 8192', -1, 8192],
-      ['\'abc\' falls back to 8192', 'abc', 8192],
-      ['\'\' falls back to 8192', '', 8192],
-      ['1.5 falls back to 8192', 1.5, 8192],
+      ['0 falls back to 32768', 0, 32768],
+      ['-1 falls back to 32768', -1, 32768],
+      ['\'abc\' falls back to 32768', 'abc', 32768],
+      ['\'\' falls back to 32768', '', 32768],
+      ['1.5 falls back to 32768', 1.5, 32768],
     ];
     for (const [name, input, expected] of cases) {
       const m = await loadStore(seededMaxTokensConfig(input));
@@ -127,7 +128,7 @@ function seededMaxTokensConfig(v) {
       setMaxTokens: (n) => { recorded.push(n); },
     }));
     check('SET4 boot applied the default to the injected session',
-      recorded.length >= 1 && recorded[0] === 8192, JSON.stringify(recorded));
+      recorded.length >= 1 && recorded[0] === 32768, JSON.stringify(recorded));
     m.store.settings.maxTokens = '4096'; // string, as read back from storage
     m.applySettings();
     const last = recorded[recorded.length - 1];
