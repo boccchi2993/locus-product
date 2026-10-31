@@ -30,10 +30,39 @@
       <ToolResultItem v-else-if="item.kind === 'tool_result'" :item="item" :standalone="true" />
 
       <!-- assistant final text: blends into the page, no card.
-           markdown-lite rendering; input is fully escaped before
-           inline formatting, so model output cannot inject markup. -->
+           markdown-lite segment rendering: html segments go through
+           v-html (input fully escaped before any syntax runs), code
+           blocks become a live block (copy button, raw text via text
+           interpolation) and sandbox: file links become FileCards.
+           Under the task's LAST assistant message the files written
+           during the task (if any) render as the 本次生成的文件 row. -->
       <div v-else-if="item.kind === 'assistant'" class="item item-assistant">
-        <div class="assistant-text" v-html="renderMd(item.content)"></div>
+        <div class="assistant-text">
+          <template v-for="(seg, si) in segments(item.content)" :key="si">
+            <div v-if="seg.type === 'code'" class="md-code" data-testid="md-code-block">
+              <div class="md-code-head">
+                <span v-if="seg.lang" class="md-code-lang">{{ seg.lang }}</span>
+                <button
+                  class="md-code-copy"
+                  type="button"
+                  :data-testid="'code-copy-' + si"
+                  @click="copyCode(seg, $event)"
+                >Copy</button>
+              </div>
+              <pre><code>{{ seg.code }}</code></pre>
+            </div>
+            <FileCard v-else-if="seg.type === 'file'" :path="seg.path" />
+            <div v-else class="md-html" v-html="seg.html"></div>
+          </template>
+          <div
+            v-if="taskOutputFiles(item).length"
+            class="task-files"
+            data-testid="task-output-files"
+          >
+            <span class="task-files-label">本次生成的文件</span>
+            <FileCard v-for="f in taskOutputFiles(item)" :key="f" :path="f" />
+          </div>
+        </div>
       </div>
 
       <div v-else-if="item.kind === 'warning'" class="item item-warning">
@@ -54,13 +83,69 @@
 import ReasoningItem from './ReasoningItem.vue';
 import ToolCallItem from './ToolCallItem.vue';
 import ToolResultItem from './ToolResultItem.vue';
+import FileCard from './FileCard.vue';
 import { LocusMarkdown } from '../ui/markdown.js';
 import { store } from '../ui/store.js';
 import { splitMentionFragments } from '../ui/mentions.js';
 
-defineProps({ conversation: { type: Object, required: true } });
+const props = defineProps({ conversation: { type: Object, required: true } });
 
-const renderMd = (text) => LocusMarkdown.render(text);
+// Parsed segments memoize per content string: timeline items are
+// immutable once appended, so the parse runs once per message.
+const segCache = new Map();
+const segments = (text) => {
+  if (!segCache.has(text)) {
+    if (segCache.size > 400) segCache.clear();
+    segCache.set(text, LocusMarkdown.renderSegments(text));
+  }
+  return segCache.get(text);
+};
+
+const lastAssistantItem = () => {
+  const items = props.conversation.items || [];
+  for (let i = items.length - 1; i >= 0; i--) {
+    if (items[i] && items[i].kind === 'assistant') return items[i];
+  }
+  return null;
+};
+
+// Files written under /mnt/download during THIS task (store.js journals
+// every provider write and diffs against the task_start snapshot, then
+// attaches them to the task's last assistant message), minus the paths
+// THIS message already shows as sandbox: cards.
+const taskOutputFiles = (item) => {
+  const files = item && item.taskOutputFiles;
+  if (!Array.isArray(files) || !files.length) return [];
+  const linked = new Set(LocusMarkdown.extractSandboxPaths(item.content));
+  return files.filter((p) => !linked.has(p));
+};
+
+// Copies the RAW code block text. Clipboard API first; the execCommand
+// fallback covers denied permissions (headless, non-focused windows).
+const copyCode = async (seg, ev) => {
+  const btn = ev && ev.currentTarget;
+  let ok = false;
+  try {
+    await navigator.clipboard.writeText(seg.code);
+    ok = true;
+  } catch (e) {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = seg.code;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      ok = document.execCommand('copy');
+      ta.remove();
+    } catch (e2) { ok = false; }
+  }
+  if (btn) {
+    const prev = 'Copy';
+    btn.textContent = ok ? 'Copied' : 'Copy failed';
+    setTimeout(() => { btn.textContent = prev; }, 1200);
+  }
+};
 
 // The same recognition the composer used at send time, re-run against
 // the CURRENTLY installed capability ids (history stays honest about

@@ -56,6 +56,7 @@ export function locusEnvironmentNotes(opts) {
     wsName
       ? 'An external folder "' + wsName + '" is currently mounted at /mnt/workspace (the default cwd).'
       : 'No external folder is currently mounted, so /mnt/workspace is unavailable; the default cwd is /home/locus. Use /mnt/upload for user-provided inputs (read-only), /mnt/download for files the user should receive, and /tmp for scratch space.',
+    '- To give the user a file, save it under /mnt/download and link it in your reply as [file name](sandbox:/mnt/download/<file name>); the user sees a download card (and an Import button for .locus files).',
     mentionLine,
     opts && opts.toolOutputs === true
       ? '- When a long tool output is truncated, the truncation marker may name a file under /home/locus/history that holds the full output (read-only). Read it with head/tail/grep -n; to process it with python, cp it to /tmp first.'

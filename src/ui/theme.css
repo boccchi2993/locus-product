@@ -263,6 +263,71 @@ input, select, textarea { font-family: inherit; font-size: inherit; color: inher
   margin: 0 0 10px; padding-left: 12px; border-left: 2px solid var(--border);
   color: var(--muted); overflow-wrap: anywhere;
 }
+.assistant-text ol { margin: 0 0 10px 20px; }
+.assistant-text a { color: var(--accent); }
+.ext-link-icon { margin-left: 3px; flex-shrink: 0; }
+
+/* Fenced code block: language tag + Copy in a head bar; the body scrolls
+   horizontally INSIDE its own box — it must never widen the page. */
+.md-code {
+  margin: 0 0 10px; max-width: 100%;
+  background: var(--code-bg); border: 1px solid var(--border);
+  border-radius: 8px; overflow: hidden;
+}
+.md-code-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; padding: 3px 6px 3px 10px; min-height: 24px;
+  border-bottom: 1px solid var(--border);
+}
+.md-code-lang { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.md-code-copy {
+  font-size: 11px; padding: 2px 8px; border-radius: 5px;
+  border: 1px solid var(--border); background: transparent;
+  color: var(--muted); cursor: pointer; flex-shrink: 0;
+}
+.md-code-copy:hover { color: var(--text); border-color: var(--faint); }
+.md-code pre {
+  margin: 0; padding: 9px 12px; max-width: 100%; overflow-x: auto;
+  background: transparent; border-radius: 0; white-space: pre;
+}
+
+/* File cards (sandbox: links, task output row) — deliberately unlike a
+   text link: a boxed chip with the file icon, name, size and the
+   Download/Import actions. Missing paths degrade to the grey,
+   non-clickable 文件不存在 line. */
+.file-card {
+  display: flex; align-items: center; gap: 8px;
+  max-width: 100%; margin: 6px 0; padding: 7px 10px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; color: var(--text);
+  font-size: 13px; line-height: 1.4;
+}
+.file-card-name {
+  font-family: var(--sans); font-weight: 500;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  min-width: 0;
+}
+.file-card-size { color: var(--muted); font-size: 12px; flex-shrink: 0; }
+.file-card-btn {
+  min-height: 26px; padding: 3px 10px; font-size: 12px; flex-shrink: 0;
+}
+.file-card-missing {
+  display: inline-flex; align-items: center; gap: 6px;
+  margin: 6px 0; padding: 4px 0;
+  color: var(--muted); font-size: 13px;
+  overflow-wrap: anywhere; user-select: none; cursor: default;
+}
+
+/* 本次生成的文件: the row of task-produced files under the last
+   assistant message of a finished task. */
+.task-files {
+  margin-top: 10px; padding-top: 8px;
+  border-top: 1px dashed var(--border);
+}
+.task-files-label {
+  display: block; margin-bottom: 2px;
+  color: var(--muted); font-size: 12.5px;
+}
 
 .item-working { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
 .working-dot {
