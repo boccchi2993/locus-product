@@ -341,6 +341,107 @@ async function main() {
     check('J7 the recovered task re-sent the history image under the real declaration (no new card)',
       j7Recovery.hasImage === true && j7Recovery.noCard === true, JSON.stringify(j7Recovery));
 
+    // ---------- J8: task-limit settings UI + the runtime shell C5 commands ----------
+    // Harness PR #15 settings, end to end in the PACKAGED page: the two new
+    // Model-section fields are driven through the REAL panel inputs (Vue
+    // v-model), Done applies them to the REAL live session
+    // (session.maxToolCalls / session.toolResultMaxChars), and a
+    // scripted-model task then exercises the runtime's ls -R,
+    // sed -n '1,2p' and the heredoc write cat > /tmp/h.txt <<'EOF' — each
+    // command its own tool call, every tool result back through the REAL
+    // chain, the written file read back through the REAL VFS.
+    await evaluate(cdp, `(async () => {
+      await window.__locus.actions.resetAllData();
+      const s = window.__locus.store.settings;
+      s.apiBase = 'https://joint.invalid/v1'; s.dialect = 'openai';
+      s.model = 'joint-model'; s.apiKey = 'JOINT-KEY'; s.remember = false;
+      window.__locus.actions.applySettings();
+      await window.__locus.actions.persistSettingsIfNeeded();
+      // The REAL panel path: open the settings modal, type the two new
+      // limits into the real inputs, close with Done (applySettings +
+      // persist on the production close handler).
+      window.__locus.store.settingsOpen = true;
+      for (let i = 0; i < 40 && !document.querySelector('#set-max-tool-calls'); i++) {
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      const setVal = (el, v) => {
+        const d = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+        d.set.call(el, String(v));
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+      };
+      setVal(document.querySelector('#set-max-tool-calls'), 8);
+      setVal(document.querySelector('#set-tool-result-max-chars'), 2500);
+      document.querySelector('[data-testid="settings-done"]').click();
+      await new Promise((r) => setTimeout(r, 50));
+      return {
+        panelMaxToolCalls: window.__locus.store.settings.maxToolCalls,
+        panelToolResultMaxChars: window.__locus.store.settings.toolResultMaxChars,
+        sessionMaxToolCalls: window.__locus.session.maxToolCalls,
+        sessionToolResultMaxChars: window.__locus.session.toolResultMaxChars,
+      };
+    })()`).then((r) => {
+      check('J8 the panel fields applied to the store and the LIVE session',
+        r && r.panelMaxToolCalls === 8 && r.panelToolResultMaxChars === 2500
+        && r.sessionMaxToolCalls === 8 && r.sessionToolResultMaxChars === 2500,
+        JSON.stringify(r));
+    });
+
+    const j8Call = (id, input) => ({
+      choices: [{ message: { role: 'assistant', content: null, tool_calls: [{ id, type: 'function', function: { name: 'bash', arguments: JSON.stringify({ input }) } }] }, finish_reason: 'tool_calls' }],
+    });
+    const j8Final = { choices: [{ message: { role: 'assistant', content: 'Joint J8 three commands done' }, finish_reason: 'stop' }] };
+    const j8Setup = 'mkdir -p /tmp/j8/sub && echo alpha > /tmp/j8/f.txt && echo beta >> /tmp/j8/f.txt && echo gamma >> /tmp/j8/f.txt';
+    const j8Heredoc = "cat > /tmp/h.txt <<'EOF'" + String.fromCharCode(10) + 'hello-heredoc-j8' + String.fromCharCode(10) + 'EOF';
+    await evaluate(cdp, `window.__j8CallsBefore = window.__locusWire.calls.length;
+      window.__locusWire.responses.push(${literal(j8Call('j8-call-1', j8Setup))},
+        ${literal(j8Call('j8-call-2', 'ls -R /tmp/j8'))},
+        ${literal(j8Call('j8-call-3', "sed -n '1,2p' /tmp/j8/f.txt"))},
+        ${literal(j8Call('j8-call-4', j8Heredoc))}, ${literal(j8Final)});
+      window.__locus.actions.newTask(); window.__locus.actions.submit('joint J8: shell C5 commands')`);
+    await waitForRuntimeCondition(cdp, `(() => {
+      const c = window.__locus.store.conversations.find(x => x.title === 'joint J8: shell C5 commands');
+      return !!c && (c.status === 'completed' || c.status === 'error' || c.status === 'iteration_limit');
+    })()`, { process: chrome, phase: 'joint-j8', timeoutMs: 60000 });
+    const j8 = await evaluate(cdp, `(async () => {
+      const calls = window.__locusWire.calls;
+      const idx = window.__j8CallsBefore;
+      const msg = (i) => (calls[idx + i] && calls[idx + i].body && calls[idx + i].body.messages) || [];
+      const toolResult = (i, id) => {
+        const m = msg(i).find((x) => x.role === 'tool' && x.tool_call_id === id);
+        return m ? String(m.content) : null;
+      };
+      const read = (p) => window.__locus.vfs.read(p).then(String).catch((e) => 'ERR:' + e.message);
+      const c = window.__locus.store.conversations.find((x) => x.title === 'joint J8: shell C5 commands');
+      return {
+        status: c.status,
+        requests: calls.length - idx,
+        answer: c.items.some((i) => i.kind === 'assistant' && i.content === 'Joint J8 three commands done'),
+        setupResult: toolResult(1, 'j8-call-1'),
+        lsResult: toolResult(1 + 1, 'j8-call-2'),
+        sedResult: toolResult(2 + 1, 'j8-call-3'),
+        heredocResult: toolResult(3 + 1, 'j8-call-4'),
+        h: await read('/tmp/h.txt'),
+        f: await read('/tmp/j8/f.txt'),
+      };
+    })()`);
+    check('J8 the task completed in exactly five requests through the real chain',
+      j8.status === 'completed' && j8.requests === 5 && j8.answer === true,
+      JSON.stringify({ status: j8.status, requests: j8.requests, answer: j8.answer }));
+    check('J8 the setup redirects wrote and appended the three lines',
+      j8.setupResult !== null && String(j8.f).includes('alpha')
+        && String(j8.f).includes('beta') && String(j8.f).includes('gamma'),
+      JSON.stringify({ setup: j8.setupResult, f: j8.f }));
+    check('J8 ls -R listed the tree recursively',
+      j8.lsResult !== null && j8.lsResult.includes('f.txt') && j8.lsResult.includes('sub'),
+      JSON.stringify(j8.lsResult));
+    check('J8 sed -n 1,2p printed exactly the first two lines',
+      j8.sedResult !== null && j8.sedResult.includes('alpha') && j8.sedResult.includes('beta')
+        && !j8.sedResult.includes('gamma'),
+      JSON.stringify(j8.sedResult));
+    check('J8 the heredoc wrote /tmp/h.txt verbatim (read back through the real VFS)',
+      String(j8.h).replace(/[\r\n]+$/, '') === 'hello-heredoc-j8' && j8.heredocResult !== null,
+      JSON.stringify({ h: j8.h, result: j8.heredocResult }));
+
     // ---------- J6: page health ----------
     const errors = await evaluate(cdp, '(window.__e2eErrors || []).slice(0, 5)');
     check('J6 the browser reported no unhandled errors or rejections', errors.length === 0, JSON.stringify(errors));
