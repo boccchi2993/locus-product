@@ -1839,5 +1839,48 @@ function parkProviderWrite(ui, marker) {
   configureModel(ui, null);
 }
 
+// =====================================================================
+// I9 — task-limit settings over the REAL chain (harness PR #15)
+// =====================================================================
+// The product settings path (store.settings.maxToolCalls → applySettings →
+// session.setMaxToolCalls on the REAL harness session) drives the per-task
+// tool-call budget: with the limit set to 8, a task whose scripted model
+// wants a 9th tool call is PAUSED after the 8th instead — the
+// iteration_limit warning names the limit and tells the user to send
+// 继续 to resume in the same conversation, and the 9th provider request
+// never happens.
+{
+  const wire = createWire('joint-i9');
+  wires.set('joint-i9', wire);
+  const ui = await freshStore('joint-i9');
+  configureModel(ui, wire);
+  const inst = await instrument(ui);
+  applyJointSettings(ui);
+  ui.store.settings.maxToolCalls = 8; // the REAL settings path: applied below
+  ui.applySettings();
+  for (let i = 1; i <= 8; i++) {
+    wire.push(wire.openai(null, [wire.toolCall('i9-call-' + i, 'echo i9-' + i + ' > /tmp/joint-i9-' + i + '.txt')]));
+  }
+  wire.push(wire.openai('I9 SHOULD NEVER BE REACHED')); // a 9th response would prove the limit leaked
+  await ui.submit('joint I9: paused at the tool-call limit');
+  const conv9 = findConv(ui, 'joint I9: paused at the tool-call limit');
+  check('I9 the task paused at the configured tool-call limit',
+    conv9 && conv9.status === 'iteration_limit' && ui.store.busy === false,
+    JSON.stringify({ status: conv9 && conv9.status, busy: ui.store.busy }));
+  const warn9 = itemsOf(ui).find((i) => i.kind === 'warning' && i.code === 'iteration_limit');
+  check('I9 the pause warning names the limit and tells the user to send 继续',
+    !!warn9 && warn9.text.includes('8') && warn9.text.includes('继续'),
+    warn9 && warn9.text);
+  check('I9 exactly 8 model requests happened (the 9th never dispatched)',
+    wire.calls.length === 8 && inst.counts.tool === 8,
+    JSON.stringify({ calls: wire.calls.length, ...inst.counts }));
+  const file9 = await ui.vfs.read('/tmp/joint-i9-8.txt').catch(() => null);
+  check('I9 the 8th tool call really executed before the pause',
+    typeof file9 === 'string' && file9.includes('i9-8'),
+    JSON.stringify(String(file9).slice(0, 40)));
+  inst.restore();
+  configureModel(ui, null);
+}
+
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
 process.exit(failed ? 1 : 0);

@@ -41,6 +41,10 @@ const SUITES = [
   // Max output tokens setting (DECISIONS.md D5): defaults, string↔int
   // persistence round trip, session.setMaxTokens wiring and its guard.
   'max-tokens-settings.test.cjs',
+  // Task-limit settings (harness PR #15): maxToolCalls / toolResultMaxChars
+  // defaults, parse+fallback, persistence round trip, creation deps and
+  // the live-session setter wiring.
+  'task-limit-settings.test.cjs',
   // Context-management wiring (P-2, DECISIONS.md D9): the three optional
   // harness capabilities and their degrade rules, the contextWindow
   // setting round trip + session wiring, the toolOutputs environment

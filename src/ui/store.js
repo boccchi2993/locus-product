@@ -811,6 +811,12 @@ const DEFAULTS = {
   dialect: 'auto',
   maxTokens: 32768,
   contextWindow: null,
+  // Task-limit settings (harness AgentSession deps.maxToolCalls /
+  // deps.toolResultMaxChars, PR #15): per-task tool-call budget and the
+  // per-result truncation cap, both USER configuration parsed with the
+  // same invalid→default rule as maxTokens.
+  maxToolCalls: 128,
+  toolResultMaxChars: 40000,
   // D12: remembering on this device is the default; the checkbox starts
   // checked and only an explicit user choice turns it off (persisted as
   // the `rememberApiKey` setting, '0').
@@ -832,6 +838,20 @@ function parseContextWindow(v) {
   return Number.isInteger(n) && n > 0 ? n : null;
 }
 
+// Per-task tool-call budget (harness PR #15 allows 8–1000). Empty /
+// invalid / out-of-range → default, the same fallback rule as maxTokens.
+function parseMaxToolCalls(v) {
+  const n = typeof v === 'number' ? v : Number.parseInt(String(v || ''), 10);
+  return Number.isInteger(n) && n >= 8 && n <= 1000 ? n : DEFAULTS.maxToolCalls;
+}
+
+// Per-result tool-output truncation cap in characters (harness PR #15
+// allows 2000–400000). Empty / invalid / out-of-range → default.
+function parseToolResultMaxChars(v) {
+  const n = typeof v === 'number' ? v : Number.parseInt(String(v || ''), 10);
+  return Number.isInteger(n) && n >= 2000 && n <= 400000 ? n : DEFAULTS.toolResultMaxChars;
+}
+
 function sessionGet(key) {
   try { return sessionStorage.getItem(key); } catch (e) { return null; }
 }
@@ -848,11 +868,13 @@ function loadSettings() {
   let cfg = null;
   try { cfg = JSON.parse(sessionGet(SESSION_CONFIG_KEY) || 'null'); } catch (e) {}
   if (!cfg) return s;
-  for (const k of ['apiKey', 'apiBase', 'model', 'proxy', 'dialect', 'maxTokens', 'contextWindow']) {
+  for (const k of ['apiKey', 'apiBase', 'model', 'proxy', 'dialect', 'maxTokens', 'contextWindow', 'maxToolCalls', 'toolResultMaxChars']) {
     if (cfg[k]) s[k] = cfg[k];
   }
   s.maxTokens = parseMaxTokens(s.maxTokens);
   s.contextWindow = parseContextWindow(s.contextWindow);
+  s.maxToolCalls = parseMaxToolCalls(s.maxToolCalls);
+  s.toolResultMaxChars = parseToolResultMaxChars(s.toolResultMaxChars);
   s.remember = true;
   return s;
 }
@@ -1302,6 +1324,11 @@ export const session = (() => {
     : createAgentSession;
   return createSession({
     modelClient: wiredModelClient,
+    // Task-limit settings reach the harness AgentSession as creation deps
+    // (PR #15) — store.settings is parsed by loadSettings() above, and
+    // applySettings() keeps the live session in sync on later changes.
+    maxToolCalls: store.settings.maxToolCalls,
+    toolResultMaxChars: store.settings.toolResultMaxChars,
   // M2b: the session consumes the PRODUCT ToolPort (definitions snapshot
   // + execution); the description port adapts the runtime's public
   // describeCommands(); the Locus behavior notes come from product-prompt.
@@ -1623,6 +1650,19 @@ export function applySettings() {
   store.settings.contextWindow = nextContextWindow;
   if (session && typeof session.setContextWindow === 'function' && harnessDeclaresContextWindow()) {
     session.setContextWindow(nextContextWindow);
+  }
+  // Task-limit settings take effect on the live session the same way
+  // maxTokens does (guarded: injected test sessions may lack the methods;
+  // the harness clamps again and records any deviation once).
+  const nextMaxToolCalls = parseMaxToolCalls(store.settings.maxToolCalls);
+  store.settings.maxToolCalls = nextMaxToolCalls;
+  if (session && typeof session.setMaxToolCalls === 'function') {
+    session.setMaxToolCalls(nextMaxToolCalls);
+  }
+  const nextToolResultMaxChars = parseToolResultMaxChars(store.settings.toolResultMaxChars);
+  store.settings.toolResultMaxChars = nextToolResultMaxChars;
+  if (session && typeof session.setToolResultMaxChars === 'function') {
+    session.setToolResultMaxChars(nextToolResultMaxChars);
   }
   const nextModelKey = currentModelKey();
   if (nextModelKey !== previousModelKey && session && typeof session.resetTokenCalibration === 'function') {
@@ -2848,11 +2888,13 @@ async function bootPersistence() {
   await PersistenceServiceInstance.ready;
   try {
     const settings = await PersistenceServiceInstance.loadSettings();
-    for (const key of ['apiBase', 'model', 'proxy', 'dialect', 'maxTokens', 'contextWindow', 'rememberApiKey']) {
+    for (const key of ['apiBase', 'model', 'proxy', 'dialect', 'maxTokens', 'contextWindow', 'maxToolCalls', 'toolResultMaxChars', 'rememberApiKey']) {
       if (settings[key]) store.settings[key] = settings[key];
     }
     store.settings.maxTokens = parseMaxTokens(store.settings.maxTokens);
     store.settings.contextWindow = parseContextWindow(store.settings.contextWindow);
+    store.settings.maxToolCalls = parseMaxToolCalls(store.settings.maxToolCalls);
+    store.settings.toolResultMaxChars = parseToolResultMaxChars(store.settings.toolResultMaxChars);
     applySettings();
     // Settings identify the destination first.  Only then may a remembered
     // credential for that exact provider/adapter/dialect/path be hydrated.

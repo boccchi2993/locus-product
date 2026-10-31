@@ -35,6 +35,16 @@
             <div class="hint">Upper bound for one model reply. Mainstream models support 128K+; lower it if the provider rejects the request. Locus never guesses it from the model name.</div>
           </div>
           <div class="field">
+            <label for="set-max-tool-calls">Tool call limit per task</label>
+            <input id="set-max-tool-calls" data-testid="set-max-tool-calls" v-model.number="store.settings.maxToolCalls" type="number" min="8" max="1000" step="1" inputmode="numeric">
+            <div class="hint">The task pauses when the limit is reached; send 继续 in the same conversation to resume. Raising it lets a single task consume more tokens.</div>
+          </div>
+          <div class="field">
+            <label for="set-tool-result-max-chars">Tool result limit (characters)</label>
+            <input id="set-tool-result-max-chars" data-testid="set-tool-result-max-chars" v-model.number="store.settings.toolResultMaxChars" type="number" min="2000" max="400000" step="1" inputmode="numeric">
+            <div class="hint">Tool output longer than this is truncated; the full text is saved to a history file. With a context window set, the effective limit is at most about 20% of that window.</div>
+          </div>
+          <div class="field">
             <label for="set-context-window">Context window (tokens) <span class="hint-inline">optional</span></label>
             <input id="set-context-window" v-model.number="store.settings.contextWindow" type="number" min="1" step="1" inputmode="numeric" placeholder="unknown">
             <div class="hint">Optional: the model's total context size. When set, Locus keeps each request within it, calibrated from the token counts the provider reports. Leave empty if unknown; Locus never guesses it from the model name.</div>
