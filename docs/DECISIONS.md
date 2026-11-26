@@ -46,15 +46,21 @@
 
 ## D4
 
-**决定**：MCP 通过 shell 命令 `mcp` 暴露给模型（`mcp servers` / `mcp tools <server>` / `mcp describe <server> <tool>` / `mcp call <server> <tool> <json|@file>`），不作为 provider 原生工具。模型可见的工具列表固定为 `bash`、`cloud_bash`。结构化处理放在客户端：参数在发送前按工具的 `inputSchema` 校验；审批按“服务器 + 工具名”判定，走与有副作用 HTTP 请求相同的审批流程；凭据与会话由客户端管理（D2、D3）。
+**决定**：MCP 通过 shell 命令 `mcp` 暴露给模型（`mcp servers` / `mcp tools <server>` / `mcp describe <server> <tool>` / `mcp call <server> <tool> <json|@file>`），不作为 provider 原生工具。模型可见的工具列表固定为 `bash`、`cloud_bash`。结构化处理放在客户端：参数在发送前按工具的 `inputSchema` 校验；凭据与会话由客户端管理（D2、D3）。工具审批见下面的 2026-11-25 修订。
 
-**理由**：固定的工具列表让提示缓存稳定，也不需要按任务边界冻结和排序工具列表；结构化要求由客户端满足，不依赖“原生工具”这一形式；工具定义按需查询，不每轮占用上下文。
+**2026-11-25 修订（所有者）**。规格见 [C3-MCP-STREAMABLE-HTTP.md](C3-MCP-STREAMABLE-HTTP.md)：
 
-**影响范围**：runtime（`mcp` 命令与客户端）、harness（审批编排）、product（服务器配置与凭据 UI）。
+1. 首版客户端支持远程 Streamable HTTP 与 bearer 鉴权，处理 POST 返回的 JSON 和 SSE，实现表单 elicitation；sampling 一律拒绝；请求已发出而结果未知时不自动重发 `tools/call`。OAuth 排在其后。
+2. 连接是用户的决定：首次接入含 MCP 的能力包时弹连接确认框，由用户自己连接；启用能力不连接服务器。凭据删除、丢失或完整性自检失败时提示恢复连接；暂时网络故障保留凭据绑定；凭据只由宿主注入到用户确认过的端点。
+3. 工具审批：首版在参数校验之后、发送 `tools/call` 之前只保留一个可等待、可取消的接入点，默认继续。按“服务器 + 工具名”的审批（`mcp:<server>:<tool>`）与高危险工具的二次确认将来接入这个接入点；审批弹窗、策略、授权记录和危险分类都是后续工作。
 
-**修订记录**：2026-10-18 所有者改写。原决定为“MCP 工具以 provider 原生工具形式暴露，工具列表随 TaskEnvironment 冻结”。
+**理由**：固定的工具列表让提示缓存稳定，也不需要按任务边界冻结和排序工具列表；结构化要求由客户端满足，不依赖“原生工具”这一形式；工具定义按需查询，不每轮占用上下文。2026-11-25 的三条修订是范围决定，所有者的任务说明没有附理由，这里不代为补写。首版默认继续有一个已知后果：连接确认是用户对 `mcp call` 的唯一同意点（规格 §7.4）。
 
-**被取代的旧表述**：CAPABILITY-BOUNDARIES §6.3 中‘MCP 应作为 harness 一等能力、可具备 shell/CLI 兼容前端’的表述，就暴露方式而言被本条裁决：走 shell 命令 `mcp`。
+**影响范围**：runtime（`mcp` 命令与客户端）、harness（MCP 描述符、任务快照、elicitation 所用的审批种类；工具审批的编排是后续工作）、product（连接与凭据 UI、传输选路）、locus-example-capabilities（Python SDK 同步 `mcp.json` 的字段）。
+
+**修订记录**：2026-10-18 所有者改写。原决定为“MCP 工具以 provider 原生工具形式暴露，工具列表随 TaskEnvironment 冻结”。2026-11-25 所有者修订：首版范围定为 Streamable HTTP + bearer 与表单 elicitation；连接改为用户显式确认；工具审批改为首版默认继续的接入点。
+
+**被取代的旧表述**：CAPABILITY-BOUNDARIES §6.3 中‘MCP 应作为 harness 一等能力、可具备 shell/CLI 兼容前端’的表述，就暴露方式而言被本条裁决：走 shell 命令 `mcp`。本条 2026-10-18 文本中的“审批按‘服务器 + 工具名’判定，走与有副作用 HTTP 请求相同的审批流程”，以及 C3-CREDENTIALS-MCP.md §7 中“默认每次调用都审批”的表述，被 2026-11-25 修订取代。
 
 ## D5
 
