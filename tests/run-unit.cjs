@@ -29,6 +29,10 @@ const SUITES = [
   // C3: the credential service (bindings, remembered values, restore /
   // afterReplace / uninstall cleanup) and the runtime credential port.
   'credentials.test.mjs',
+  // C3 phase-2 §5: the MCP connection service (records, restore,
+  // afterReplace / afterRelock / uninstall / reset, in-memory reasons,
+  // the legacy no-endpoint unavailable rule).
+  'mcp-connections.test.mjs',
   // C3: the FULL product credential chain — tool port → tools.js → real
   // runtime session → curl → the credential port (relay stub).
   'credential-wiring.test.mjs',

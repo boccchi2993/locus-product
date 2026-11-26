@@ -820,6 +820,203 @@ async function patchManifest(ws, rel, transform) {
     }
   }
 
+  // ===================== C3 phase-2 §3: MCP endpoint fields (Appendix A M1–M15) =====================
+  // The spec's shared package-level samples over the minimal fixture.
+  // M1 is §3.7's example package; the others modify it. The baseline
+  // serializeLock() bytes of the no-MCP minimal fixture (M3) were captured
+  // from product e5a2942 and pinned below — legacy locks must stay
+  // byte-identical (§3.5).
+  {
+    const CRED = {
+      name: 'ACME_API_TOKEN', label: 'Acme API token',
+      description: 'Used to reach the Acme MCP server.',
+      origin: 'https://mcp.acme.example', pathPrefix: '/',
+      header: 'Authorization', scheme: 'Bearer',
+    };
+    const MCP_JSON_BASE = {
+      schemaVersion: 1,
+      mcp: {
+        id: 'acme-docs',
+        displayName: 'Acme Documents',
+        description: 'Search and read documents stored in Acme.',
+        url: 'https://mcp.acme.example/mcp',
+        auth: 'bearer',
+        credential: 'ACME_API_TOKEN',
+      },
+    };
+    // An M-variant project: the minimal fixture + mcp/acme-docs/mcp.json
+    // (+ optionally an extra mcp dir). capabilityJson overrides the whole
+    // capability.json `capability` object; mcpJson overrides mcp.json's
+    // `mcp` object; mcpDirName places the descriptor under another dir.
+    async function mcpProject(opts = {}) {
+      const ws = await fixtureWorkspace();
+      const capability = Object.assign({
+        id: 'package-test-capability',
+        version: '1',
+        displayName: 'Package Test Capability',
+        description: 'TEST ONLY fixture for the capability package core.',
+        plugins: ['locus-test-plugin'],
+        skills: ['test-workflow'],
+        mcps: ['acme-docs'],
+        credentials: [Object.assign({}, CRED)],
+      }, opts.capabilityJson || {});
+      await patchManifest(ws, 'capability.json', (parsed) => {
+        parsed.capability = capability;
+      });
+      const dirName = opts.mcpDirName || 'acme-docs';
+      const mcpObject = Object.assign({}, MCP_JSON_BASE.mcp, opts.mcpJson || {});
+      await ws.write('mcp/' + dirName + '/mcp.json', JSON.stringify({
+        schemaVersion: 1,
+        mcp: mcpObject,
+      }, null, 2) + '\n');
+      if (opts.extraMcp) {
+        await ws.write('mcp/' + opts.extraMcp.id + '/mcp.json', JSON.stringify({
+          schemaVersion: 1,
+          mcp: opts.extraMcp,
+        }, null, 2) + '\n');
+      }
+      return ws;
+    }
+
+    // M1: the spec's §3.7 example passes and the lock mirrors it.
+    {
+      const ws = await mcpProject();
+      const v = await LCP.validateProject({ workspace: ws, root: '' });
+      check('M1 the spec example package validates with empty diagnostics',
+        v.ok === true && v.diagnostics.length === 0, jsonDiag(v));
+      const built = await LCP.buildProject({ workspace: ws, root: '' });
+      const lockMcp = built.ok ? JSON.parse(built.bundle.serializeLock()).mcps[0] : null;
+      check('M1 lock.mcps[0] carries kind + the three endpoint fields',
+        !!lockMcp && lockMcp.kind === 'mcp'
+        && lockMcp.url === 'https://mcp.acme.example/mcp'
+        && lockMcp.auth === 'bearer'
+        && lockMcp.credential === 'ACME_API_TOKEN',
+        JSON.stringify(lockMcp));
+      const summary = built.ok ? LCP.inspectBundle(built.bundle) : null;
+      check('M1 inspectBundle.mcps[0] mirrors the lock descriptor (no kind)',
+        !!summary && JSON.stringify(summary.mcps[0]) === JSON.stringify({
+          id: 'acme-docs',
+          displayName: 'Acme Documents',
+          description: 'Search and read documents stored in Acme.',
+          url: 'https://mcp.acme.example/mcp',
+          auth: 'bearer',
+          credential: 'ACME_API_TOKEN',
+        }),
+        JSON.stringify(summary && summary.mcps[0]));
+    }
+
+    // M2: the legacy descriptor (no endpoint fields) keeps the baseline
+    // lock shape — exactly the four keys, nothing written as undefined.
+    {
+      const ws = await mcpProject({ mcpJson: {
+        url: undefined, auth: undefined, credential: undefined,
+      } });
+      const v = await LCP.validateProject({ workspace: ws, root: '' });
+      check('M2 the legacy mcp.json still validates', v.ok === true && v.diagnostics.length === 0, jsonDiag(v));
+      const built = await LCP.buildProject({ workspace: ws, root: '' });
+      const lock = built.ok ? JSON.parse(built.bundle.serializeLock()) : null;
+      const lockMcp = lock && lock.mcps[0];
+      check('M2 lock.mcps[0] has exactly the four baseline keys',
+        !!lockMcp && JSON.stringify(Object.keys(lockMcp).sort()) === JSON.stringify(
+          ['description', 'displayName', 'id', 'kind'])
+        && !('url' in lockMcp) && !('auth' in lockMcp) && !('credential' in lockMcp),
+        JSON.stringify(lockMcp));
+      const summary = built.ok ? LCP.inspectBundle(built.bundle) : null;
+      check('M2 inspectBundle.mcps[0] keeps the legacy summary shape',
+        !!summary && !('url' in summary.mcps[0]) && !('auth' in summary.mcps[0])
+        && !('credential' in summary.mcps[0]),
+        JSON.stringify(summary && summary.mcps[0]));
+    }
+
+    // M3: no MCP at all — the minimal fixture IS the M3 sample (mcps: [],
+    // no mcp/ dir, no credentials). serializeLock() must be byte-identical
+    // to the baseline (e5a2942) build of the same fixture.
+    {
+      const ws = await fixtureWorkspace();
+      const v = await LCP.validateProject({ workspace: ws, root: '' });
+      check('M3 the MCP-free package validates', v.ok === true && v.diagnostics.length === 0, jsonDiag(v));
+      const built = await LCP.buildProject({ workspace: ws, root: '' });
+      const baselineLock = read('tests/fixtures/capability-package/minimal-baseline-lock.txt');
+      check('M3 serializeLock() is byte-identical to the e5a2942 baseline',
+        built.ok === true && built.bundle.serializeLock() === baselineLock,
+        built.ok ? 'lock bytes differ' : jsonDiag(built));
+    }
+
+    // M4–M13: one rejection per mutated field.
+    const mRejections = [
+      ['M4 auth "oauth"', { mcpJson: { auth: 'oauth' } },
+        'package_descriptor_invalid', 'bearer'],
+      ['M5 extra token field', { mcpJson: { token: 'sk-hunter2' } },
+        'package_field_unknown', 'token'],
+      ['M6 url without auth/credential', { mcpJson: { auth: undefined, credential: undefined } },
+        'package_descriptor_invalid', 'declared together'],
+      ['M7 undeclared credential', { mcpJson: { credential: 'OTHER_TOKEN' } },
+        'package_ref_missing', 'not declared by capability'],
+      ['M8 x-api-key credential', { capabilityJson: null, credPatch: { header: 'X-Api-Key' } },
+        'package_descriptor_invalid', 'bearer binding'],
+      ['M9 pathPrefix /v1/ not covering /mcp', { credPatch: { pathPrefix: '/v1/' } },
+        'package_descriptor_invalid', 'does not cover'],
+      ['M10 non-canonical url', { mcpJson: { url: 'https://mcp.acme.example' } },
+        'package_descriptor_invalid', 'canonical'],
+      ['M11 url with a query string', { mcpJson: { url: 'https://mcp.acme.example/mcp?api_key=abc' } },
+        'package_descriptor_invalid', 'query'],
+      ['M12 http url', { mcpJson: { url: 'http://mcp.acme.example/mcp' } },
+        'package_descriptor_invalid', 'https URL'],
+      ['M13 .internal host', { mcpJson: { url: 'https://mcp.internal/mcp' } },
+        'package_descriptor_invalid', 'public DNS'],
+    ];
+    for (let i = 0; i < mRejections.length; i++) {
+      const [label, opts, code, msgPart] = mRejections[i];
+      const projectOpts = Object.assign({}, opts);
+      if (opts.credPatch) {
+        projectOpts.capabilityJson = {
+          id: 'package-test-capability', version: '1',
+          displayName: 'Package Test Capability',
+          description: 'TEST ONLY fixture for the capability package core.',
+          plugins: ['locus-test-plugin'], skills: ['test-workflow'],
+          mcps: ['acme-docs'],
+          credentials: [Object.assign({}, CRED, opts.credPatch)],
+        };
+      }
+      const ws = await mcpProject(projectOpts);
+      const v = await LCP.validateProject({ workspace: ws, root: '' });
+      const d = diagOf(v, code, 'mcp/acme-docs/mcp.json');
+      check(label + ' rejected: ' + code,
+        v.ok === false && !!d && (!msgPart || d.message.includes(msgPart)),
+        jsonDiag(v));
+    }
+
+    // M14: an unreferenced mcp directory (existing rule).
+    {
+      const ws = await mcpProject({ extraMcp: {
+        id: 'extra-svc', displayName: 'Extra Service', description: 'unreferenced',
+      } });
+      const v = await LCP.validateProject({ workspace: ws, root: '' });
+      check('M14 an unreferenced mcp directory is rejected (package_component_unreferenced)',
+        v.ok === false && !!diagOf(v, 'package_component_unreferenced', 'mcp/extra-svc'),
+        jsonDiag(v));
+    }
+
+    // M15: directory name ≠ descriptor id (existing rule).
+    {
+      const ws = await mcpProject({ mcpDirName: 'wrong-dir' });
+      const v = await LCP.validateProject({ workspace: ws, root: '' });
+      check('M15 a mcp dir name mismatching the descriptor id is rejected (package_id_mismatch)',
+        v.ok === false && !!diagOf(v, 'package_id_mismatch', 'mcp/wrong-dir/mcp.json'),
+        jsonDiag(v));
+    }
+
+    // P46 stays honest: a token field is STILL package_field_unknown even
+    // with the endpoint whitelist widened.
+    {
+      const ws = await mcpProject({ mcpJson: { token: 'sk-hunter2' } });
+      const v = await LCP.validateProject({ workspace: ws, root: '' });
+      check('M-P46b the widened whitelist still rejects package tokens (P46 invariant)',
+        v.ok === false && !!diagOf(v, 'package_field_unknown', 'mcp/acme-docs/mcp.json'),
+        jsonDiag(v));
+    }
+  }
+
   console.log('---');
   console.log(failed ? failed + ' check(s) FAILED' : 'all ' + passed + ' checks passed');
   process.exit(failed ? 1 : 0);

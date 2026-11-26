@@ -76,13 +76,17 @@ const PUBLIC_CORE_SPECS = {
 // a violation no matter which file carries it.
 const CORE_PREFIXES = ['locus-runtime/', 'locus-harness/'];
 // src/ files allowed to sit OUTSIDE the production closure, each with its
-// pinned justification (OWN5). Forward-slash repo-relative form. Empty
-// since C1-P2: the last two pending-wiring modules
-// (capability-package.js, locus-archive.js) entered the closure through
-// the capability-package install service. The constant and the
-// no-unowned check stay — a future unwired module needs an explicit,
-// justified entry here again.
-const CLOSURE_EXEMPT = new Set([]);
+// pinned justification (OWN5). Forward-slash repo-relative form. One
+// entry since C3 phase-2 step 2 (§10.5): the MCP connection service is
+// complete (records, restore, replace/relock/uninstall/reset) and
+// capability-packages.js already consumes the service INSTANCE (the `mcp`
+// parameter — its callbacks are exercised by
+// tests/capability-install.test.mjs over the REAL module), but the
+// store.js wiring that constructs it belongs to the integration step and
+// has not landed yet. It leaves this list when the store builds it.
+const CLOSURE_EXEMPT = new Set([
+  'src/mcp-connections.js',
+]);
 const RESIDUAL_TABLES = ['__LOCUS_RUNTIME_CORE__', '__LOCUS_HARNESS_CORE__', '__LOCUS_HARNESS_REPLAY_VALIDATION__'];
 
 function scriptBlocks(fileText, isVue) {
