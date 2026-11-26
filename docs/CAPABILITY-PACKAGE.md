@@ -110,6 +110,8 @@ over the real fixture project `tests/fixtures/capability-package/minimal`.
   `validateMcpDescriptor`. Credential-ish fields (token, auth, keys,
   ...) are rejected by the whitelist itself - no secret blacklist.
 
+> 2026-11-25 所有者决定，规格草案见 [C3-MCP-STREAMABLE-HTTP.md](C3-MCP-STREAMABLE-HTTP.md) §3（尚未实现）：`mcp` 对象将新增三个可选字段 `url`、`auth`、`credential`，同进同出。`auth` 是鉴权方式的名字（首版只有 `bearer`），`credential` 是凭据的名字，都不是密钥；令牌、请求头之类的字段仍然被白名单拒绝。本节的字段清单在该规格实现时更新。
+
 ### 2b.2 Package v1 policy (narrower than the runtime surface)
 
 - plugin `runtime` is `python` only (javascript/wasm package delivery
@@ -317,6 +319,8 @@ MCP package metadata may name a requirement:
 ```
 
 It must not contain access tokens, cookies, OAuth refresh tokens, or an instruction to auto-connect.
+
+> 2026-11-25：字段表见 [C3-MCP-STREAMABLE-HTTP.md](C3-MCP-STREAMABLE-HTTP.md) §3.2（规格草案，尚未实现）。除了上面的三个字段，新增 `url`、`auth: "bearer"` 与 `credential`（凭据的名字，不是值）；三者在旧包里可以都没有。本节的禁令不变：包里不放令牌、cookie 或刷新令牌。
 
 ## 5. Build output and lock manifest
 

@@ -8,7 +8,7 @@
 一个 Capability 可以声明“我需要一个凭据，它只能用于某个 API 地址”。用户在设置里填一次 key（可选记住在本设备），之后模型用 shell 里的 `curl` 直接调用这个 API。在命令里，模型只写凭据的**变量名**，从不写 key 本身。key 只在 runtime 发送请求的最后一步、且目标地址和绑定一致时才被代入。key 永远不进入模型可达的范围（D2）。
 
 第一阶段（本文主体）：凭据绑定、`curl` 中的凭据变量、`sleep`、“始终允许”的持久审批、首次安装自动启用，用参考能力包 `deepseek-web`（DeepSeek Search / Fetch）验收。
-第二阶段（§7，只给轮廓，另写设计）：`mcp` shell 命令和背后的 MCP 客户端，先 bearer，后 OAuth。
+第二阶段（§7，只给轮廓，另写设计）：`mcp` shell 命令和背后的 MCP 客户端，先 bearer，后 OAuth。设计文档是 [C3-MCP-STREAMABLE-HTTP.md](C3-MCP-STREAMABLE-HTTP.md)（2026-11-26 规格草案）。
 
 不在本文范围：Responses 接口里由服务商托管的工具（例如 DeepSeek 的 `web_search` 工具类型）。这属于模型协议，不属于能力。
 
@@ -170,6 +170,14 @@ curl -X POST https://api.deepseek.com/v1/tools/search \
 - 粒度说明（写进文档）：网络类的 `policyKey` 按 origin 区分（`network-write:<origin>`）。对某个 origin 选“始终允许”，会覆盖这个 origin 下所有有副作用的请求。第二阶段 MCP 的 `policyKey` 按“服务器 + 工具”区分。
 
 ## 7. 第二阶段：`mcp` 命令（轮廓）
+
+> 2026-11-26：本节是 2026-10-18 的轮廓，已由 [C3-MCP-STREAMABLE-HTTP.md](C3-MCP-STREAMABLE-HTTP.md) 细化为规格，以那份文档为准。与下文不同的三处：
+>
+> - **审批**：首版不再“默认每次调用都审批”，而是在参数校验之后、发送 `tools/call` 之前留一个默认继续的接入点（[DECISIONS.md](DECISIONS.md) D4 的 2026-11-25 修订）。`policyKey = mcp:<server>:<tool>` 的格式保留给将来的审批。
+> - **凭据引用**：`mcp.json` 通过 `credential` 字段按名字引用 §3 的凭据。该凭据必须是 Bearer 形式的 `Authorization` 绑定，并且它的 `origin` 加 `pathPrefix` 覆盖服务器地址；不再要求 `pathPrefix` 等于端点路径。
+> - **elicitation**：只实现表单模式；URL 模式的请求用 `-32602` 拒绝。
+>
+> 下文保留原样，作为当时的轮廓。
 
 - 命令：`mcp servers`、`mcp tools <server>`（名称和一句话说明）、`mcp describe <server> <tool>`（完整 inputSchema 和注解）、`mcp call <server> <tool> '<json>'`、`mcp call <server> <tool> @args.json`。
 - 客户端在 runtime（D3）：负责 Streamable HTTP、会话 id、协议版本头、SSE。bearer 凭据复用 §3 的绑定（origin 即服务器地址，pathPrefix 即端点路径），OAuth 在其后。

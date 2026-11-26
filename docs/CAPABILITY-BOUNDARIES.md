@@ -241,6 +241,8 @@ MCP should be a first-class harness capability. It may have a shell/CLI compatib
 
 > [DECISIONS.md D4](DECISIONS.md#d4)（2026-10-18 改写）裁决了本节的暴露方式：MCP 通过 shell 命令 `mcp` 暴露，模型可见的工具固定为 `bash`、`cloud_bash`；结构化处理（参数校验、按服务器 + 工具审批、凭据与会话）放在客户端。详见 [C3-CREDENTIALS-MCP.md](C3-CREDENTIALS-MCP.md) §7。
 
+> [DECISIONS.md D4](DECISIONS.md#d4)（2026-11-25 修订）与 [C3-MCP-STREAMABLE-HTTP.md](C3-MCP-STREAMABLE-HTTP.md)（规格草案，尚未实现）：上一条里的“按服务器 + 工具审批”改为首版只留一个默认继续的接入点，审批本身是后续工作。连接由用户显式确认；服务器在包的 `mcp/<id>/mcp.json` 里声明端点与凭据名。§11.4 的“v1 没有连接器、传输、OAuth 或凭据存储”在实现落地前仍然成立。
+
 ## 7. RAG boundary
 
 RAG is not a runtime primitive.
