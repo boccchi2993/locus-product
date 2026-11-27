@@ -143,6 +143,46 @@
             </div>
           </div>
 
+          <!-- C3 phase-2 §5.4: the MCP server Connect dialog (the §5.2
+               copy, minus the capability intro — the server row above
+               already names the capability). The endpoint is fixed read
+               only text: reconnecting NEVER re-confirms it. The bolded
+               sentence is rendered as its own emphasized line. The typed
+               token lives in one ref cleared on close. -->
+          <div v-if="mcpDialog" class="capability-import-dialog" :data-testid="'mcp-connect-dialog-' + mcpDialog.serverId">
+            <div class="capability-import-title">Connect external server</div>
+            <div class="hint">{{ mcpDialog.displayName }} · <span class="mono">{{ mcpDialog.url }}</span></div>
+            <div class="hint">
+              <span class="mono">{{ mcpDialog.serverId }}</span> will send requests only to
+              <span class="mono">{{ mcpDialog.url }}</span>, authenticated with credential
+              <span class="mono">${{ mcpDialog.credential }}</span> as
+              <span class="mono">Authorization: Bearer …</span>.
+            </div>
+            <div class="hint"><strong>After you connect, the model can call this server's tools in a task
+              without asking you each time.</strong></div>
+            <div class="field">
+              <label :for="'mcp-token-input-' + mcpDialog.serverId">Token</label>
+              <input
+                :id="'mcp-token-input-' + mcpDialog.serverId"
+                v-model="mcpDialogToken"
+                type="password"
+                :data-testid="'mcp-connect-input-' + mcpDialog.serverId"
+                spellcheck="false" autocomplete="off">
+            </div>
+            <label class="check-row">
+              <input v-model="mcpDialogRemember" type="checkbox" :data-testid="'mcp-connect-remember-' + mcpDialog.serverId">
+              Remember on this device
+            </label>
+            <div class="hint">Saved in this browser on this device. Uncheck on a shared computer.</div>
+            <div v-if="mcpDialog.error" class="hint storage-notice" :data-testid="'mcp-connect-error-' + mcpDialog.serverId">
+              {{ mcpDialog.error }}
+            </div>
+            <div class="capability-row capability-import-actions">
+              <button class="rail-btn" type="button" :data-testid="'mcp-connect-cancel-' + mcpDialog.serverId" @click="closeMcpDialog">Cancel</button>
+              <button class="rail-btn" type="button" :disabled="mcpDialog.busy" :data-testid="'mcp-connect-confirm-' + mcpDialog.serverId" @click="confirmMcpConnect">Connect</button>
+            </div>
+          </div>
+
           <!-- Unsupported core: everything below is hidden -->
           <div v-if="!capabilityPackagesSupported()" class="hint" data-testid="capability-packages-unsupported">
             This Locus core version does not support installing capability packages.
@@ -281,10 +321,46 @@
             </div>
             <div v-if="c.enabled && c.error" class="hint">{{ c.error }}</div>
             <template v-if="c.enabled">
-              <div v-for="m in c.mcps" :key="m.id" class="hint" :data-testid="'capability-mcp-' + c.id">
-                External connection: {{ m.displayName }} — {{ m.state === 'connected' ? 'Connected' : 'Connection required' }}
-                <button v-if="m.state !== 'connected'" class="rail-btn" type="button" :disabled="store.busy || store.cancelling"
-                  :data-testid="'capability-connect-' + c.id" @click="connectMcp(c, m)">Connect</button>
+              <!-- C3 phase-2 §5: this capability's MCP servers. Three
+                   states, each with its own copy (§5.3): connected (with
+                   the §5.5 unreachable note when the in-memory reason map
+                   says the last use failed transiently),
+                   needs-connection (the reconnect entry — the endpoint is
+                   NOT re-confirmed, only the token is asked for again,
+                   §5.4), unavailable (NO connect button — reconnecting
+                   cannot fix it). When the harness does not declare
+                   capabilityMcp the whole feature is off and the servers
+                   render as unavailable. All server-declared strings are
+                   text interpolation only. -->
+              <div v-for="m in mcpViews[c.id] || []" :key="m.id" class="hint" :data-testid="'capability-mcp-' + c.id + '-' + m.id">
+                <div class="capability-row cred-row">
+                  <span class="cred-label">{{ m.displayName }}</span>
+                  <span class="mono">{{ m.url || 'no endpoint' }}</span>
+                  <span class="capability-state" :data-state="m.state"
+                    :data-testid="'capability-mcp-state-' + m.id">{{ m.stateLabel }}</span>
+                  <button v-if="m.connectable" class="rail-btn" type="button"
+                    :disabled="store.busy || store.cancelling"
+                    :data-testid="'capability-mcp-connect-' + m.id"
+                    @click="openMcpDialog(c, m)">Connect</button>
+                </div>
+                <div v-if="m.state === 'connected' && m.unreachable" class="hint"
+                  :data-testid="'capability-mcp-unreachable-' + m.id">
+                  Unreachable — will retry on next use.
+                </div>
+                <div v-if="m.state === 'needs-connection'" class="hint"
+                  :data-testid="'capability-mcp-reconnect-' + m.id">
+                  Connection required — reconnect. The endpoint stays as you confirmed it; only the
+                  credential is asked for again.
+                </div>
+                <div v-if="m.state === 'unavailable'" class="hint"
+                  :data-testid="'capability-mcp-unavailable-' + m.id">
+                  {{ m.unavailableReason }}
+                </div>
+              </div>
+              <div v-if="store.mcpRelockNoticeFor === c.id" class="hint storage-notice"
+                data-testid="capability-mcp-relock-notice">
+                This package's content changed after you confirmed it. Its external connections need to be
+                re-confirmed — your last connection is kept below each server.
               </div>
             </template>
             <!-- C3 §3.2: this capability's credentials, in EVERY state
@@ -389,7 +465,8 @@
 <script setup>
 import {
   store, applySettings, persistSettingsIfNeeded, testConnection,
-  capabilityList, enableCapability, disableCapability, setMcpConnectionState,
+  capabilityList, enableCapability, disableCapability,
+  mcpConnectionsSupported, connectMcpServer, mcpFailureReason,
   keepDataOnThisDevice, clearConversations as clearConversationData,
   clearHome as clearHomeData, clearPlugins as clearPluginData,
   forgetApiKeys as forgetStoredApiKeys, resetAllData as resetLocalData,
@@ -485,12 +562,96 @@ async function removeCapability(c) {
   }
 }
 
-function connectMcp(c, m) {
+// ---------- C3 phase-2 §5: the MCP server rows and the real connect dialog ----------
+// View models for one capability's MCP servers. State labels per §5.3;
+// the §5.5 unreachable note renders from the in-memory reason map (never
+// a harness state); `unavailable` gets NO connect button. When the
+// harness does not declare capabilityMcp the whole feature is off and
+// every declared server renders unavailable.
+const mcpViews = computed(() => {
+  const supported = mcpConnectionsSupported();
+  const map = {};
+  for (const c of store.capabilities) {
+    map[c.id] = (c.mcps || []).map((m) => {
+      const reason = supported ? mcpFailureReason(m.id) : null;
+      let stateLabel;
+      let unavailableReason = null;
+      if (!supported) {
+        stateLabel = 'Unavailable';
+        unavailableReason = 'This Locus core does not support external MCP connections.';
+      } else if (m.state === 'connected') {
+        stateLabel = 'Connected';
+      } else if (m.state === 'unavailable') {
+        stateLabel = 'Unavailable';
+        unavailableReason = m.url
+          ? 'This server cannot be used right now'
+            + (m.reason ? ' (' + m.reason + ')' : '') + '.'
+          : 'This package does not declare a server address (an old-style entry); it cannot be connected.';
+      } else {
+        stateLabel = 'Connection required';
+      }
+      return {
+        id: m.id,
+        displayName: m.displayName || m.id,
+        url: m.url || null,
+        credential: m.credential || null,
+        state: !supported ? 'unavailable' : m.state,
+        reason: m.reason || null,
+        stateLabel,
+        unavailableReason,
+        unreachable: m.state === 'connected' && !!reason,
+        // needs-connection with an endpoint → the reconnect entry (§5.4).
+        // Legacy entries and everything unavailable stay button-less.
+        connectable: supported && m.state === 'needs-connection' && !!m.url,
+      };
+    });
+  }
+  return map;
+});
+
+// The ONE MCP connect dialog (§5.2's copy, reconnect flavor §5.4). The
+// typed token lives in a single ref, cleared on every close — it is
+// never copied into the store, storage or an error message. D12:
+// remember defaults to CHECKED (opt-out only).
+const mcpDialog = ref(null); // { serverId, displayName, url, credential, error, busy } | null
+const mcpDialogToken = ref('');
+const mcpDialogRemember = ref(true);
+
+function openMcpDialog(c, m) {
+  if (!m || !m.url) return;
+  mcpDialogToken.value = '';
+  mcpDialogRemember.value = true;
+  mcpDialog.value = {
+    serverId: m.id,
+    displayName: m.displayName || m.id,
+    url: m.url,
+    credential: m.credential || '(none)',
+    error: null,
+    busy: false,
+  };
+}
+
+function closeMcpDialog() {
+  mcpDialog.value = null;
+  mcpDialogToken.value = ''; // the value never survives the dialog
+  mcpDialogRemember.value = true;
+}
+
+async function confirmMcpConnect() {
+  const dialog = mcpDialog.value;
+  if (!dialog || dialog.busy) return;
+  dialog.busy = true;
+  dialog.error = null;
   try {
-    setMcpConnectionState(m.id, 'connected');
+    await connectMcpServer(dialog.serverId, {
+      token: mcpDialogToken.value,
+      remember: mcpDialogRemember.value,
+    });
+    closeMcpDialog();
     refreshCapabilities();
   } catch (e) {
-    store.storageNotice = e.message || String(e);
+    dialog.error = e.message || String(e);
+    dialog.busy = false;
   }
 }
 

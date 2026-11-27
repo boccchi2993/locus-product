@@ -31,6 +31,10 @@ export function createLocusToolPort(deps) {
   const mutationPolicy = typeof deps.mutationPolicy === 'function' ? deps.mutationPolicy : null;
   const authorization = typeof deps.authorization === 'function' ? deps.authorization : null;
   const credentials = typeof deps.credentials === 'function' ? deps.credentials : null;
+  // C3 phase-2: the CURRENT task's MCP port (src/product/mcp-port.js).
+  // Absent on an older harness/runtime generation — the shell's mcp
+  // command then reports unavailable (the declared degrade rule).
+  const mcp = typeof deps.mcp === 'function' ? deps.mcp : null;
 
   return {
     definitions() {
@@ -60,6 +64,10 @@ export function createLocusToolPort(deps) {
         // a harness generation without the capabilityCredentials
         // declaration (curl credential variables then stay literal).
         credentials: credentials ? credentials() : undefined,
+        // C3 phase-2: THIS task's MCP port (§10.1). Resolved per call so
+        // a task that ends mid-resolution can never leak its port into a
+        // later one; undefined when the feature is degraded off.
+        mcp: mcp ? mcp() : undefined,
       };
       return deps.execute(c.name, c.input, workspace, o);
     },

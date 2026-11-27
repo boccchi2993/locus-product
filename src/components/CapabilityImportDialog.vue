@@ -38,7 +38,16 @@
         <div class="hint">Purpose: {{ importSummary.purpose }}</div>
         <div class="hint">Plugins ({{ importSummary.components.plugins.length }}): {{ displayNames(importSummary.components.plugins) }}</div>
         <div class="hint">Skills ({{ importSummary.components.skills.length }}): {{ displayNames(importSummary.components.skills) }}</div>
+        <!-- C3 phase-2 §5.2.1: under the MCP line, list every endpoint the
+             package declares — the user confirms THIS before committing. -->
         <div class="hint">MCP ({{ importSummary.components.mcps.length }}): {{ displayNames(importSummary.components.mcps) }}</div>
+        <div v-for="m in importSummary.components.mcps" :key="'mcp-endpoint-' + m.id" class="hint"
+          :data-testid="'capability-import-mcp-endpoint-' + m.id">
+          <template v-if="m.url">{{ m.displayName }} → <span class="mono">{{ m.url }}</span>
+            ({{ m.auth || 'bearer' }}<template v-if="m.credential">,
+            credential <span class="mono">{{ m.credential.name }}</span></template>)</template>
+          <template v-else>{{ m.displayName }} → no endpoint (this server cannot be connected)</template>
+        </div>
         <div class="hint">Files: {{ importSummary.fileCount }} · {{ humanSize(importSummary.totalBytes) }}</div>
         <div v-if="importSummary.kind === 'replace' && importSummary.existing" class="hint">
           Replaces version {{ importSummary.existing.version }} with {{ importSummary.version }}.
@@ -80,8 +89,8 @@
              step; an enableError is shown above it when present. -->
         <template v-if="importConnectActive">
           <div v-if="importCommit.enableError" class="hint storage-notice" data-testid="capability-import-enable-error">{{ importCommit.enableError }}</div>
-          <div class="capability-import-title">Connect credentials</div>
-          <div class="hint">This package declares credentials that are not connected yet. You can also connect them later on the capability card.</div>
+          <div class="capability-import-title">Connect credentials and servers</div>
+          <div class="hint">This package declares credentials and external servers that are not connected yet. You can also connect them later on the capability card.</div>
           <div v-for="row in importConnectRows" :key="row.name" class="cred-item"
             :data-testid="'import-credential-row-' + row.name">
             <div class="capability-row cred-row">
@@ -110,6 +119,56 @@
               {{ row.error }}
             </div>
           </div>
+          <!-- C3 phase-2 §5.2.2–5.2.6: the SAME step lists the package's
+               MCP servers — display name, capability, address, the consent
+               sentence (its bolded MUST line emphasized), a token input
+               when the server's credential is not connected yet, and a
+               per-row Connect. Connecting never touches the network. -->
+          <div v-for="row in importMcpConnectRows" :key="'mcp-' + row.serverId" class="cred-item"
+            :data-testid="'import-mcp-row-' + row.serverId">
+            <div class="capability-row cred-row">
+              <span class="cred-label">{{ row.displayName }}</span>
+              <span class="mono">{{ row.url }}</span>
+              <span v-if="row.done" class="capability-state" data-state="connected"
+                :data-testid="'import-mcp-state-' + row.serverId">Connected</span>
+            </div>
+            <div class="hint">Part of capability <span class="mono">{{ row.capabilityId }}</span>.</div>
+            <div class="hint">
+              <span class="mono">{{ row.serverId }}</span> will send requests only to
+              <span class="mono">{{ row.url }}</span>, authenticated with credential
+              <span class="mono">${{ row.credential }}</span> as
+              <span class="mono">Authorization: Bearer …</span>.
+              <strong>After you connect, the model can call this server's tools in a task without asking
+              you each time.</strong>
+            </div>
+            <div v-if="row.credentialConnected" class="hint"
+              :data-testid="'import-mcp-uses-credential-' + row.serverId">
+              Uses connected credential {{ row.credential }}<template v-if="row.last4"> (••••{{ row.last4 }})</template>.
+            </div>
+            <template v-else>
+              <div class="field">
+                <label :for="'import-mcp-input-' + row.serverId">Token</label>
+                <input
+                  :id="'import-mcp-input-' + row.serverId"
+                  v-model="row.value"
+                  type="password"
+                  :data-testid="'import-mcp-input-' + row.serverId"
+                  spellcheck="false" autocomplete="off">
+              </div>
+              <label class="check-row">
+                <input v-model="row.remember" type="checkbox" :data-testid="'import-mcp-remember-' + row.serverId">
+                Remember on this device
+              </label>
+              <div class="hint">Saved in this browser on this device. Uncheck on a shared computer.</div>
+            </template>
+            <div v-if="row.error" class="hint storage-notice" :data-testid="'import-mcp-error-' + row.serverId">
+              {{ row.error }}
+            </div>
+            <div class="capability-row capability-import-actions">
+              <button class="rail-btn" type="button" :disabled="row.done || importConnectBusy || (!row.credentialConnected && !row.value.trim())"
+                :data-testid="'import-mcp-connect-' + row.serverId" @click="connectOneImportMcp(row)">Connect</button>
+            </div>
+          </div>
           <div class="capability-row capability-import-actions">
             <button class="rail-btn" type="button" data-testid="capability-import-skip"
               :disabled="importConnectBusy" @click="skipImportConnect">Skip for now</button>
@@ -134,6 +193,7 @@
 import { computed, ref, watch } from 'vue';
 import {
   store, confirmCapabilityImport, cancelCapabilityImport, connectCredential,
+  connectMcpServer, credentialSummary,
 } from '../ui/store.js';
 import { credentialSendLine } from '../ui/credential-format.js';
 
@@ -162,6 +222,11 @@ const importConnectActive = computed(() => {
   return !!(c && c.commit && c.connectStep);
 });
 const importConnectRows = ref([]); // { name, label, decl, value, remember, error, done, last4 }
+// C3 phase-2 §5.2: the SAME step's MCP server rows —
+// { serverId, displayName, capabilityId, url, credential, credentialConnected,
+//   last4, value, remember, error, done }. The typed values live ONLY here and
+// are cleared when the step closes.
+const importMcpConnectRows = ref([]);
 const importConnectBusy = ref(false);
 
 function openImportConnectStep() {
@@ -171,16 +236,60 @@ function openImportConnectStep() {
   importConnectRows.value = ((cap && cap.credentials) || [])
     .filter((d) => d.state === 'needs-connection')
     .map((d) => ({ name: d.name, label: d.label, decl: d, value: '', remember: true, error: null, done: false, last4: null }));
+  importMcpConnectRows.value = ((cap && cap.mcps) || [])
+    .filter((m) => m && m.url && m.state === 'needs-connection')
+    .map((m) => {
+      const s = m.credential ? credentialSummary(m.credential) : null;
+      const credentialConnected = !!m.credential && !!s && s.state === 'connected';
+      return {
+        serverId: m.id,
+        displayName: m.displayName || m.id,
+        capabilityId: id,
+        url: m.url,
+        credential: m.credential || '(none)',
+        credentialConnected,
+        last4: credentialConnected ? s.last4 : null,
+        value: '',
+        remember: true,
+        error: null,
+        done: false,
+      };
+    });
 }
 
 function closeImportConnectStep() {
   importConnectRows.value = []; // the values never survive the step
+  importMcpConnectRows.value = [];
   importConnectBusy.value = false;
 }
 
 watch(() => store.capabilityImport, (c) => {
   if (!c || !c.connectStep) closeImportConnectStep();
 });
+
+// One server row's Connect (§5.2.5): token (when offered) + record +
+// state → connected, all without any network. The row stays with its
+// error when the service refuses; done rows are final.
+async function connectOneImportMcp(row) {
+  if (!row || row.done || importConnectBusy.value) return;
+  if (!row.credentialConnected && !row.value.trim()) return;
+  importConnectBusy.value = true;
+  try {
+    row.error = null;
+    try {
+      await connectMcpServer(row.serverId, {
+        token: row.credentialConnected ? '' : row.value,
+        remember: row.remember,
+      });
+      row.done = true;
+      row.value = '';
+    } catch (e) {
+      row.error = e.message || String(e);
+    }
+  } finally {
+    importConnectBusy.value = false;
+  }
+}
 
 async function confirmImportConnect() {
   if (importConnectBusy.value) return;
@@ -200,9 +309,33 @@ async function confirmImportConnect() {
         row.error = e.message || String(e);
       }
     }
+    for (const row of importMcpConnectRows.value) {
+      if (row.done) continue;
+      if (row.credentialConnected) {
+        // The credential is in: only the record + the state flip remain.
+        row.error = null;
+        try {
+          await connectMcpServer(row.serverId, { token: '', remember: row.remember });
+          row.done = true;
+        } catch (e) {
+          row.error = e.message || String(e);
+        }
+      } else if (row.value.trim()) {
+        row.error = null;
+        try {
+          await connectMcpServer(row.serverId, { token: row.value, remember: row.remember });
+          row.done = true;
+          row.value = '';
+        } catch (e) {
+          row.error = e.message || String(e);
+        }
+      }
+    }
     // Every filled row either connected or reported its own error — close
     // only when nothing is left to retry.
-    if (importConnectRows.value.every((row) => row.done || !row.value.trim())) {
+    if (importConnectRows.value.every((row) => row.done || !row.value.trim())
+      && importMcpConnectRows.value.every((row) => row.done || row.credentialConnected
+        || !row.value.trim())) {
       cancelCapabilityImport();
     }
   } finally {

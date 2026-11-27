@@ -100,6 +100,10 @@ export const PRODUCT_CORE_REQUIREMENTS = Object.freeze({
         capability: 'pythonAbiExport',
         rule: 'capability-package import checks degrade to pure-Python wheels only: a wheel whose filename does not end in -none-any.whl is refused with a diagnostic stating that this runtime does not declare its Python ABI',
       }),
+      Object.freeze({
+        capability: 'mcpClient',
+        rule: 'the shell has no mcp command (help and the system prompt omit it); the MCP connection dialogs stay available, but every model attempt to run mcp fails with the shell\'s unknown-command error — no MCP client exists to talk to',
+      }),
     ]),
   }),
   harness: Object.freeze({
@@ -148,6 +152,10 @@ export const PRODUCT_CORE_REQUIREMENTS = Object.freeze({
       Object.freeze({
         capability: 'capabilityCredentials',
         rule: 'capability credentials are disabled as a whole: no credential service is built, no credentials port is injected into the runtime (curl credential variables fail as unknown), no Connect/Disconnect state is tracked, and installed packages declaring credentials keep them unresolved',
+      }),
+      Object.freeze({
+        capability: 'capabilityMcp',
+        rule: 'MCP external connections are disabled as a whole: no connection service is built and no MCP port is injected into any task, so the shell\'s mcp command reports unavailable in every task; packages declaring endpoints still install, and their servers show as unavailable (never connectable) in the UI',
       }),
       Object.freeze({
         capability: 'persistentApprovalGrants',

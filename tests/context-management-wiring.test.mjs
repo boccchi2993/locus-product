@@ -59,7 +59,7 @@ if (typeof globalThis.window === 'undefined') {
 // capabilities (capabilityCredentials / persistentApprovalGrants) are
 // declared here by default — this suite's store-level scenarios run on a
 // current-generation harness; they are orthogonal to the P-2 matrix.
-function harnessDeclarationVariant({ requestBudget = true, toolOutputPath = true, contextWindowBudget = true, capabilityPackages = true, tokenCalibrationSnapshot = true } = {}) {
+function harnessDeclarationVariant({ requestBudget = true, toolOutputPath = true, contextWindowBudget = true, capabilityPackages = true, tokenCalibrationSnapshot = true, capabilityMcp = true } = {}) {
   const capabilities = {
     nativeToolCalls: true,
     textFallbackStrict: true,
@@ -69,6 +69,9 @@ function harnessDeclarationVariant({ requestBudget = true, toolOutputPath = true
     capabilityComposition: true,
     capabilityCredentials: true,
     persistentApprovalGrants: true,
+    // C3 phase-2 §10.3: the MCP connection capability — on by default in
+    // this variant, togglable for the missing-capability lists below.
+    capabilityMcp,
   };
   if (requestBudget) capabilities.requestBudget = true;
   if (toolOutputPath) capabilities.toolOutputPath = true;
@@ -162,7 +165,7 @@ function convItems(store, convId) {
 }
 
 (async () => {
-  // ---------- CM1. compatibility: the three optional capabilities ----------
+  // ---------- CM1. compatibility: the optional capabilities ----------
   {
     const r = checkCoreCompatibility({
       runtime: {
@@ -171,6 +174,7 @@ function convItems(store, convId) {
         bootstrap: { shaPinned: true },
         policyMechanisms: ['mutationPolicy', 'authorization'],
         commands: ['cat', 'echo'],
+        mcpClient: true, // C3 phase-2 §10.3: the runtime's MCP client declaration
       },
       harness: harnessDeclarationVariant({
         requestBudget: false, toolOutputPath: false, contextWindowBudget: false,

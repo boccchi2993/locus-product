@@ -98,6 +98,11 @@ export async function executeTool(name, input, workspace, opts) {
           // authorization — the runtime resolves credential variables in
           // curl header values through it (spec.credentials).
           credentials: opts && opts.credentials,
+          // C3 phase-2: the task's MCP port (src/product/mcp-port.js) —
+          // the runtime shell's mcp command resolves servers, states and
+          // elicitation through it. Undefined when the feature is
+          // degraded off (the command then reports unavailable).
+          mcp: opts && opts.mcp,
           cwd: opts && opts.cwd,
         },
       });

@@ -36,10 +36,15 @@ import { reactive, computed } from 'vue';
 // M3c: the RUNTIME core — only through the public transfer layer (A).
 // The worker-asset namespace is aliased: the store's e2e seam accessor
 // `runtimeWorkerAssets()` (below) keeps its established name.
+// C3 phase-2: disposeMcpTaskClient is the runtime's public task-end MCP
+// cleanup entry (§6.7) — onTaskEnd calls it with the SAME port object the
+// task received as context.mcp; the task's real runtime client is
+// disposed (one best-effort DELETE per issued session).
 import {
   createRuntime, createWorkspace,
   LocalDirectoryWorkspace, OPFSWorkspace, ensureWorkspacePermission,
   runtimeWorkerAssets as runtimeWorkerAssetBundle,
+  disposeMcpTaskClient,
 } from '../product/runtime-api.js';
 // M3c: the HARNESS core — only through the public transfer layer (B).
 import {
@@ -62,7 +67,9 @@ import { PersistenceServiceInstance, LOCUS_HOME_SKELETON } from '../persistence.
 import { createCapabilityPackages } from '../capability-packages.js';
 import { createImportReports } from '../capability-import-reports.js';
 import { createCredentialService } from '../credentials.js';
+import { createMcpConnectionService } from '../mcp-connections.js';
 import { createProductCredentialPort } from '../product/credential-port.js';
+import { createProductMcpPort } from '../product/mcp-port.js';
 import { SkillInstanceStorage, SkillInstanceWorkspace, productTaskVfsMounts } from '../extensions.js';
 import { ConversationHistoryWorkspace, historyToolOutputPath } from '../conversation-history-workspace.js';
 // M2b (repository split): the Product prompt inputs — behavior notes and
@@ -137,6 +144,36 @@ const credentials = PersistenceServiceInstance && capabilityManager && harnessDe
   ? createCredentialService({ persistence: PersistenceServiceInstance, manager: capabilityManager })
   : null;
 
+// C3 phase-2 (docs/C3-MCP-STREAMABLE-HTTP.md §5): the MCP connection
+// service over the SAME manager. Null on a harness generation without
+// the capabilityMcp declaration — no connection records, no connect
+// decisions, no per-task MCP port (the declared degrade: servers of
+// installed packages show as unavailable, `mcp` reports unavailable).
+// The state write goes through the store's ONE harness write path —
+// the SAME manager.setMcpState the UI entry uses, with the projection
+// re-synced — but WITHOUT the between-tasks idle gate: the runtime's
+// result-triggered transitions (401 → needs-connection, protocol
+// refusal → unavailable) happen DURING a task by definition.
+const mcpConnections = PersistenceServiceInstance && capabilityManager && harnessDeclaresCapabilityMcp()
+  ? createMcpConnectionService({
+    persistence: PersistenceServiceInstance,
+    manager: capabilityManager,
+    credentials,
+    setState: (id, state, reasonToken) => {
+      capabilityManager.setMcpState(id, state, reasonToken);
+      syncCapabilityProjection();
+    },
+  })
+  : null;
+
+// The per-task MCP port (§10.3): ONE per task, built in prepareTask from
+// the task environment's frozen server snapshot, dropped (and the task's
+// real runtime client disposed through it) in onTaskEnd. Guarded by task
+// id like boundTaskId, so a late finish of an older task can never
+// dispose a newer task's client.
+let activeTaskMcpPort = null;
+let activeTaskMcpPortTaskId = null;
+
 // Installed capability packages (D10): the persistence + import service
 // over the SAME manager. Null when storage is entirely unavailable —
 // every store-level capability-package entry point then refuses loudly
@@ -148,6 +185,10 @@ const capabilityPackages = PersistenceServiceInstance
     manager: capabilityManager,
     now: () => new Date().toISOString(),
     credentials,
+    // C3 phase-2 §10.3: the connection service — commit's version
+    // replacement, the mismatch relock and uninstall route their server
+    // reconciliations through it (absent on the capabilityMcp degrade).
+    mcp: mcpConnections,
     // D13 §3: the retained runtime host's declaration gates native-wheel
     // acceptance. Read lazily at analyze time — the host resolves lazily
     // (or via the hooks seam); ensureRuntimeSession() resolves a hooks
@@ -236,6 +277,48 @@ export function setMcpConnectionState(id, state) {
   return next;
 }
 
+// ---------- MCP server connections (C3 phase-2 §5; the UI calls these) ----------
+// The two connection decisions (§5.2/§5.7) and the read-only views the
+// settings and import dialogs render. Connection actions are
+// between-task actions like enable/disable. The service refuses loudly
+// on the capabilityMcp degrade (null).
+function assertMcpConnectionsSupported() {
+  if (!mcpConnections) throw new Error('this harness does not support MCP connections');
+}
+
+// The user's three-in-one decision (§5.2.6): connect the provided token
+// through the credential service, write the record, state → connected.
+// NO network — the handshake belongs to the first mcp command.
+export async function connectMcpServer(serverId, opts) {
+  assertCapabilitiesIdle();
+  assertMcpConnectionsSupported();
+  const record = await mcpConnections.connect(serverId, opts);
+  syncCapabilityProjection();
+  return record;
+}
+
+// Removes the record; the TOKEN is untouched (§5.7). Idempotent.
+export async function disconnectMcpServer(serverId) {
+  assertCapabilitiesIdle();
+  assertMcpConnectionsSupported();
+  const out = await mcpConnections.disconnect(serverId);
+  syncCapabilityProjection();
+  return out;
+}
+
+// The durable record for ONE server (metadata only) or null.
+export function mcpConnectionRecord(serverId) {
+  if (!mcpConnections) return Promise.resolve(null);
+  return mcpConnections.record(serverId).catch(() => null);
+}
+
+// The in-memory transient failure token (§5.5) or null — the UI's
+// "Unreachable — will retry on next use" renders from this, never from
+// a harness state.
+export function mcpFailureReason(serverId) {
+  return mcpConnections ? mcpConnections.reason(serverId) : null;
+}
+
 // ---------- capability package install service (D10, C1-P2) ----------
 // The store-level entry points over src/capability-packages.js. The UI
 // (C1-P3) will call these; the model has no path to any of them. Import
@@ -277,6 +360,11 @@ export async function acceptCapabilityPackageMismatch(id) {
   return withStorageMutation(async () => {
     const result = await capabilityPackages.acceptMismatch(id);
     store.capabilityPackageNotices = store.capabilityPackageNotices.filter((n) => n.id !== id);
+    // C3 phase-2 §5.4: the relock sent every server of this capability
+    // back to needs-connection (records kept as "the last connection") —
+    // the settings card says so while the capability is the notice's
+    // subject (cleared when a different one is accepted).
+    store.mcpRelockNoticeFor = id;
     syncCapabilityProjection();
     await refreshCapabilityPackages();
     return result;
@@ -487,6 +575,16 @@ function pendingConnectionCredentials(capabilityId) {
   return ((cap && cap.credentials) || []).filter((d) => d.state === 'needs-connection');
 }
 
+// C3 phase-2 §5.2: the capability's MCP servers that still need a
+// connection decision after the commit (first install or replacement) —
+// they join the SAME connect step as the credentials.
+function pendingConnectionServers(id) {
+  const cap = capabilityManager
+    ? capabilityManager.listCapabilities().find((c) => c.id === id)
+    : null;
+  return ((cap && cap.mcps) || []).filter((m) => m && m.url && m.state === 'needs-connection');
+}
+
 export async function confirmCapabilityImport() {
   const current = store.capabilityImport;
   const summary = current && current.summary;
@@ -495,13 +593,15 @@ export async function confirmCapabilityImport() {
     const commit = await commitCapabilityPackage(summary.token, {
       acceptMismatch: summary.needsMismatchAcceptance === true,
     });
-    // D12: a successful commit (first install OR version replacement) keeps
-    // the dialog open on the connect-credentials step when the capability
-    // declares credentials that are still needs-connection. A failed
-    // auto-enable (C3 O1) reports its error as before. Without EITHER, the
-    // dialog closes exactly as it did before D12.
+    // D12 + C3 phase-2 §5.2: a successful commit (first install OR
+    // version replacement) keeps the dialog open on the connect step
+    // when the capability declares credentials OR servers that are
+    // still needs-connection. A failed auto-enable (C3 O1) reports its
+    // error as before. Without ANY of those, the dialog closes exactly
+    // as it did before D12.
     if (commit) {
-      const pending = pendingConnectionCredentials(commit.id).length > 0;
+      const pending = pendingConnectionCredentials(commit.id).length > 0
+        || pendingConnectionServers(commit.id).length > 0;
       const enableFailed = commit.enabled === false;
       if (!pending && !enableFailed) {
         store.capabilityImport = null;
@@ -960,6 +1060,11 @@ export const store = reactive({
   // 'mismatch' notices offer 继续/本次跳过; dismissed ones are dropped
   // without touching storage.
   capabilityPackageNotices: [],
+  // C3 phase-2 §5.4: capability id whose mismatch was ACCEPTED — its
+  // servers all went needs-connection (records kept as "the last
+  // connection") and the settings card explains the re-confirmation.
+  // Cleared when another capability is accepted or the panel shows it.
+  mcpRelockNoticeFor: null,
   // C3 §6: whether THIS harness generation supports durable "Always
   // allow" grants (the ApprovalCard offers the button only then).
   persistentApprovalsSupported: harnessDeclaresPersistentApprovalGrants(),
@@ -1109,7 +1214,21 @@ const productToolPort = createLocusToolPort({
   // C3: the runtime credential port — same injection path as
   // authorization; undefined on an unsupported generation.
   credentials: productCredentialPort ? (() => productCredentialPort) : null,
+  // C3 phase-2: THIS task's MCP port, resolved PER CALL so a port built
+  // for a task that already ended can never ride into a later one. Null
+  // on the declared degrades (no capabilityMcp harness declaration, or a
+  // runtime without mcpClient — the shell then reports unavailable).
+  mcp: mcpTaskPortActive ? (() => activeTaskMcpPort) : null,
 });
+
+// The full MCP execution gate (§10.3 degrade rules): the harness must
+// declare capabilityMcp (connection service + elicitation kind exist)
+// AND the runtime must declare mcpClient (the shell command exists).
+// Only the PORT injection needs both — the connection dialogs stay
+// available when just the runtime side is missing.
+function mcpTaskPortActive() {
+  return !!mcpConnections && runtimeDeclaresMcpClient();
+}
 
 // Conversation identity semantics — three DIFFERENT concepts, never merge:
 //   activeConversationId  — which conversation the user is looking at.
@@ -1374,6 +1493,22 @@ const taskRunner = createTaskRunner({
     taskEventTargets.delete(task.id);
     store.busy = false;
     store.cancelling = false;
+    // C3 §8.5/§6.7: any still-pending elicitation form settles cancelled
+    // with the task (idempotent second insurance beside the task's own
+    // signal), and THIS task's MCP port is dropped — the real runtime
+    // client (sessions, DELETEs, streams, form state) is disposed through
+    // the SAME port object the task's commands received as context.mcp.
+    // The DELETEs are best-effort and not awaited: cleanup never blocks
+    // the task end. Guarded by task id like the binding release.
+    if (activeTaskMcpPortTaskId === task.id) {
+      approvals.cancelAll('task_end');
+      const port = activeTaskMcpPort;
+      activeTaskMcpPort = null;
+      activeTaskMcpPortTaskId = null;
+      if (port) {
+        try { disposeMcpTaskClient(port); } catch (e) { /* contained */ }
+      }
+    }
   },
 });
 
@@ -1444,10 +1579,14 @@ export function resolveApproval(requestId, decision) {
 //   confirmation→ CANCEL the mutation (behavior changes never ride an
 //                 implicit deny that might be read as a lasting verdict;
 //                 the model is simply told the change did not happen).
+//   elicitation → CANCEL the form (C3 §8.4: Escape is "not now", never a
+//                 refusal — the server is told action:"cancel"; 'deny' is
+//                 not even a legal outcome for this kind).
 export function denyApproval() {
   const pending = store.pendingApproval;
   if (!pending) return false;
-  if (pending.kind === 'capability' || pending.kind === 'confirmation') {
+  if (pending.kind === 'capability' || pending.kind === 'confirmation'
+    || pending.kind === 'elicitation') {
     return approvals.cancel(pending.id, 'escape');
   }
   return approvals.resolve(pending.id, { outcome: 'deny', scope: 'once' });
@@ -2112,6 +2251,39 @@ async function prepareTask(task) {
     // prepare awaited too (runtime-side signal refusal): the same liveness
     // rule before any task-scoped mount is bound for this task.
     if (preRunStopped()) return stopReady();
+    // C3 phase-2 §10.3: THIS task's MCP port — ONE per task, built from
+    // the environment's FROZEN server snapshot (the set cannot grow or
+    // shrink mid-task) with live state reads, the ONE harness write path
+    // for state transitions, the §5.5 in-memory transient notes and the
+    // §8.4 elicitation kind. Only on the full gate (capabilityMcp harness
+    // + mcpClient runtime): absent otherwise, the shell's mcp command
+    // then reports unavailable (the declared degrade). The previous
+    // task's port is already gone (onTaskEnd), so one slot is enough.
+    if (compositionActive && taskEnvironment && mcpTaskPortActive()
+        && Array.isArray(taskEnvironment.mcps)) {
+      activeTaskMcpPort = createProductMcpPort({
+        snapshot: taskEnvironment.mcps,
+        liveState: (serverId) => {
+          const cap = capabilityManager.listCapabilities()
+            .find((c) => Array.isArray(c.mcps) && c.mcps.some((m) => m && m.id === serverId));
+          const m = cap ? (cap.mcps || []).find((x) => x && x.id === serverId) : null;
+          return m ? m.state : null;
+        },
+        record: (serverId) => (mcpConnections ? mcpConnections.record(serverId) : Promise.resolve(null)),
+        reason: (serverId) => (mcpConnections ? mcpConnections.reason(serverId) : null),
+        setReason: (serverId, token) => {
+          if (mcpConnections) mcpConnections.setReason(serverId, token);
+        },
+        setState: (serverId, state, reasonToken) => {
+          capabilityManager.setMcpState(serverId, state, reasonToken);
+          syncCapabilityProjection();
+        },
+        approvals: approvals,
+        conversationId: runningConversationId || store.liveConversationId || null,
+        taskGeneration: pinnedGeneration,
+      });
+      activeTaskMcpPortTaskId = task.id;
+    }
     const taskVfs = vfs.fork();
     if (compositionActive && taskEnvironment) {
       if (taskEnvironment.skills.length) {
@@ -2387,6 +2559,35 @@ function harnessDeclaresCapabilityCredentials() {
     const caps = harnessDeclaration();
     return !!(caps && caps.capabilities && caps.capabilities.capabilityCredentials);
   } catch (e) { return false; }
+}
+
+// C3 phase-2 companion gate: the whole MCP connection feature (service,
+// records, per-task port injection) exists only on a harness generation
+// that declares capabilityMcp — and the PORT additionally needs a
+// runtime that declares mcpClient (see mcpTaskPortActive). On an older
+// harness the degrade is the declared rule: no connection service, no
+// port; packages with endpoints still install and their servers show as
+// unavailable; a newer runtime's mcp command reports unavailable.
+function harnessDeclaresCapabilityMcp() {
+  try {
+    const caps = harnessDeclaration();
+    return !!(caps && caps.capabilities && caps.capabilities.capabilityMcp);
+  } catch (e) { return false; }
+}
+
+function runtimeDeclaresMcpClient() {
+  try {
+    const caps = runtimeCapabilitiesDeclaration();
+    return !!(caps && caps.mcpClient);
+  } catch (e) { return false; }
+}
+
+// The UI gate: the connect/disconnect dialogs exist when the harness
+// declares capabilityMcp (the connection service was built). The runtime
+// side is NOT required — per the degrade table, connecting stays
+// possible even when the current runtime has no mcp command.
+export function mcpConnectionsSupported() {
+  return !!mcpConnections;
 }
 
 function harnessDeclaresPersistentApprovalGrants() {
@@ -2855,6 +3056,10 @@ export async function resetAllData() {
     if (harnessDeclaresPersistentApprovalGrants()) await approvals.clearPersistentGrants();
     refreshAlwaysAllowed();
     if (credentials) await credentials.clearAll();
+    // C3 phase-2 §5.7: reset clears every MCP connection record too
+    // (beside credentials.clearAll()), and any still-pending elicitation
+    // form died with the cancelAll('reset') above.
+    if (mcpConnections) await mcpConnections.clearAll();
     if (workspaceMount) vfs.unmount('/mnt/workspace');
     store.workspaceName = null;
     store.workspacePermission = 'none';
@@ -2946,6 +3151,18 @@ async function bootPersistence() {
         syncCapabilityProjection();
       } catch (e) {
         reportPersistenceIssue(e, 'Credential bindings could not be restored');
+      }
+    }
+    // C3 phase-2 §5.3: MCP connection records restore AFTER credentials
+    // (the states follow the credential states) and after the packages
+    // registered (the manager knows the server set now). Records of
+    // servers nothing declares anymore are deleted here.
+    if (mcpConnections) {
+      try {
+        await mcpConnections.restore();
+        syncCapabilityProjection();
+      } catch (e) {
+        reportPersistenceIssue(e, 'MCP connection records could not be restored');
       }
     }
     if (harnessDeclaresPersistentApprovalGrants()) {
