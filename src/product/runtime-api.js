@@ -8,7 +8,7 @@
 //  code goes through this file — no `locus-runtime/…` specifier may
 //  appear anywhere else in product code.
 //
-//  Export surface (locus-runtime @ aca6c2f, verified against the
+//  Export surface (locus-runtime @ 7873de59, verified against the
 //  installed package's real entries — disjoint surfaces, so `export *`
 //  is collision-free):
 //    locus-runtime            createRuntime, createWorkspace,
@@ -18,6 +18,15 @@
 //                             wheelPlatformCompatible, normalizeDistName
 //                             (the Python ABI identity exports flow to the
 //                             D13 capability-package import checks — D13 §3)
+//                             + the C3 phase-2 MCP client contract surface:
+//                             MCP_PROTOCOL_VERSIONS, MCP_CLIENT_INFO,
+//                             MCP_LIMITS (the declared constants a host
+//                             gates against, C3 §10.1) and
+//                             disposeMcpTaskClient (the public task-end
+//                             cleanup entry — the store's onTaskEnd calls
+//                             it with the SAME port object it passed as
+//                             context.mcp to dispose the task's real
+//                             runtime clients, C3 §6.7)
 //    locus-runtime/workspace  LocalDirectoryWorkspace, OPFSWorkspace,
 //                             WorkspaceAdapter, ensureWorkspacePermission,
 //                             normalizeWorkspacePath, vfsError

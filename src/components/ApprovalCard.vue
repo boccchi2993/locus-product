@@ -1,6 +1,10 @@
 <template>
+  <!-- C3 phase-2 §8.3: the elicitation kind renders at this position
+       through McpElicitationCard (MainWorkspace.vue) — this card stays
+       out of its way entirely (the kinds and copy below never apply to
+       a form). -->
   <div
-    v-if="pending"
+    v-if="pending && pending.kind !== 'elicitation'"
     ref="cardEl"
     class="approval-card"
     tabindex="-1"

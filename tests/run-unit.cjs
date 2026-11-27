@@ -29,9 +29,20 @@ const SUITES = [
   // C3: the credential service (bindings, remembered values, restore /
   // afterReplace / uninstall cleanup) and the runtime credential port.
   'credentials.test.mjs',
+  // C3 phase-2 §5: the MCP connection service (records, restore,
+  // afterReplace / afterRelock / uninstall / reset, in-memory reasons,
+  // the legacy no-endpoint unavailable rule).
+  'mcp-connections.test.mjs',
   // C3: the FULL product credential chain — tool port → tools.js → real
   // runtime session → curl → the credential port (relay stub).
   'credential-wiring.test.mjs',
+  // C3 phase-2 §10.3: the FULL product MCP chain — tool port (deps.mcp) →
+  // tools.js (context.mcp) → real runtime session → shell `mcp` → the
+  // MCP task client → the product MCP port (snapshot/live states,
+  // elicitation kind, state discipline) → strict counting MCP server
+  // stub. Covers port injection end to end and proves the token never
+  // reaches model-visible output; the task-end dispose sends one DELETE.
+  'mcp-wiring.test.mjs',
   // C3: persistent approvals ("Always allow") — persistence round trip,
   // controller restart, revoke, fail-closed, store-level list/revoke/reset.
   'approval-grants.test.mjs',

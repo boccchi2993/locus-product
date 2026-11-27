@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "capability": {
+    "id": "acceptance-mcp",
+    "version": "1.0.0",
+    "displayName": "Acceptance MCP",
+    "description": "TEST ONLY acceptance fixture: search and read documents stored in Acme through the acmedocs MCP server.",
+    "plugins": [],
+    "skills": ["acme-docs"],
+    "mcps": ["acmedocs"],
+    "credentials": [{
+      "name": "ACCEPTANCE_TOKEN",
+      "label": "Acme acceptance token",
+      "description": "TEST ONLY bearer for the controlled acceptance MCP server.",
+      "origin": "https://mcp.locus-acceptance.example",
+      "pathPrefix": "/",
+      "header": "Authorization",
+      "scheme": "Bearer"
+    }]
+  }
+}

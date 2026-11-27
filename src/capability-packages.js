@@ -50,7 +50,7 @@ function randomToken() {
   return 'tok-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
 }
 
-export function createCapabilityPackages({ persistence, manager, now, credentials, runtimeDeclaration }) {
+export function createCapabilityPackages({ persistence, manager, now, credentials, mcp, runtimeDeclaration }) {
   if (!persistence) throw new Error('createCapabilityPackages requires a persistence port');
   if (!manager) throw new Error('createCapabilityPackages requires a CapabilityManager');
   const clock = typeof now === 'function' ? now : () => new Date().toISOString();
@@ -60,6 +60,13 @@ export function createCapabilityPackages({ persistence, manager, now, credential
   // packages with credentials still install, their credentials simply
   // stay unresolved.
   const credentialService = credentials || null;
+  // Optional C3 phase-2 MCP connection service (src/mcp-connections.js):
+  // commit's version replacement (keep / needs-connection / delete),
+  // acceptMismatch's relock recovery and uninstall's record removal route
+  // through it when present. Absent on a harness generation without the
+  // capabilityMcp declaration — packages with connectable servers still
+  // install, their servers simply stay needs-connection.
+  const mcpService = mcp || null;
   // D13 §3: the runtime's pythonAbiExport capability gates native-wheel
   // acceptance. The thunk is read lazily at analyze time (the retained
   // runtime host resolves lazily, after boot). Degradation is defined
@@ -264,6 +271,21 @@ export function createCapabilityPackages({ persistence, manager, now, credential
     });
 
     const desc = (list) => list.map((id) => ({ id, displayName: displayNameOf(a.pkgInput, id) }));
+    // C3 phase-2 §3.6: the import confirmation shows the endpoint of every
+    // connectable server — routing metadata only, never a value. A legacy
+    // (no-endpoint) entry keeps the bare { id, displayName } shape.
+    const mcpDesc = (list) => list.map((id) => {
+      const m = (a.pkgInput.mcps || []).find((x) => x && x.id === id);
+      const entry = { id, displayName: m ? m.displayName : id };
+      if (m && m.url !== undefined) {
+        const credential = (a.pkgInput.capability.credentials || [])
+          .find((c) => c && c.name === m.credential);
+        entry.url = m.url;
+        entry.auth = m.auth;
+        entry.credential = { name: m.credential, label: credential ? credential.label : m.credential };
+      }
+      return entry;
+    });
     return {
       ok: true,
       token,
@@ -279,10 +301,7 @@ export function createCapabilityPackages({ persistence, manager, now, credential
       components: {
         plugins: desc(a.components.plugins),
         skills: desc(a.components.skills),
-        mcps: a.components.mcps.map((id) => {
-          const m = (a.pkgInput.mcps || []).find((x) => x && x.id === id);
-          return { id, displayName: m ? m.displayName : id };
-        }),
+        mcps: mcpDesc(a.components.mcps),
       },
       fileCount: a.files.size,
       totalBytes,
@@ -343,6 +362,10 @@ export function createCapabilityPackages({ persistence, manager, now, credential
     // registered this session (boot-skipped) — orphan records are then
     // cleaned by the next restore().
     let oldCredentials = null;
+    // C3 phase-2 §5.7: the OLD version's mcp declarations, captured the
+    // same way — afterReplace needs the ids to delete connection records
+    // of servers the new version dropped.
+    let oldMcps = null;
     if (existing) {
       // A registered package reads the LIVE manager state; one the boot
       // verification skipped (never registered — §5.3) only has the
@@ -358,6 +381,17 @@ export function createCapabilityPackages({ persistence, manager, now, credential
             name: c.name, origin: c.origin, pathPrefix: c.pathPrefix,
             header: c.header, scheme: c.scheme,
           }));
+        }
+        if (cap && Array.isArray(cap.mcps)) {
+          oldMcps = cap.mcps.map((m) => {
+            const old = { id: m.id };
+            if (m.url !== undefined) {
+              old.url = m.url;
+              old.auth = m.auth;
+              old.credential = m.credential;
+            }
+            return old;
+          });
         }
         // keepInstances: true — the skill instance directory survives the
         // replacement; the §6.3 upgrade rule takes over on re-enable.
@@ -379,6 +413,10 @@ export function createCapabilityPackages({ persistence, manager, now, credential
           // reset the old version's credentials to needs-connection; the
           // unchanged bindings re-connect from the in-memory values.
           if (credentialService) await credentialService.afterReplace(id, oldCredentials);
+          // The rollback re-registered the OLD version: reconcile the
+          // connection records against it (they were written against
+          // these declarations, so matching records reconnect).
+          if (mcpService) await mcpService.afterReplace(id, oldMcps);
         } catch (ignored) { /* best-effort rollback; the original error still wins */ }
       }
       if (!existing || existing.digest !== digest) {
@@ -420,6 +458,12 @@ export function createCapabilityPackages({ persistence, manager, now, credential
         enableError = e && e.message ? e.message : String(e);
         try { await setEnabled(id, false); } catch (ignored) { /* the record stays as-is */ }
       }
+      // C3 phase-2 §5.7: first install has no records to reconcile — the
+      // call lands every new server at needs-connection explicitly; the
+      // import dialog's connect step (§5.2) takes over from there.
+      if (mcpService) {
+        await mcpService.afterReplace(id, null);
+      }
       const result = { id, state: manager.capabilityState(id), unchanged: false, enabled: enableError === null };
       if (enableError) result.enableError = enableError;
       return result;
@@ -433,6 +477,12 @@ export function createCapabilityPackages({ persistence, manager, now, credential
     // against the NEW declarations (keep / needs-reconfirm / disconnect).
     if (credentialService) {
       await credentialService.afterReplace(id, oldCredentials);
+    }
+    // C3 phase-2 §5.7: reconcile the connection records against the NEW
+    // declarations (matching record kept, else needs-connection; servers
+    // the new version dropped lose their records).
+    if (mcpService) {
+      await mcpService.afterReplace(id, oldMcps);
     }
 
     return { id, state: manager.capabilityState(id), unchanged: false };
@@ -573,6 +623,12 @@ export function createCapabilityPackages({ persistence, manager, now, credential
     if (record.digest !== digest) {
       await persistence.deleteCapabilityPackageBytes(id, record.digest);
     }
+    // C3 phase-2 §5.4: the package's bytes changed after the user's
+    // original confirmation, so its servers' endpoints need re-confirmation.
+    // The connection records are KEPT (shown as "the last connection").
+    if (mcpService) {
+      await mcpService.afterRelock(id);
+    }
     if (record.enabled) await manager.enable(id);
     mismatchPending.delete(id);
     return { id, state: manager.capabilityState(id) };
@@ -584,6 +640,11 @@ export function createCapabilityPackages({ persistence, manager, now, credential
     // and values FIRST — while the credential names are still registered,
     // so the manager state update can run. A boot-skipped (unregistered)
     // package's leftover bindings are removed through its records.
+    // C3 phase-2 §5.7: the capability's MCP connection records go FIRST,
+    // ahead of the credential deletion (same slot discipline).
+    if (mcpService) {
+      await mcpService.removeForCapability(id);
+    }
     if (credentialService) {
       await credentialService.removeForCapability(id);
     }

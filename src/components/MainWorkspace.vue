@@ -43,6 +43,7 @@
           Use <span class="kbd-ish">+</span> below to mount a folder, or just ask something.
         </p>
         <ApprovalCard />
+        <McpElicitationCard />
         <Composer :centered="true" />
       </div>
     </div>
@@ -57,6 +58,7 @@
       <div class="composer-dock">
         <div class="composer-column">
           <ApprovalCard />
+          <McpElicitationCard />
           <Composer />
         </div>
       </div>
@@ -70,6 +72,11 @@ import { store, activeConversation, toggleContextPanel, openSidebarDrawer } from
 import Timeline from './Timeline.vue';
 import Composer from './Composer.vue';
 import ApprovalCard from './ApprovalCard.vue';
+// C3 phase-2 §8.3: the harness 'elicitation' kind renders at the SAME
+// position as the ApprovalCard (which steps aside for that kind). One
+// pending request at a time is a controller guarantee — the two cards
+// can never show at once.
+import McpElicitationCard from './McpElicitationCard.vue';
 
 const conversation = activeConversation;
 const isEmpty = computed(() => !conversation.value || conversation.value.items.length === 0);

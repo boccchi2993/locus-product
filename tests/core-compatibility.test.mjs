@@ -48,7 +48,8 @@ const RUNTIME_OK = () => Object.freeze({
   bootstrap: { shaPinned: true },
   policyMechanisms: ['mutationPolicy', 'authorization'],
   pythonAbiExport: true,
-  commands: ['cat', 'echo', 'grep'],
+  mcpClient: true, // C3 phase-2 §10.3: the runtime's MCP client declaration
+  commands: ['cat', 'echo', 'grep', 'mcp'],
   limits: { shellPipeMaxBytes: 1048576 },
 });
 const HARNESS_OK = () => Object.freeze({
@@ -75,6 +76,7 @@ const HARNESS_OK = () => Object.freeze({
     capabilityPackages: true,
     tokenCalibrationSnapshot: true,
     capabilityCredentials: true,
+    capabilityMcp: true, // C3 phase-2 §10.3: the harness MCP connection declaration
     persistentApprovalGrants: true,
   },
 });

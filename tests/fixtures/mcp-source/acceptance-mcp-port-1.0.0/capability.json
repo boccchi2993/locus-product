@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "capability": {
+    "id": "acceptance-mcp-port",
+    "version": "1.0.0",
+    "displayName": "Acceptance MCP (port)",
+    "description": "TEST ONLY acceptance fixture (non-default-port variant for environments that cannot bind 443).",
+    "plugins": [],
+    "skills": ["acme-docs"],
+    "mcps": ["acmedocs"],
+    "credentials": [{
+      "name": "ACCEPTANCE_TOKEN",
+      "label": "Acme acceptance token",
+      "description": "TEST ONLY bearer for the controlled acceptance MCP server.",
+      "origin": "https://mcp.locus-acceptance.example:46443",
+      "pathPrefix": "/",
+      "header": "Authorization",
+      "scheme": "Bearer"
+    }]
+  }
+}

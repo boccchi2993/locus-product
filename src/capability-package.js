@@ -60,6 +60,7 @@ import {
   validatePluginDescriptor,
   validateSkillDescriptor,
   validateMcpDescriptor,
+  validateMcpBinding,
   EXTENSION_ID_PATTERN,
   SKILL_INSTANCE_MAX_BYTES,
   sha256Hex,
@@ -466,7 +467,14 @@ function validateMcpManifest(parsed, dirId, logicalPath, diagnostics) {
       logicalPath + ' requires an "mcp" object'));
     return null;
   }
-  rejectUnknownFields(parsed.mcp, ['id', 'displayName', 'description'],
+  // C3 phase-2 §3.2: the endpoint trio (url / auth / credential) joins the
+  // strict whitelist. Everything else — token, bearer, headers, apiKey —
+  // is still package_field_unknown: the whitelist IS the "no secrets in
+  // the package" guarantee (P46). Field SHAPES and the all-or-nothing
+  // rule stay the Harness descriptor validator's contract (surfaced
+  // through normalizeDescriptor below); the credential REFERENCE is
+  // checked per-package in validateProject's graph pass (validateMcpBinding).
+  rejectUnknownFields(parsed.mcp, ['id', 'displayName', 'description', 'url', 'auth', 'credential'],
     logicalPath, 'mcp descriptor', diagnostics);
   const descriptor = normalizeDescriptor('mcp', parsed.mcp, logicalPath, diagnostics);
   if (!descriptor) return null;
@@ -719,6 +727,25 @@ export async function validateProject(opts) {
           'mcp/' + m.descriptor.id,
           'mcp ' + m.descriptor.id + ' is not referenced by capability '
           + capability.id));
+      }
+    }
+    // C3 phase-2 §3.3: every connectable server must be bound to a
+    // credential OF THIS PACKAGE's capability — declared here, bearer
+    // Authorization form, binding covering the server url. The Harness
+    // validator names the violated rule (error.mcpBindingRule); an
+    // undeclared credential is a MISSING reference, every other binding
+    // fault is an invalid descriptor. Legacy entries (no endpoint) pass
+    // through untouched.
+    for (const m of mcps) {
+      try {
+        validateMcpBinding(m.descriptor, capability);
+      } catch (e) {
+        diagnostics.push(packageDiagnostic(
+          (e && e.mcpBindingRule === 'credential-reference')
+            ? 'package_ref_missing'
+            : 'package_descriptor_invalid',
+          'mcp/' + m.descriptor.id + '/mcp.json',
+          (e && e.message ? e.message : String(e))));
       }
     }
   }
@@ -1071,9 +1098,20 @@ export function inspectBundle(bundle) {
       size: s.size,
       sha256: s.sha256,
     })),
-    mcps: lock.mcps.map((m) => ({
-      id: m.id, displayName: m.displayName, description: m.description,
-    })),
+    // C3 phase-2 §3.6: the same shape as lock.mcps[i] minus `kind` — the
+    // endpoint fields appear ONLY when the descriptor declares them, so a
+    // legacy entry keeps its exact baseline summary.
+    mcps: lock.mcps.map((m) => {
+      const entry = {
+        id: m.id, displayName: m.displayName, description: m.description,
+      };
+      if (m.url !== undefined) {
+        entry.url = m.url;
+        entry.auth = m.auth;
+        entry.credential = m.credential;
+      }
+      return entry;
+    }),
     totalBytes: totalBytes,
     valid: true,
   };

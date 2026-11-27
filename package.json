@@ -11,8 +11,8 @@
     "test": "node tests/run-unit.cjs"
   },
   "dependencies": {
-    "locus-harness": "github:boccchi2993/locus-harness#bdb10db07a520a9b9554a72a76523a9c94ed2e5b",
-    "locus-runtime": "github:boccchi2993/locus-runtime#8ba62f5ce73385ffb6b4baf5e7cf877c3618efe7",
+    "locus-harness": "github:boccchi2993/locus-harness#630b167916e64b9a9a7312f49254016dcede68a5",
+    "locus-runtime": "github:boccchi2993/locus-runtime#d215c0d92eeb4fc294b1b702c7e2f5af984c0ffb",
     "vue": "^3.5.13"
   },
   "devDependencies": {

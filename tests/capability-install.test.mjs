@@ -52,6 +52,19 @@
 //        a degradation
 //   CI34 D13: a boot-time wheel rejection skips loading and keeps the
 //        record + bytes (corrupt notice carries the per-artifact reasons)
+//   CI35 C3 phase-2 §3.6: inspect shows the endpoint of every connectable
+//        server (routing metadata only)
+//   CI36 C3 phase-2 §5.2: first install → needs-connection, no record;
+//        Connect writes the record + flips to connected, no network, no
+//        token in the record
+//   CI37 C3 phase-2 §5.7: replacement — unchanged keeps the connection,
+//        changed url breaks it (record kept), dropped server loses the
+//        record
+//   CI38 C3 phase-2 §5.4: acceptMismatch (integrity relock) sends the
+//        capability's servers to needs-connection, records kept
+//   CI39 C3 phase-2 §5.7: uninstall deletes the connection records
+//   CI40 C3 phase-2 §3.5: a legacy (no-endpoint) server is unavailable
+//        (no-endpoint) and refuses connect
 //
 // Service-level cases drive createCapabilityPackages directly (real
 // CapabilityManager + memory PersistenceService, per
@@ -92,6 +105,7 @@ const ext = await import('../src/extensions.js');
 const persistenceMod = await import('../src/persistence.js');
 const svcMod = await import('../src/capability-packages.js');
 const credSvcMod = await import('../src/credentials.js');
+const mcpSvcMod = await import('../src/mcp-connections.js');
 
 const CAP_ID = 'ci-capability';
 const OTHER_CAP_ID = 'other-capability';
@@ -126,7 +140,7 @@ function skillBody(id, version) {
 
 async function projectWorkspace({ id = CAP_ID, version = '1.0.0', pluginId = PLUGIN_ID,
   skillIds = ['skill-a', 'skill-b'], skillBodies = null, wheelSeed = 1, credentials = null,
-  wheelName = WHEEL_NAME } = {}) {
+  wheelName = WHEEL_NAME, mcps = null } = {}) {
   const ws = runtimeApi.createMemoryWorkspace({
     maxBytes: LA.LOCUS_LIMITS.maxTotalBytes,
     maxFileBytes: LA.LOCUS_LIMITS.maxFileBytes,
@@ -137,7 +151,7 @@ async function projectWorkspace({ id = CAP_ID, version = '1.0.0', pluginId = PLU
     description: 'TEST ONLY fixture for the capability install service.',
     plugins: [pluginId],
     skills: skillIds.slice(),
-    mcps: [],
+    mcps: mcps ? mcps.map((m) => m.id) : [],
   };
   if (credentials) capabilityDescriptor.credentials = credentials;
   const capabilities = {
@@ -145,6 +159,13 @@ async function projectWorkspace({ id = CAP_ID, version = '1.0.0', pluginId = PLU
     capability: capabilityDescriptor,
   };
   await ws.write('capability.json', JSON.stringify(capabilities, null, 2) + '\n');
+  for (const m of (mcps || [])) {
+    const { endpoint, ...descriptor } = m;
+    await ws.write('mcp/' + m.id + '/mcp.json', JSON.stringify({
+      schemaVersion: 1,
+      mcp: endpoint ? Object.assign({}, descriptor, endpoint) : descriptor,
+    }, null, 2) + '\n');
+  }
   await ws.write('plugins/' + pluginId + '/plugin.json', JSON.stringify({
     schemaVersion: 1,
     plugin: {
@@ -240,13 +261,18 @@ function serviceRig(opts = {}) {
   const credentials = opts.credentials === false
     ? null
     : credSvcMod.createCredentialService({ persistence, manager });
+  // C3 phase-2: the MCP connection service rides the same manager
+  // (mcp === false exercises the no-service wiring).
+  const mcp = opts.mcp === false
+    ? null
+    : mcpSvcMod.createMcpConnectionService({ persistence, manager, credentials });
   const service = svcMod.createCapabilityPackages({
-    persistence, manager, now: SERVICE_NOW, credentials,
+    persistence, manager, now: SERVICE_NOW, credentials, mcp,
     // D13 §3: the runtime declaration thunk under test (default: none —
     // an unresolvable declaration is not a degradation, see CI33).
     runtimeDeclaration: opts.runtimeDeclaration,
   });
-  return { persistence, manager, home, storage, service, credentials };
+  return { persistence, manager, home, storage, service, credentials, mcp };
 }
 
 async function installViaService(rig, packed, opts = {}) {
@@ -1253,6 +1279,130 @@ function harnessDeclarationVariant({ capabilityPackages = true } = {}) {
     check('CI34 the record and its bytes are kept (never deleted)',
       !!record && !!bytes && bytes.byteLength > 0 && record.enabled === true,
       JSON.stringify({ record: record && record.digest, bytes: bytes && bytes.byteLength }));
+  }
+
+  // ---------- CI35–CI40. C3 phase-2 §5/§10.3: the MCP connection lifecycle ----------
+  {
+    const MCP_FIXTURE = {
+      id: 'ci-server', displayName: 'CI Server', description: 'TEST ONLY MCP server.',
+      endpoint: { url: 'https://api.example.test/v1/tools/mcp', auth: 'bearer', credential: 'CI_CRED_KEY' },
+    };
+    const MCP_V3 = {
+      id: 'ci-server', displayName: 'CI Server', description: 'TEST ONLY MCP server.',
+      endpoint: { url: 'https://api.example.test/v1/tools/mcp-v3', auth: 'bearer', credential: 'CI_CRED_KEY' },
+    };
+    const withMcp = { credentials: CRED_DECL_V1, mcps: [MCP_FIXTURE] };
+    const mcpStateOf = (manager, id) => {
+      const cap = manager.listCapabilities().find((c) => c.id === CAP_ID);
+      const m = cap && cap.mcps.find((x) => x.id === id);
+      return m ? m.state : null;
+    };
+
+    section('CI35 inspect shows the endpoint of every connectable server');
+    {
+      const packed = await packProject(withMcp);
+      const rig = serviceRig();
+      const summary = await rig.service.inspect(packed.bytes);
+      check('CI35 components.mcps carries url / auth / credential { name, label }',
+        summary.ok === true && JSON.stringify(summary.components.mcps) === JSON.stringify([{
+          id: 'ci-server', displayName: 'CI Server',
+          url: 'https://api.example.test/v1/tools/mcp', auth: 'bearer',
+          credential: { name: 'CI_CRED_KEY', label: 'CI credential' },
+        }]), JSON.stringify(summary.components && summary.components.mcps));
+    }
+
+    section('CI36 first install: no record, needs-connection; connect writes the record without any network');
+    {
+      const packed = await packProject(withMcp);
+      const rig = serviceRig();
+      const { commit } = await installViaService(rig, packed);
+      check('CI36 the fresh install lands the server at needs-connection with no record',
+        mcpStateOf(rig.manager, 'ci-server') === 'needs-connection'
+        && (await rig.mcp.record('ci-server')) === null
+        && commit.enabled === true);
+      await rig.mcp.connect('ci-server', { token: 'sk-ci-token-abcd1234' });
+      const rec = await rig.mcp.record('ci-server');
+      check('CI36b Connect writes the record and flips the state to connected',
+        !!rec && rec.url === 'https://api.example.test/v1/tools/mcp'
+        && rec.auth === 'bearer' && rec.credential === 'CI_CRED_KEY'
+        && mcpStateOf(rig.manager, 'ci-server') === 'connected');
+      const rows = await rig.persistence.get('meta', 'mcpConnections');
+      check('CI36c the record carries metadata only (never the token)',
+        rows && Array.isArray(rows.connections) && rows.connections.length === 1
+        && JSON.stringify(rows.connections[0]).indexOf('sk-ci-token-abcd1234') === -1);
+      await rig.mcp.restore();
+      check('CI36d restore keeps the connection (§5.3)', mcpStateOf(rig.manager, 'ci-server') === 'connected');
+    }
+
+    section('CI37 version replacement: unchanged keeps, changed breaks, dropped deletes (§5.7)');
+    {
+      const rig = serviceRig();
+      await installViaService(rig, await packProject(withMcp));
+      await rig.mcp.connect('ci-server', { token: 'sk-ci-token-abcd1234' });
+      // (a) unchanged declaration across the replacement.
+      await installViaService(rig, await packProject({ ...withMcp, version: '2.0.0' }));
+      check('CI37a an unchanged replacement keeps the connection',
+        mcpStateOf(rig.manager, 'ci-server') === 'connected'
+        && (await rig.mcp.record('ci-server')) !== null);
+      // (b) changed url → needs-connection, record kept.
+      await installViaService(rig, await packProject({ credentials: CRED_DECL_V1, mcps: [MCP_V3], version: '3.0.0' }));
+      const kept = await rig.mcp.record('ci-server');
+      check('CI37b a changed endpoint goes needs-connection; the last record is kept',
+        mcpStateOf(rig.manager, 'ci-server') === 'needs-connection'
+        && !!kept && kept.url === 'https://api.example.test/v1/tools/mcp', kept);
+      // (c) dropped server → record deleted.
+      await installViaService(rig, await packProject({ credentials: CRED_DECL_V1, mcps: [], version: '4.0.0' }));
+      check('CI37c dropping the server deletes its record',
+        (await rig.mcp.record('ci-server')) === null);
+    }
+
+    section('CI38 integrity relock: acceptMismatch sends servers to needs-connection, keeps records (§5.4)');
+    {
+      const shared = new persistenceMod.PersistenceService();
+      const rig1 = serviceRig({ persistence: shared });
+      await installViaService(rig1, await packProject(withMcp));
+      await rig1.mcp.connect('ci-server', { token: 'sk-ci-token-abcd1234' });
+      check('CI38 pre: connected after the connect', mcpStateOf(rig1.manager, 'ci-server') === 'connected');
+      // "restart" over the same persistence; drift the stored bytes in place.
+      const rig2 = serviceRig({ persistence: shared });
+      const record = await recordOf(shared, CAP_ID);
+      const drifted = await packWithDrift(withMcp);
+      await shared.writeCapabilityPackageBytes(CAP_ID, record.digest, drifted.bytes);
+      const results = await rig2.service.loadInstalled();
+      check('CI38 the drifted package boots as a mismatch, not loaded',
+        results[0].status === 'mismatch'
+        && rig2.manager.isPackage(CAP_ID) === false, JSON.stringify(results));
+      await rig2.service.acceptMismatch(CAP_ID);
+      check('CI38b after 继续 the server is needs-connection and the record is kept',
+        mcpStateOf(rig2.manager, 'ci-server') === 'needs-connection'
+        && (await rig2.mcp.record('ci-server')) !== null);
+    }
+
+    section('CI39 uninstall removes the connection records (§5.7)');
+    {
+      const rig = serviceRig();
+      await installViaService(rig, await packProject(withMcp));
+      await rig.mcp.connect('ci-server', { token: 'sk-ci-token-abcd1234' });
+      await rig.service.uninstall(CAP_ID);
+      check('CI39 uninstall deletes the record',
+        (await rig.mcp.record('ci-server')) === null);
+    }
+
+    section('CI40 a legacy (no-endpoint) server shows unavailable, not connectable (§3.5)');
+    {
+      const rig = serviceRig();
+      await installViaService(rig, await packProject({
+        credentials: CRED_DECL_V1,
+        mcps: [{ id: 'ci-server', displayName: 'CI Server', description: 'no endpoint' }],
+      }));
+      await rig.mcp.restore();
+      check('CI40 restore marks the legacy server unavailable with no-endpoint',
+        mcpStateOf(rig.manager, 'ci-server') === 'unavailable'
+        && rig.mcp.reason('ci-server') === 'no-endpoint');
+      const refusal = await rejectionOf(rig.mcp.connect('ci-server', { token: 'x' }));
+      check('CI40b connecting it is refused', !!refusal
+        && String(refusal.message).includes('no endpoint'));
+    }
   }
 
   console.log('---');
