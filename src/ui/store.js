@@ -2299,8 +2299,12 @@ async function prepareTask(task) {
     // task's port is already gone (onTaskEnd), so one slot is enough.
     if (compositionActive && taskEnvironment && mcpTaskPortActive()
         && Array.isArray(taskEnvironment.mcps)) {
+      const mcpOwners = new Map(taskEnvironment.capabilities
+        .flatMap((capability) => (capability.mcpIds || []).map((serverId) =>
+          [serverId, capability.displayName || capability.id])));
       activeTaskMcpPort = createProductMcpPort({
         snapshot: taskEnvironment.mcps,
+        capabilityName: (serverId) => mcpOwners.get(serverId),
         liveState: (serverId) => {
           const cap = capabilityManager.listCapabilities()
             .find((c) => Array.isArray(c.mcps) && c.mcps.some((m) => m && m.id === serverId));

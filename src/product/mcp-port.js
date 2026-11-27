@@ -33,6 +33,7 @@
 
 export function createProductMcpPort({
   snapshot,        // the task's frozen mcp snapshot entries [{ id, displayName, url?, auth?, credential? }]
+  capabilityName,  // (serverId) → the owning capability name pinned at task start
   liveState,       // (serverId) → the manager's live state or null
   record,          // (serverId) → Promise<record|null> (connection service)
   reason,          // (serverId) → the in-memory transient token or null
@@ -120,12 +121,15 @@ export function createProductMcpPort({
   // signal, Escape, session boundary) maps to action 'cancel'.
   async function elicit(req, opts) {
     const o = req && typeof req === 'object' ? req : {};
+    const server = snapshot.find((entry) => entry && entry.id === o.server?.id);
+    if (!server?.url) return { action: 'cancel' };
+    const owner = typeof capabilityName === 'function' ? capabilityName(server.id) : null;
     const decision = await approvals.request({
       kind: 'elicitation',
       action: { summary: 'An MCP server is asking for form input' },
       resource: {
         type: 'mcp-elicitation',
-        label: (o.server && (o.server.displayName || o.server.id)) || 'MCP server',
+        label: [owner, server.displayName || server.id, server.url].filter(Boolean).join(' · '),
       },
       elicitation: {
         message: typeof o.message === 'string' ? o.message : '',

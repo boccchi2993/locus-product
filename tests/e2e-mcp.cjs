@@ -307,7 +307,12 @@ function makeMcpServer(cert) {
               requestedSchema: { type: 'object',
                 properties: { workspace: { type: 'string', title: 'Workspace',
                   description: 'The workspace to search.',
-                  enum: ['ws-one', 'ws-two'] } },
+                  enum: ['ws-one', 'ws-two'] },
+                  ...(mode === 'form' ? {
+                    formats: { type: 'array', items: { type: 'string', enum: ['pdf', 'docx'] } },
+                    count: { type: 'integer', minimum: 1, maximum: 5, default: 2 },
+                    note: { type: 'string', minLength: 2, maxLength: 4, default: 'ok' },
+                  } : {}) },
                 required: ['workspace'] },
             } });
           pendingReplies.set(9001, {
@@ -689,7 +694,8 @@ async function main() {
     const cardText = await evaluate(cdp,
       '(document.querySelector(\'[data-testid="mcp-elicitation-card"]\')||{}).textContent || ""');
     check('M-A3 the card names the server (who asks)',
-      cardText.includes('Acme Documents'), cardText.slice(0, 200));
+      cardText.includes('Acme Documents') && cardText.includes('Acceptance MCP')
+      && cardText.includes(MCP_URL), cardText.slice(0, 250));
     check('M-A3 the card shows the verbatim server message',
       cardText.includes('Which workspace should be searched?'), cardText.slice(0, 200));
     check('M-A3 the field has its title, description and required mark',
@@ -704,6 +710,22 @@ async function main() {
       (await setInputValue('mcp-elicit-input-workspace', 'ws-one')) === 'set'
       && await evaluate(cdp,
         "!document.querySelector('[data-testid=\"mcp-elicit-submit\"]').disabled"));
+    check('M-A3 multi-select accepts multiple values',
+      await evaluate(cdp, `(() => {
+        const field = document.querySelector('[data-testid="mcp-elicit-input-formats"]');
+        if (!field?.multiple) return false;
+        for (const option of field.options) option.selected = true;
+        field.dispatchEvent(new Event('change', { bubbles: true }));
+        return field.selectedOptions.length === 2;
+      })()`));
+    for (const [field, value] of [['count', '1.5'], ['count', '6'], ['note', 'longer']]) {
+      await setInputValue('mcp-elicit-input-' + field, value);
+      await clickTestid('mcp-elicit-submit');
+      check('M-A3 rejects invalid ' + field + ' value ' + value,
+        !!(await testidText('mcp-elicit-error-' + field)));
+    }
+    await setInputValue('mcp-elicit-input-count', '3');
+    await setInputValue('mcp-elicit-input-note', 'good');
     check('M-A3 Submit resolves the card',
       (await clickTestid('mcp-elicit-submit')) === 'clicked');
     check('M-A3 the same tools/call finished (the task settled)',
@@ -712,6 +734,9 @@ async function main() {
     check('M-A3 the reply POST carried the SERVER request id (9001) with the answer',
       c.formReplies.some((r) => r.id === 9001 && r.action === 'accept'),
       JSON.stringify(c.formReplies));
+    check('M-A3 the server received typed field values',
+      JSON.stringify(lastFormAnswer?.formats) === '["pdf","docx"]'
+      && lastFormAnswer?.count === 3 && lastFormAnswer?.note === 'good');
     check('M-A3 exactly ONE tools/call left the client for the form interaction',
       c.toolsCall === before3 + 1, 'toolsCall=' + c.toolsCall + ' before=' + before3);
     check('M-A3 the tool result is the server result (fixed content)',

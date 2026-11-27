@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "mcp": {
+    "id": "acmedocs",
+    "displayName": "Acme Documents",
+    "description": "Search and read documents stored in Acme.",
+    "url": "https://mcp.locus-acceptance.example/mcp",
+    "auth": "bearer",
+    "credential": "ACCEPTANCE_TOKEN"
+  }
+}

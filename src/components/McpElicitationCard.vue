@@ -24,7 +24,7 @@
         <label :for="'mcp-elicit-field-' + field.name">{{ field.title }}<span v-if="field.required" class="elicitation-required"> *</span></label>
         <div v-if="field.description" class="hint">{{ field.description }}</div>
         <select v-if="field.enum && field.enum.length" :id="'mcp-elicit-field-' + field.name"
-          v-model="values[field.name]" @change="validateLocally()"
+          v-model="values[field.name]" :multiple="field.multiple" @change="validateLocally()"
           :data-testid="'mcp-elicit-input-' + field.name">
           <option v-for="opt in field.enum" :key="String(opt.value)" :value="opt.value">{{ opt.label }}</option>
         </select>
@@ -32,7 +32,7 @@
           v-model="values[field.name]" rows="3" spellcheck="false" @input="validateLocally()"
           :data-testid="'mcp-elicit-input-' + field.name"></textarea>
         <input v-else :id="'mcp-elicit-field-' + field.name" v-model="values[field.name]"
-          :type="field.inputType" :spellcheck="false" autocomplete="off" @input="validateLocally()"
+          type="text" :spellcheck="false" autocomplete="off" @input="validateLocally()"
           :data-testid="'mcp-elicit-input-' + field.name">
         <div v-if="fieldErrors[field.name]" class="hint storage-notice"
           :data-testid="'mcp-elicit-error-' + field.name">{{ fieldErrors[field.name] }}</div>
@@ -95,26 +95,31 @@ const fields = computed(() => {
   for (const name of Object.keys(props).slice(0, 32)) {
     const s = props[name];
     if (!s || typeof s !== 'object') continue;
-    const type = s.type === 'number' || s.type === 'integer' ? 'number'
-      : s.type === 'boolean' ? 'boolean' : 'string';
+    const multiple = s.type === 'array' && !!s.items;
+    const choices = multiple ? s.items : s;
+    const type = s.type || 'string';
     let enumList = null;
-    if (Array.isArray(s.enum) && s.enum.length) {
-      const names = Array.isArray(s.enumNames) && s.enumNames.length === s.enum.length
-        ? s.enumNames : null;
-      enumList = s.enum.map((v, i) => ({ value: v, label: names ? String(names[i]) : String(v) }));
-    } else if (Array.isArray(s.oneOf) && s.oneOf.length) {
-      enumList = s.oneOf
-        .filter((o) => o && typeof o === 'object' && o.const !== undefined)
-        .map((o) => ({ value: o.const, label: o.title !== undefined ? String(o.title) : String(o.const) }));
-    } else if (type === 'boolean') {
-      enumList = [{ value: true, label: 'Yes' }, { value: false, label: 'No' }];
+    if (Array.isArray(choices.enum) && choices.enum.length) {
+      const names = Array.isArray(choices.enumNames) && choices.enumNames.length === choices.enum.length
+        ? choices.enumNames : null;
+      enumList = choices.enum.map((v, i) => ({ value: v, label: names ? String(names[i]) : String(v) }));
+    } else {
+      const options = multiple ? (choices.anyOf || choices.oneOf) : choices.oneOf;
+      if (Array.isArray(options) && options.length) {
+        enumList = options
+          .filter((o) => o && typeof o === 'object' && o.const !== undefined)
+          .map((o) => ({ value: o.const, label: o.title !== undefined ? String(o.title) : String(o.const) }));
+      } else if (type === 'boolean') {
+        enumList = [{ value: true, label: 'Yes' }, { value: false, label: 'No' }];
+      }
     }
     out.push({
       name,
       title: s.title !== undefined ? String(s.title) : name,
       description: s.description !== undefined ? String(s.description) : null,
       type,
-      inputType: type === 'number' ? 'text' : 'text',
+      multiple,
+      schema: s,
       long: type === 'string' && (s.format === 'textarea' || (s.maxLength || 0) > 120),
       enum: enumList,
       required: required.includes(name),
@@ -126,57 +131,65 @@ const fields = computed(() => {
 
 // The answers, seeded from defaults (§8.3: pre-filled). Lives in a plain
 // reactive object rebuilt per request; cleared with the card.
-const values = reactive({});
-const fieldErrors = reactive({});
+const values = reactive(Object.create(null));
+const fieldErrors = reactive(Object.create(null));
 
 function seedValues() {
   for (const k of Object.keys(values)) delete values[k];
   for (const k of Object.keys(fieldErrors)) delete fieldErrors[k];
   for (const f of fields.value) {
-    values[f.name] = f.default === undefined ? (f.enum && f.enum.length ? null : '') : f.default;
+    values[f.name] = f.default !== undefined ? f.default
+      : f.multiple ? [] : f.enum ? null : '';
   }
 }
 
-// Local validation per §8.3: required, and a type/enum sanity pass.
-// `pattern` is deliberately NOT evaluated (C3 §4.6 — never a local regex).
+function checkField(field, value) {
+  const { schema, type, multiple } = field;
+  if (value == null || value === '' || (multiple && !value.length)) {
+    return field.required ? { error: 'This field is required.' } : {};
+  }
+  if (multiple && !field.enum) return { error: 'This field has no supported choices.' };
+  if (field.enum) {
+    const selected = multiple ? value : [value];
+    if (!Array.isArray(selected) || selected.some((v) => !field.enum.some((o) => o.value === v))) {
+      return { error: 'Pick from the listed options.' };
+    }
+    if (multiple && (selected.length < schema.minItems || selected.length > schema.maxItems)) {
+      return { error: 'Choose the requested number of options.' };
+    }
+    return { value };
+  }
+  if (type === 'number' || type === 'integer') {
+    const number = typeof value === 'string' && value.trim() ? Number(value) : value;
+    if (!Number.isFinite(number)) return { error: 'Enter a number.' };
+    if (type === 'integer' && !Number.isInteger(number)) return { error: 'Enter a whole number.' };
+    if (number < schema.minimum || number > schema.maximum) return { error: 'Enter a number within the specified range.' };
+    return { value: number };
+  }
+  if (typeof value !== 'string') return { error: 'Enter text.' };
+  const length = Array.from(value).length;
+  if (length < schema.minLength || length > schema.maxLength) {
+    return { error: 'Enter text within the specified length.' };
+  }
+  return { value };
+}
+
 function validateLocally() {
-  const errors = {};
-  for (const f of fields.value) {
-    const v = values[f.name];
-    if (f.required && (v === null || v === undefined || v === '')) {
-      errors[f.name] = 'This field is required.';
-      continue;
-    }
-    if (v === null || v === undefined || v === '') continue;
-    if (f.enum && f.enum.length) {
-      if (!f.enum.some((o) => o.value === v)) errors[f.name] = 'Pick one of the listed options.';
-      continue;
-    }
-    if (f.type === 'number') {
-      const n = Number(v);
-      if (!Number.isFinite(n)) errors[f.name] = 'Enter a number.';
-    } else if (f.type === 'boolean') {
-      if (typeof v !== 'boolean') errors[f.name] = 'Pick Yes or No.';
-    }
-  }
   for (const k of Object.keys(fieldErrors)) delete fieldErrors[k];
-  Object.assign(fieldErrors, errors);
-  return Object.keys(errors).length === 0;
+  const entries = [];
+  for (const field of fields.value) {
+    const result = checkField(field, values[field.name]);
+    if (result.error) fieldErrors[field.name] = result.error;
+    else if ('value' in result) entries.push([field.name, result.value]);
+  }
+  return Object.keys(fieldErrors).length ? null : Object.fromEntries(entries);
 }
 
-// Submit sends ONLY the keys the schema declared (§8.3), coerced to the
-// declared types. A failed local check keeps the card open.
 async function submit() {
   const p = pending.value;
   if (!p || submitting.value) return;
-  if (!validateLocally()) return;
-  const content = {};
-  for (const f of fields.value) {
-    const v = values[f.name];
-    if (v === undefined) continue;
-    if (f.type === 'number' && typeof v === 'string' && v.trim() !== '') content[f.name] = Number(v);
-    else content[f.name] = v;
-  }
+  const content = validateLocally();
+  if (!content) return;
   submitting.value = true;
   try {
     resolveApproval(p.id, { outcome: 'accept', content });

@@ -161,6 +161,7 @@ async function wiredChain() {
     const env = manager.buildTaskEnvironment(); // the frozen task snapshot
     taskPort = portMod.createProductMcpPort({
       snapshot: env.mcps,
+      capabilityName: (id) => env.capabilities.find((c) => c.mcpIds.includes(id))?.displayName,
       liveState: (serverId) => {
         const cap = manager.listCapabilities()
           .find((c) => Array.isArray(c.mcps) && c.mcps.some((m) => m && m.id === serverId));
@@ -339,8 +340,8 @@ function installMcpStub() {
       && approvals.pending.elicitation.message === 'Which workspace?'
       && approvals.pending.elicitation.requestedSchema.type === 'object',
       JSON.stringify(approvals.pending && approvals.pending.kind));
-    check('MW3 the card identity names the server',
-      approvals.pending.resource && approvals.pending.resource.label === 'Acme Documents',
+    check('MW3 the card identity names the capability, server and endpoint',
+      approvals.pending.resource && approvals.pending.resource.label === 'MCP Cap · Acme Documents · ' + MCP_URL,
       JSON.stringify(approvals.pending && approvals.pending.resource));
     check('MW3 the tools/call is in flight while the form is open (stream held)',
       calls.filter((c) => c.body && c.body.method === 'tools/call').length === 1);
