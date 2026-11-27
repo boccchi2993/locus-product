@@ -222,3 +222,4 @@ compatibility requires a fresh candidate result for the precise tuple.
   - [CI-NODE24 Node 20 deprecation 警告](#2026-10-30-新增条目)
 
 - 2026-11-28（UTC+8）：Product #62 head `c20279b46443edfc5e26b119df33207e4093694e`，[run 46032136707](https://github.com/boccchi2993/locus-product/actions/runs/46032136707) 首跑仅 B-PY1 失败；B-PY1b PASS、delta=0。DIAG 最后一行：`SystemError: error return without exception set`。
+- 2026-11-28（UTC+8）：同一候选唯一一次重跑通过，[attempt 2](https://github.com/boccchi2993/locus-product/actions/runs/46032136707/attempts/2)。
