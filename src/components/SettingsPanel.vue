@@ -332,7 +332,9 @@
                    capabilityMcp the whole feature is off and the servers
                    render as unavailable. All server-declared strings are
                    text interpolation only. -->
-              <div v-for="m in mcpViews[c.id] || []" :key="m.id" class="hint" :data-testid="'capability-mcp-' + c.id + '-' + m.id">
+              <!-- Server ids are globally unique (C3 phase-2 §3.4): the
+                   row testid carries the server id alone. -->
+              <div v-for="m in mcpViews[c.id] || []" :key="m.id" class="hint" :data-testid="'capability-mcp-' + m.id">
                 <div class="capability-row cred-row">
                   <span class="cred-label">{{ m.displayName }}</span>
                   <span class="mono">{{ m.url || 'no endpoint' }}</span>

@@ -418,6 +418,11 @@ export async function connectCredential(name, value, opts) {
   assertCredentialsSupported();
   const summary = await credentials.connect(name, value, opts);
   syncCapabilityProjection();
+  // C3 phase-2 §5.3: servers follow their credential — with the
+  // credential connected again, servers the user CONNECTED before (a
+  // record matching the current declaration) read connected again.
+  // Never-decided servers stay needs-connection.
+  await reconcileMcpStatesForCredential(name);
   return summary;
 }
 
@@ -426,6 +431,10 @@ export async function disconnectCredential(name) {
   assertCredentialsSupported();
   const summary = await credentials.disconnect(name);
   syncCapabilityProjection();
+  // C3 phase-2 §5.4: every server that used this credential returns to
+  // needs-connection (the record is KEPT — the reconnect entry asks only
+  // for the token again, never the endpoint).
+  await reconcileMcpStatesForCredential(name);
   return summary;
 }
 
@@ -434,7 +443,36 @@ export async function reconfirmCredential(name) {
   assertCredentialsSupported();
   const summary = await credentials.reconfirm(name);
   syncCapabilityProjection();
+  await reconcileMcpStatesForCredential(name);
   return summary;
+}
+
+// The credential→server reconciliation (§5.3): every declared server
+// bound to this credential reads connected exactly when its durable
+// record still matches the declaration AND the credential is connected;
+// everything else reads needs-connection. The harness state write goes
+// through the SAME manager entry as every other state change.
+async function reconcileMcpStatesForCredential(name) {
+  if (!mcpConnections || !capabilityManager) return;
+  try {
+    const credState = credentialSummary(name).state;
+    for (const cap of capabilityManager.listCapabilities()) {
+      for (const m of (cap.mcps || [])) {
+        if (!m || m.url === undefined || m.credential !== name) continue;
+        let want = 'needs-connection';
+        if (credState === 'connected') {
+          const rec = await mcpConnections.record(m.id).catch(() => null);
+          const matches = !!rec && rec.url === m.url
+            && rec.auth === m.auth && rec.credential === m.credential;
+          if (matches) want = 'connected';
+        }
+        if (m.state !== want) capabilityManager.setMcpState(m.id, want);
+      }
+    }
+    syncCapabilityProjection();
+  } catch (e) {
+    // a reconciliation failure never breaks the credential action itself
+  }
 }
 
 // Read-only projection ({ state, hasValue, last4 }); never throws for an

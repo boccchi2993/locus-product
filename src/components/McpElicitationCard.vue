@@ -24,25 +24,30 @@
         <label :for="'mcp-elicit-field-' + field.name">{{ field.title }}<span v-if="field.required" class="elicitation-required"> *</span></label>
         <div v-if="field.description" class="hint">{{ field.description }}</div>
         <select v-if="field.enum && field.enum.length" :id="'mcp-elicit-field-' + field.name"
-          v-model="values[field.name]" :data-testid="'mcp-elicit-input-' + field.name">
+          v-model="values[field.name]" @change="validateLocally()"
+          :data-testid="'mcp-elicit-input-' + field.name">
           <option v-for="opt in field.enum" :key="String(opt.value)" :value="opt.value">{{ opt.label }}</option>
         </select>
         <textarea v-else-if="field.type === 'string' && field.long" :id="'mcp-elicit-field-' + field.name"
-          v-model="values[field.name]" rows="3" spellcheck="false"
+          v-model="values[field.name]" rows="3" spellcheck="false" @input="validateLocally()"
           :data-testid="'mcp-elicit-input-' + field.name"></textarea>
         <input v-else :id="'mcp-elicit-field-' + field.name" v-model="values[field.name]"
-          :type="field.inputType" :spellcheck="false" autocomplete="off"
+          :type="field.inputType" :spellcheck="false" autocomplete="off" @input="validateLocally()"
           :data-testid="'mcp-elicit-input-' + field.name">
         <div v-if="fieldErrors[field.name]" class="hint storage-notice"
           :data-testid="'mcp-elicit-error-' + field.name">{{ fieldErrors[field.name] }}</div>
       </div>
     </div>
     <div class="approval-actions">
+      <!-- Disabled only while a resolution is in flight: the LOCAL
+           validation blocks an invalid submit inside submit() (§8.3), so
+           a stale field error must never keep the button pressed shut
+           after the user fixed the value. -->
       <button type="button" class="approval-btn deny" :disabled="submitting"
         data-testid="mcp-elicit-decline" @click="decline">Decline</button>
       <button type="button" class="approval-btn secondary" :disabled="submitting"
         data-testid="mcp-elicit-cancel" @click="cancel">Cancel</button>
-      <button type="button" class="approval-btn primary" :disabled="submitting || !!Object.keys(fieldErrors).length"
+      <button type="button" class="approval-btn primary" :disabled="submitting"
         data-testid="mcp-elicit-submit" @click="submit">Submit</button>
     </div>
     <div class="approval-note">Your answer goes only to this server; it is not kept in the conversation.</div>

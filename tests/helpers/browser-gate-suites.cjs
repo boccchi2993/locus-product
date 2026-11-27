@@ -66,6 +66,15 @@ const SUITES = [
   // REAL fixture .locus (Cancel, nothing installed), the 本次生成的文件
   // row (sandbox dedupe) and no horizontal page scroll at 390×844.
   'e2e-render.cjs',
+  // C3 phase-2 MCP browser e2e: the REAL chain over the REAL built app —
+  // the import dialog's endpoint list and connect step, mcp servers/tools/
+  // describe/call against a strict counting HTTPS MCP stand-in (direct,
+  // self-signed, loopback-mapped public-DNS-shape host), a mid-stream form
+  // elicitation answered on the REAL McpElicitationCard, reconnect after a
+  // credential disconnect, the §5.5 transient unreachable note, decline /
+  // cancel / stream-drop / rejected-reply terminations, the task-end
+  // DELETE and the token+answer leak sweep.
+  'e2e-mcp.cjs',
 ];
 
 // Resolve requested suite names against the registry. Returns the run list
